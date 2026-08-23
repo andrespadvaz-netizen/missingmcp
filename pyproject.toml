@@ -20,6 +20,16 @@ dependencies = [
     "posthog>=7.27,<8",
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
+    # Force-pin below the garmin_mcp worker's ceiling (Taxuspt/garmin_mcp pins
+    # mcp<2 itself — 2.x renamed mcp.server.fastmcp to mcp.server.mcpserver,
+    # breaking its import: "ModuleNotFoundError: No module named
+    # 'mcp.server.fastmcp'"). Without this explicit pin here, whatever pulls a
+    # newer mcp transitively (the telemetry deps above, as of the
+    # feature/posthog-adapter merge on 2026-08-22) wins dependency resolution
+    # and the garmin-mcp worker install step no longer gets the version it
+    # needs. Confirmed root cause of the 2026-08-22 22:24 CST outage — see
+    # Railway deploy 077c5118 build log and worker-start-failed traceback.
+    "mcp>=1.28.1,<2",
 ]
 
 [project.urls]
