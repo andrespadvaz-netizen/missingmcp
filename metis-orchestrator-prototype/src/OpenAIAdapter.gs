@@ -48,14 +48,20 @@ var OpenAIAdapter = (function () {
     }
 
     completeWithTools(request, toolContract) {
+      // Antes de gastar: los techos deben existir. Vale para toda llamada real.
+      Config.assertBudgetsConfigured();
       var body = this.buildRequest(request, toolContract);
+      // La credencial se resuelve FUERA del try: una credencial ausente es un
+      // error de configuración, no un fallo del proveedor, y enmascararla como
+      // PROVIDER_ERROR manda al operador a diagnosticar el sitio equivocado.
+      var apiKey = Config.secret('OPENAI_API_KEY');
       var response;
       try {
         response = UrlFetchApp.fetch(Config.PROVIDERS.OPENAI.endpoint, {
           method: 'post',
           contentType: 'application/json',
           muteHttpExceptions: true,
-          headers: { 'Authorization': 'Bearer ' + Config.secret('OPENAI_API_KEY') },
+          headers: { 'Authorization': 'Bearer ' + apiKey },
           payload: JSON.stringify(body)
         });
       } catch (e) {

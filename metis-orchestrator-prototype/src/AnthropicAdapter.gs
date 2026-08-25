@@ -44,7 +44,12 @@ var AnthropicAdapter = (function () {
     }
 
     completeWithTools(request, toolContract) {
+      // Antes de gastar: los techos deben existir. Vale para toda llamada real.
+      Config.assertBudgetsConfigured();
       var body = this.buildRequest(request, toolContract);
+      // Ver OpenAIAdapter: la credencial se resuelve fuera del try para no
+      // enmascarar un error de configuración como fallo de proveedor.
+      var apiKey = Config.secret('ANTHROPIC_API_KEY');
       var response;
       try {
         response = UrlFetchApp.fetch(Config.PROVIDERS.ANTHROPIC.endpoint, {
@@ -52,7 +57,7 @@ var AnthropicAdapter = (function () {
           contentType: 'application/json',
           muteHttpExceptions: true,
           headers: {
-            'x-api-key': Config.secret('ANTHROPIC_API_KEY'),
+            'x-api-key': apiKey,
             'anthropic-version': Config.PROVIDERS.ANTHROPIC.version_header
           },
           payload: JSON.stringify(body)

@@ -3,6 +3,9 @@
 Cubre los nueve puntos de la spec §21. El código está en `src/` y `tests/`; la
 instalación y la configuración, en `README.md`.
 
+> **Ronda 3 — endurecimiento posterior.** Cinco correcciones puntuales sobre la
+> ronda 2, resumidas en §12. Ninguna amplía arquitectura ni cambia runtime.
+>
 > **Ronda 2 — respuesta a la auditoría.** Los cinco primeros puntos del informe
 > están implementados; el sexto está bloqueado y se explica en §9. Resumen del
 > cambio en §10, con lo que la auditoría descubrió del registro real.
@@ -111,11 +114,15 @@ Script.
   PASS  sin partición declarada no se lee la fuente  (2 asserts)
   PASS  el contenido de otro contexto es INALCANZABLE, no filtrado  (6 asserts)
   PASS  ninguna lectura ocurre sin contexto resuelto  (1 asserts)
+  PASS  el contexto del resultado es el resuelto, no el nombre del proyecto  (9 asserts)
+  PASS  el modelo sólo ve lo admitido, nunca lo descartado  (5 asserts)
 
 -- Vigencia
   PASS  la relación manda; el Estado vacío usa el default declarado  (6 asserts)
   PASS  Estado y relación en contradicción no se resuelven por juicio propio  (6 asserts)
   PASS  la cadena se recorre por `Sustituida por` hasta la terminal  (7 asserts)
+  PASS  la cadena cierra aunque el eslabón terminal esté en la segunda página  (8 asserts)
+  PASS  la paginación no trunca en silencio  (4 asserts)
 
 -- Router
   PASS  LOCAL por default  (4 asserts)
@@ -179,8 +186,11 @@ Script.
   PASS  sin precio configurado el costo es desconocido, no cero  (3 asserts)
   PASS  un costo desconocido detiene la corrida  (4 asserts)
   PASS  los límites se pueden externalizar  (4 asserts)
+  PASS  los techos monetarios no tienen default en el código  (8 asserts)
+  PASS  ningún proveedor real acepta llamada sin techos declarados  (3 asserts)
+  PASS  un techo sin declarar no se compara contra el gasto  (2 asserts)
 
-Total: 52 | PASS: 52 | FAIL: 0 | asserts: 236 | nivel: LEVEL_0
+Total: 59 | PASS: 59 | FAIL: 0 | asserts: 276 | nivel: LEVEL_0
 ```
 
 Las siete suites exigidas por §17 están cubiertas con sus assertions nombradas,
@@ -250,7 +260,7 @@ El detalle assert por assert se obtiene con
   PASS  G5  SimulatedWriteAdapter no toca ninguna superficie externa
   PASS  G6  appsscript.json declara sólo scopes de lectura
   PASS  G7  sin literales que parezcan secretos
-  PASS  G8  sin tablas de precio en el código
+  PASS  G8  sin precios ni techos de gasto en el código
   PASS  G9  todo adaptador de lectura exige partición
 
 Archivos analizados: 21 en src/, 10 en tests/
@@ -262,7 +272,7 @@ RESULTADO: PASS
 | Condición | Estado |
 | --- | --- |
 | los 10 casos de aceptación pasan | ✅ 10/10, 118 asserts |
-| todos los tests unitarios pasan | ✅ 52/52, 236 asserts |
+| todos los tests unitarios pasan | ✅ 59/59, 276 asserts |
 | cero escrituras externas durante ejecución y tests | ✅ verificado por guards + bloqueo total de superficies externas en la ejecución de los tests |
 | cero contaminación entre contextos | ✅ AC-04, invariante 2, y **partición en origen**: sin partición declarada no se lee, y un objeto de otro contexto es inalcanzable (guard G9 + suite Partición) |
 | cero handoff manual dentro de una corrida | ✅ AC-02: el handoff lo emite `HandoffBuilder` desde el orquestador |
@@ -633,6 +643,49 @@ en Metis**, independiente de este prototipo. Vale la pena revisarla.
 
 ---
 
+## 12. Ronda 3 — endurecimiento
+
+Cinco correcciones pedidas tras revisar la ronda 2. Ninguna amplía arquitectura,
+cambia runtime ni activa nada.
+
+| # | Cambio | Por qué importaba | Evidencia |
+| --- | --- | --- | --- |
+| 1 | `AsanaReadAdapter` asigna el **contexto canónico ya resuelto**, no derivado del nombre del proyecto | un proyecto llamado "Metis — Sistema Operativo" derivaba a `METIS___SISTEMA_OPERATIVO`, no casaba con `METIS`, y el filtro de contaminación **descartaba en silencio una tarea legítima** | suite Partición, 9 asserts |
+| 2 | `notion.decisions` pagina completo (`has_more`/`next_cursor`) con tope defensivo | un eslabón terminal en la segunda página dejaba la cadena abierta y producía una **abstención falsa** | suite Vigencia, 12 asserts |
+| 3 | Sin default para `MAX_RUN_BUDGET_USD`, `MAX_DAILY_BUDGET_USD`, `MAX_MONTHLY_BUDGET_USD`; exigidos antes de toda llamada real | un default plausible se vuelve el presupuesto de todos sin que nadie lo decida | guard G8 ampliado, suite Presupuesto |
+| 4 | `smokeTestLevel1()` incluye `calendar.read` con ventana acotada (7 días por defecto, `calendar_window_days`) | Calendar era la única fuente particionada sin ejercitar | `Main.gs` |
+| 5 | El smoke test valida `session.documents`, no el array crudo del adaptador | contar lo devuelto por la fuente daría por buena una lectura que la sesión rechazó entera | `Main.gs` |
+
+El tope de paginación **no trunca en silencio**: alcanzarlo lanza. Devolver un
+conjunto truncado como si fuera completo es exactamente el modo de fallo
+"cobertura incompleta presentada como exhaustiva" que la spec §16.10 prohíbe.
+
+### Dos defectos adicionales que salieron al implementar
+
+- **El resultado de la herramienta llevaba documentos descartados.** `_recordDocs`
+  excluía de la sesión los documentos de otro contexto, pero `invoke` devolvía el
+  array **crudo** al modelo: la sustancia ajena se descartaba de la evidencia y
+  se colaba igual al prompt. Era justo la contaminación que el descarte pretendía
+  evitar. Ahora lo devuelto son exactamente los documentos admitidos, y el
+  resultado expone `returned_by_source` para que la diferencia sea auditable.
+  El smoke test usa esa diferencia como criterio de fallo.
+- **Una credencial ausente salía enmascarada como fallo de proveedor.**
+  `Config.secret(...)` se resolvía dentro del `try` que convierte cualquier
+  excepción en `PROVIDER_ERROR`, mandando al operador a diagnosticar la API en
+  vez de su propia configuración. La credencial se resuelve ahora fuera del `try`.
+
+Los cuatro tests nuevos están **verificados en negativo**: revirtiendo los tres
+arreglos de código (contexto de Asana, documentos admitidos, paginación) fallan
+los cuatro y el proceso sale con código 1.
+
+### Nota sobre los fixtures
+
+El backend de Asana de Nivel 0 pasa ahora por `AsanaReadAdapter.normalizeTask`,
+la misma función que usa el backend real. Si el fixture normalizara por su
+cuenta, el test del punto 1 no probaría el código que se envía.
+
+---
+
 ## 11. Gate posterior
 
 Completar este prototipo **no autoriza Nivel 3 ni producción**. El resultado
@@ -641,7 +694,10 @@ vuelve a auditoría cruzada. Tras la ronda 2, lo que más merece ser atacado es:
 - **L1 / §9** — nada de lo que toca fuentes reales se ha ejecutado todavía. Es
   el siguiente paso y depende del operador.
 - **L14** — la partición es tan buena como su declaración; un id mal puesto
-  produce contaminación silenciosa y el código no puede detectarlo.
+  produce contaminación silenciosa y el código no puede detectarlo por sí solo.
+  El smoke test de Nivel 1 ahora **falla** si alguna fuente devuelve algo de otro
+  contexto: es la única señal automática disponible, y sólo aparece al ejecutar
+  contra fuentes reales.
 - **L13** — no hay detección de deriva de esquema en Notion; un renombre
   degrada la lectura de vigencia en silencio.
 - **L6** — el registro anti-replay hereda las carencias de `PropertiesService`,

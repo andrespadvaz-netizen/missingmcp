@@ -15,7 +15,8 @@
  *   G6  `appsscript.json` declara exactamente los scopes de sólo lectura, sin
  *       scope de escritura ni de `script.scriptapp` (que permitiría triggers);
  *   G7  no hay literales que parezcan secretos en el código ni en los fixtures;
- *   G8  no hay tablas de precio en el código: el costo se lee de configuración;
+ *   G8  no hay tablas de precio NI techos de gasto en el código: ambos se leen
+ *       de configuración;
  *   G9  todo adaptador de lectura exige partición declarada antes de leer.
  *
  * El análisis se hace sobre el código con COMENTARIOS Y LITERALES DE CADENA
@@ -204,7 +205,7 @@ guard('G7', 'sin literales que parezcan secretos', () => {
 });
 
 // -------------------------------------------------------------------- G8
-guard('G8', 'sin tablas de precio en el código', () => {
+guard('G8', 'sin precios ni techos de gasto en el código', () => {
   const fails = [];
   for (const f of files) {
     if (/PRICE_PER_1K|PRICE_TABLE/.test(f.code)) {
@@ -221,6 +222,24 @@ guard('G8', 'sin tablas de precio en el código', () => {
     if (!f) { fails.push('falta ' + name); continue; }
     if (f.code.indexOf('Config.priceFor') === -1) {
       fails.push(name + ': no lee el precio de la configuración');
+    }
+    // Antes de gastar, los techos deben existir.
+    if (f.code.indexOf('Config.assertBudgetsConfigured') === -1) {
+      fails.push(name + ': no exige techos de gasto declarados antes de llamar');
+    }
+  }
+
+  // Cuánto está dispuesto a gastar el operador no es una decisión del código:
+  // un default plausible se vuelve el presupuesto de todos sin que nadie lo
+  // haya decidido.
+  const config = files.filter((x) => x.name === 'Config.gs')[0];
+  if (config) {
+    const defaults = config.code.match(/DEFAULT_LIMITS\s*=\s*\{[\s\S]*?\}/);
+    if (defaults && /_USD\s*:\s*[0-9]/.test(defaults[0])) {
+      fails.push('Config.gs: techo monetario con default en DEFAULT_LIMITS');
+    }
+    if (config.code.indexOf('REQUIRED_BUDGET_KEYS') === -1) {
+      fails.push('Config.gs: no declara los techos monetarios como exigidos');
     }
   }
   return fails;

@@ -315,10 +315,16 @@ var Ledger = (function () {
 
   /** Parada dura al alcanzar cualquier techo agregado (spec §13). */
   function assertAggregateBudget() {
-    if (spend('DAILY') >= Config.limits().MAX_DAILY_BUDGET_USD) {
+    var limits = Config.limits();
+    // Un techo sin declarar no se compara contra nada. No es permisivo: los
+    // adaptadores reales exigen `Config.assertBudgetsConfigured()` antes de
+    // llamar, así que sin techo no llega a haber gasto que contar.
+    if (typeof limits.MAX_DAILY_BUDGET_USD === 'number' &&
+        spend('DAILY') >= limits.MAX_DAILY_BUDGET_USD) {
       throw Errors.limitExceeded('MAX_DAILY_BUDGET_USD', spend('DAILY'));
     }
-    if (spend('MONTHLY') >= Config.limits().MAX_MONTHLY_BUDGET_USD) {
+    if (typeof limits.MAX_MONTHLY_BUDGET_USD === 'number' &&
+        spend('MONTHLY') >= limits.MAX_MONTHLY_BUDGET_USD) {
       throw Errors.limitExceeded('MAX_MONTHLY_BUDGET_USD', spend('MONTHLY'));
     }
     return true;

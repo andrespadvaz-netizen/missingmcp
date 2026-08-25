@@ -148,18 +148,26 @@ var Config = (function () {
     // veredicto). Cuatro intervenciones, sin bucles adicionales.
     MAX_MODEL_INTERVENTIONS: 4,
     MAX_TOOL_CALLS: 16,
-    MAX_READ_RETRIES: 2,
-    MAX_RUN_BUDGET_USD: 0.50,
-    MAX_DAILY_BUDGET_USD: 5.00,
-    MAX_MONTHLY_BUDGET_USD: 25.00
+    MAX_READ_RETRIES: 2
   };
+
+  /**
+   * Los techos monetarios NO tienen default. Cuánto está dispuesto a gastar el
+   * operador no es una decisión que pueda tomar el código: un default plausible
+   * se convierte en el presupuesto real de todo el mundo sin que nadie lo haya
+   * decidido. Se declaran en `METIS_LIMITS`; sin ellos, `limits()` los devuelve
+   * `null` y ningún proveedor real acepta una llamada.
+   */
+  var REQUIRED_BUDGET_KEYS = ['MAX_RUN_BUDGET_USD', 'MAX_DAILY_BUDGET_USD', 'MAX_MONTHLY_BUDGET_USD'];
 
   var _limitsOverride = null;
 
-  /** Límites efectivos: defaults + override externo. */
+  /** Límites efectivos: defaults de política + techos monetarios externos. */
   function limits() {
     var effective = {};
     Object.keys(DEFAULT_LIMITS).forEach(function (k) { effective[k] = DEFAULT_LIMITS[k]; });
+    REQUIRED_BUDGET_KEYS.forEach(function (k) { effective[k] = null; });
+
     var override = _limitsOverride !== null ? _limitsOverride : _readJson('LIMITS');
     if (override) {
       Object.keys(override).forEach(function (k) {
@@ -169,6 +177,23 @@ var Config = (function () {
       });
     }
     return effective;
+  }
+
+  /** Techos monetarios que faltan por declarar. */
+  function missingBudgets() {
+    var effective = limits();
+    return REQUIRED_BUDGET_KEYS.filter(function (k) { return typeof effective[k] !== 'number'; });
+  }
+
+  /**
+   * Puerta previa a CUALQUIER llamada a un proveedor real. Sin techo declarado
+   * no se gasta: no hay contra qué comparar el gasto acumulado, y un límite que
+   * no existe no puede detener nada.
+   */
+  function assertBudgetsConfigured() {
+    var missing = missingBudgets();
+    if (missing.length) { throw Errors.budgetUnconfigured(missing); }
+    return true;
   }
 
   /** Handoff: TTL corto; replay y caducidad se rechazan visiblemente (§15). */
@@ -334,7 +359,10 @@ var Config = (function () {
     PROTECTED_DATE_FIELDS: PROTECTED_DATE_FIELDS,
     FORBIDDEN_EFFECTS: FORBIDDEN_EFFECTS,
     DEFAULT_LIMITS: DEFAULT_LIMITS,
+    REQUIRED_BUDGET_KEYS: REQUIRED_BUDGET_KEYS,
     limits: limits,
+    missingBudgets: missingBudgets,
+    assertBudgetsConfigured: assertBudgetsConfigured,
     HANDOFF_TTL_MS: HANDOFF_TTL_MS,
     LEDGER: LEDGER,
     SOURCE_COMPETENCE: SOURCE_COMPETENCE,

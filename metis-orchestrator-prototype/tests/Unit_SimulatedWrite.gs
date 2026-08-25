@@ -234,4 +234,52 @@
       'lo no sobreescrito conserva su default');
   });
 
+  TestRunner.unit('Presupuesto', 'los techos monetarios no tienen default en el código', function (t) {
+    Config._setLimits(null);
+    var sinTechos = Config.limits();
+    Config.REQUIRED_BUDGET_KEYS.forEach(function (k) {
+      t.equals(sinTechos[k], null, k + ' no tiene default: es del entorno');
+      t.equals(Config.DEFAULT_LIMITS[k], undefined, k + ' no aparece en DEFAULT_LIMITS');
+    });
+    t.equals(Config.missingBudgets().length, 3, 'los tres faltan mientras no se declaren');
+    t.throwsCode(Errors.CODES.BUDGET_UNCONFIGURED, function () {
+      Config.assertBudgetsConfigured();
+    }, 'la puerta previa al gasto se cierra');
+
+    // Lo no monetario sí conserva su default de política.
+    t.equals(sinTechos.MAX_TOOL_CALLS, Config.DEFAULT_LIMITS.MAX_TOOL_CALLS, 'los límites de política siguen');
+  });
+
+  TestRunner.unit('Presupuesto', 'ningún proveedor real acepta llamada sin techos declarados', function (t) {
+    Config._setLimits(null);
+    Config._setRunLevel(Config.LEVELS.LEVEL_2);
+    var peticion = { system: 'x', prompt: 'y' };
+
+    // Falla ANTES de tocar la red: el arnés bloquea UrlFetchApp, así que un
+    // código distinto de BUDGET_UNCONFIGURED probaría que la puerta llegó tarde.
+    t.throwsCode(Errors.CODES.BUDGET_UNCONFIGURED, function () {
+      OpenAIAdapter.create().completeWithTools(peticion, null);
+    }, 'OpenAI se detiene antes de gastar');
+    t.throwsCode(Errors.CODES.BUDGET_UNCONFIGURED, function () {
+      AnthropicAdapter.create().completeWithTools(peticion, null);
+    }, 'Anthropic también');
+
+    // Con techos declarados, la puerta se abre y falla más adelante, por
+    // credencial ausente: prueba que el orden de las guardas es el correcto.
+    Config._setLimits(Fixtures.TEST_BUDGETS);
+    t.throwsCode(Errors.CODES.MISSING_CREDENTIAL, function () {
+      OpenAIAdapter.create().completeWithTools(peticion, null);
+    }, 'con techos declarados, la siguiente guarda es la credencial');
+  });
+
+  TestRunner.unit('Presupuesto', 'un techo sin declarar no se compara contra el gasto', function (t) {
+    Config._setLimits(null);
+    Ledger.addSpend(9999);
+    t.ok(Ledger.assertAggregateBudget(), 'sin techo no hay comparación posible');
+    Config._setLimits(Fixtures.TEST_BUDGETS);
+    t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
+      Ledger.assertAggregateBudget();
+    }, 'declarado el techo, el gasto acumulado lo supera y detiene');
+  });
+
 })();

@@ -98,6 +98,60 @@
     }, 'con dos candidatos no se toca ninguna fuente');
   });
 
+  TestRunner.unit('Partición', 'el contexto del resultado es el resuelto, no el nombre del proyecto', function (t) {
+    var session = sessionFor('METIS');
+
+    // El proyecto real se llama "Metis — Sistema Operativo": no coincide con la
+    // clave de contexto `METIS`. Derivar el contexto de ese nombre producía
+    // "METIS___SISTEMA_OPERATIVO" y el filtro de contaminación descartaba la
+    // tarea en silencio.
+    var doc = Fixtures.CORPUS.filter(function (d) { return d.id === 'met-task-12'; })[0];
+    t.equals(doc.project_name, 'Metis — Sistema Operativo', 'el fixture usa el nombre real del proyecto');
+    t.notOk(ContextResolver.normalize(doc.project_name).toUpperCase().replace(/[^A-Z_]/g, '_') === 'METIS',
+      'derivar el contexto de ese nombre NO da METIS');
+
+    var result = ToolBroker.invoke(session, 'asana.search', { query: 'registrar' });
+    t.equals(result.documents.length, 1, 'la tarea se devuelve');
+    t.equals(result.documents[0].id, 'met-task-12', 'y es la esperada');
+    t.equals(result.documents[0].context, 'METIS', 'lleva el contexto canónico ya resuelto');
+
+    // Lo que importa: entra de verdad a la sesión, no se descarta.
+    var enSesion = session.documents.filter(function (d) { return d.id === 'met-task-12'; });
+    t.equals(enSesion.length, 1, 'la tarea ENTRA a la sesión METIS');
+    t.equals(session.risk_signals.filter(function (r) {
+      return r.signal === 'CROSS_CONTEXT_RESULT_DISCARDED';
+    }).length, 0, 'y no genera ningún descarte por contexto');
+
+    // La tarea ajena sigue siendo inalcanzable.
+    var ajena = ToolBroker.invoke(session, 'asana.search', { query: 'plan comercial' });
+    t.equals(ajena.documents.length, 0, 'una tarea de ANDREA no aparece en una búsqueda METIS');
+    t.throwsCode(Errors.CODES.PARTITION_VIOLATION, function () {
+      ToolBroker.invoke(session, 'asana.get', { id: 'and-task-77' });
+    }, 'y pedirla por id sigue siendo violación de partición');
+  });
+
+  TestRunner.unit('Partición', 'el modelo sólo ve lo admitido, nunca lo descartado', function (t) {
+    var session = sessionFor('METIS');
+    // Una fuente que devuelve algo de otro contexto pese a la partición.
+    AsanaReadAdapter.useBackend({
+      search: function () {
+        return [{ source: 'ASANA', id: 'intruso', title: 'Tarea de otro contexto',
+                  context: 'ANDREA', kind: 'TASK', epistemic_status: 'VERIFIED',
+                  snippet: 'sustancia ajena' }];
+      },
+      get: function () { throw Errors.readFailed('ASANA', 'no aplica'); }
+    });
+
+    var result = ToolBroker.invoke(session, 'asana.search', { query: 'x' });
+    t.equals(result.returned_by_source, 1, 'la fuente devolvió un documento');
+    t.equals(result.documents.length, 0, 'pero el resultado que ve el modelo va vacío');
+    t.equals(JSON.stringify(result).indexOf('sustancia ajena'), -1,
+      'la sustancia ajena no se cuela al resultado de la herramienta');
+    t.equals(session.documents.length, 0, 'ni entra a la sesión');
+    t.equals(session.risk_signals[0].signal, 'CROSS_CONTEXT_RESULT_DISCARDED', 'y queda la señal de riesgo');
+    Fixtures.installBackends();
+  });
+
   // ------------------------------------------------- vigencia (registro real)
   TestRunner.unit('Vigencia', 'la relación manda; el Estado vacío usa el default declarado', function (t) {
     var vigente = RetrievalPolicy.decisionStatus({ id: 'a', estado: 'vigente', superseded_by: [] });
@@ -152,6 +206,60 @@
       [{ id: 'x', estado: null, superseded_by: ['y'] }, { id: 'y', estado: null, superseded_by: ['x'] }], 'x');
     t.equals(ciclo.closed, false, 'un ciclo tampoco cierra');
     t.equals(ciclo.reason, 'CICLO_EN_LA_CADENA', 'se detecta como ciclo');
+  });
+
+  TestRunner.unit('Vigencia', 'la cadena cierra aunque el eslabón terminal esté en la segunda página', function (t) {
+    // Páginas tal y como las devuelve la API de Notion: `has_more` + `next_cursor`.
+    var paginas = {
+      'INICIO': {
+        results: [{ id: 'd1', superseded_by: ['d2'], estado: 'modificada' }],
+        has_more: true, next_cursor: 'cursor-p2'
+      },
+      'cursor-p2': {
+        // El terminal vive AQUÍ. Quedarse en la primera página dejaría la
+        // cadena abierta y produciría una abstención falsa.
+        results: [{ id: 'd2', superseded_by: [], estado: null }],
+        has_more: false, next_cursor: null
+      }
+    };
+    var pedidas = [];
+    var todas = NotionReadAdapter.collectPages(function (cursor) {
+      pedidas.push(cursor);
+      return paginas[cursor === null ? 'INICIO' : cursor];
+    });
+
+    t.equals(pedidas.length, 2, 'se piden las dos páginas');
+    t.equals(pedidas[0], null, 'la primera sin cursor');
+    t.equals(pedidas[1], 'cursor-p2', 'la segunda con el next_cursor devuelto');
+    t.equals(todas.length, 2, 'se acumulan los resultados de ambas');
+
+    var cadena = RetrievalPolicy.closeCurrencyChain(todas, 'd1');
+    t.ok(cadena.closed, 'la cadena CIERRA con el terminal de la segunda página');
+    t.equals(cadena.terminal, 'd2', 'y el terminal es el correcto');
+
+    // Contraprueba: con sólo la primera página, la cadena no cerraría.
+    var soloPrimera = RetrievalPolicy.closeCurrencyChain(paginas.INICIO.results, 'd1');
+    t.equals(soloPrimera.closed, false, 'sin paginar, la cadena quedaría abierta');
+    t.equals(soloPrimera.missing, 'd2', 'y culparía a un eslabón que sí existe');
+  });
+
+  TestRunner.unit('Vigencia', 'la paginación no trunca en silencio', function (t) {
+    var infinita = function () {
+      return { results: [{ id: 'x' }], has_more: true, next_cursor: 'c-' + Schemas.uuid() };
+    };
+    t.throwsCode(Errors.CODES.READ_FAILED, function () {
+      NotionReadAdapter.collectPages(infinita, 3);
+    }, 'alcanzar el tope de páginas lanza en vez de devolver un conjunto truncado');
+
+    var bucle = function () { return { results: [], has_more: true, next_cursor: 'mismo' }; };
+    t.throwsCode(Errors.CODES.READ_FAILED, function () {
+      NotionReadAdapter.collectPages(bucle, 10);
+    }, 'un cursor repetido se detecta como bucle');
+
+    t.equals(NotionReadAdapter.collectPages(function () {
+      return { results: [1, 2], has_more: false, next_cursor: null };
+    }).length, 2, 'una sola página se devuelve tal cual');
+    t.equals(typeof NotionReadAdapter.MAX_PAGES, 'number', 'hay un tope defensivo declarado');
   });
 
 })();

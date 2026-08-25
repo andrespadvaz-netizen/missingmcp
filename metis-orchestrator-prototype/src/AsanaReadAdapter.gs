@@ -63,7 +63,7 @@ var AsanaReadAdapter = (function () {
             '/tasks?limit=100&opt_fields=' + FIELDS);
           var data = res.data || [];
           for (var i = 0; i < data.length && out.length < limit; i++) {
-            var task = _normalizeTask(data[i], null);
+            var task = _normalizeTask(data[i], null, options ? options.context : null);
             if (!needle || ContextResolver.normalize(task.title || '').indexOf(needle) !== -1) {
               out.push(task);
             }
@@ -78,7 +78,7 @@ var AsanaReadAdapter = (function () {
         var res = _request('/tasks/' + encodeURIComponent(gid) + '?opt_fields=' + FIELDS);
         var data = res.data || {};
         _assertInPartition(data, partition, options);
-        return _normalizeTask(data, data.notes ? data.notes : null);
+        return _normalizeTask(data, data.notes ? data.notes : null, options ? options.context : null);
       }
     };
   }
@@ -93,14 +93,23 @@ var AsanaReadAdapter = (function () {
       (options && options.context) ? options.context : null);
   }
 
-  function _normalizeTask(task, snippet) {
-    var projects = task.projects || [];
-    var projectName = projects.length ? projects[0].name : null;
+  /**
+   * El contexto del resultado es el CONTEXTO CANÓNICO YA RESUELTO de la corrida,
+   * no una derivación del nombre del proyecto.
+   *
+   * Derivarlo del nombre era un defecto real: un proyecto llamado
+   * "Metis — Sistema Operativo" se normalizaba a algo que no coincide con la
+   * clave de contexto `METIS`, y el filtro de contaminación del ToolBroker
+   * descartaba en silencio una tarea perfectamente legítima. La pertenencia ya
+   * está demostrada antes de llegar aquí: la tarea vino de un proyecto declarado
+   * en la partición del contexto, o `_assertInPartition` la rechazó.
+   */
+  function _normalizeTask(task, snippet, context) {
     return {
       source: 'ASANA',
       id: task.gid ? String(task.gid) : null,
       title: task.name ? task.name : null,
-      context: projectName ? ContextResolver.normalize(projectName).toUpperCase().replace(/[^A-Z_]/g, '_') : null,
+      context: context === undefined ? null : context,
       kind: 'TASK',
       epistemic_status: RetrievalPolicy.epistemicFor('TASK'),
       snippet: snippet === undefined ? null : snippet,
@@ -118,6 +127,9 @@ var AsanaReadAdapter = (function () {
   return {
     useBackend: useBackend,
     resetBackend: resetBackend,
+    // Expuesta para que el backend de Nivel 0 use la MISMA normalización que la
+    // real: si el fixture normalizara por su cuenta, el test no probaría nada.
+    normalizeTask: _normalizeTask,
     search: search,
     get: get
   };

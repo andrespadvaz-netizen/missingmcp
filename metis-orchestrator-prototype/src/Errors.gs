@@ -30,6 +30,7 @@ var Errors = (function () {
     SOURCE_PARTITION_UNDECLARED: 'SOURCE_PARTITION_UNDECLARED',
     PARTITION_VIOLATION: 'PARTITION_VIOLATION',
     PRICE_UNKNOWN: 'PRICE_UNKNOWN',
+    BUDGET_UNCONFIGURED: 'BUDGET_UNCONFIGURED',
     CURRENCY_CONFLICT: 'CURRENCY_CONFLICT'
   };
 
@@ -94,6 +95,14 @@ var Errors = (function () {
     return make(CODES.PARTITION_VIOLATION,
       'Objeto fuera de la partición del contexto ' + context,
       { object_id: objectId, context: context });
+  }
+
+  /** Sin techo monetario declarado no se llama a ningún proveedor real. */
+  function budgetUnconfigured(missing) {
+    return make(CODES.BUDGET_UNCONFIGURED,
+      'Techos de gasto sin declarar: ' + missing.join(', ') +
+      '. Configura METIS_LIMITS antes de invocar un proveedor real.',
+      { missing: missing });
   }
 
   /** Sin precio configurado no se estima costo: se detiene. */
@@ -168,6 +177,7 @@ var Errors = (function () {
     sourcePartitionUndeclared: sourcePartitionUndeclared,
     partitionViolation: partitionViolation,
     priceUnknown: priceUnknown,
+    budgetUnconfigured: budgetUnconfigured,
     readFailed: readFailed,
     redactText: redactText,
     redactProviderError: redactProviderError,

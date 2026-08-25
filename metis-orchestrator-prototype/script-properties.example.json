@@ -88,10 +88,15 @@
 
   "METIS_LIMITS": {
     "_comentario": [
-      "Opcional. Sobreescribe los límites por corrida y agregados de Config.DEFAULT_LIMITS.",
+      "OBLIGATORIA para usar proveedores reales: los tres techos *_USD no tienen",
+      "default en el código. Sin declararlos, OpenAIAdapter y AnthropicAdapter",
+      "rechazan la llamada con BUDGET_UNCONFIGURED antes de tocar la red.",
+      "Las claves no monetarias son opcionales: sobreescriben Config.DEFAULT_LIMITS.",
       "Sólo se aceptan claves conocidas y valores numéricos; el resto se ignora.",
+      "Los valores de `ejemplo` son ILUSTRATIVOS: decide los tuyos.",
       "El valor real de esta propiedad es el JSON de `ejemplo`, en una sola cadena."
     ],
+    "obligatorias": ["MAX_RUN_BUDGET_USD", "MAX_DAILY_BUDGET_USD", "MAX_MONTHLY_BUDGET_USD"],
     "ejemplo": {
       "MAX_MODEL_INTERVENTIONS": 4,
       "MAX_TOOL_CALLS": 16,

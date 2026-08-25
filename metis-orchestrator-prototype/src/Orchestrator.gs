@@ -90,7 +90,8 @@ var Orchestrator = (function () {
       if (typeof cost === 'number') {
         runtime.cost_usd += cost;
         Ledger.addSpend(cost);
-        if (runtime.cost_usd > limits.MAX_RUN_BUDGET_USD) {
+        if (typeof limits.MAX_RUN_BUDGET_USD === 'number' &&
+            runtime.cost_usd > limits.MAX_RUN_BUDGET_USD) {
           throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
         }
       } else {

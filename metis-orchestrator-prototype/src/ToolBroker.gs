@@ -117,8 +117,16 @@ var ToolBroker = (function () {
     return { ok: false, error: Errors.redactText(lastError ? lastError.message : 'lectura fallida') };
   }
 
+  /**
+   * Registra en la sesión los documentos ADMITIDOS y devuelve exactamente esos.
+   * Lo devuelto es lo que ve el modelo: un documento descartado por contexto no
+   * puede aparecer en el resultado de la herramienta aunque la fuente lo haya
+   * devuelto — si no, se descartaría de la evidencia pero se colaría igual al
+   * prompt del modelo, que es la contaminación que el descarte pretendía evitar.
+   */
   function _recordDocs(session, docs, wantsSubstance) {
     var refs = [];
+    var admitted = [];
     for (var i = 0; i < docs.length; i++) {
       var doc = docs[i];
 
@@ -139,6 +147,7 @@ var ToolBroker = (function () {
 
       var ref = RetrievalPolicy.toEvidenceRef(doc);
       refs.push(ref);
+      admitted.push(doc);
       session.evidence_refs.push(ref);
 
       var stored = {
@@ -168,7 +177,7 @@ var ToolBroker = (function () {
         }
       }
     }
-    return refs;
+    return { refs: refs, admitted: admitted };
   }
 
   /**
@@ -250,13 +259,14 @@ var ToolBroker = (function () {
     }
 
     var docs = outcome.value || [];
-    _recordDocs(session, docs, spec.substance);
+    var recorded = _recordDocs(session, docs, spec.substance);
 
     return {
       ok: true,
       source: spec.source,
       coverage: true,
-      documents: docs.map(function (d) {
+      returned_by_source: docs.length,
+      documents: recorded.admitted.map(function (d) {
         return {
           id: d.id, title: d.title, context: d.context, kind: d.kind,
           epistemic_status: d.epistemic_status,

@@ -101,12 +101,23 @@ vez de leer todo y descartar después. **Sin partición declarada para
 Nunca declares ahí el calendario primario productivo, ni los data sources de
 CANON, Chat Log o Handoffs PHI: son superficies prohibidas.
 
-### Precios
+### Precios y techos de gasto
 
-No hay tabla de precios en el código, y el guard G8 lo impide. Los precios
-cambian; uno obsoleto produce un contador de costo falso, que es peor que no
-tenerlo. Si falta el precio del modelo que se usó, el costo queda **desconocido**
-y la corrida **falla cerrada** en vez de estimar contra un contador ciego.
+No hay tabla de precios **ni cifras monetarias** en el código, y el guard G8 lo
+impide. Dos razones distintas:
+
+- **Precios:** cambian; uno obsoleto produce un contador de costo falso, que es
+  peor que no tenerlo. Si falta el precio del modelo usado, el costo queda
+  **desconocido** y la corrida falla cerrada en vez de estimar a ciegas.
+- **Techos (`MAX_RUN_BUDGET_USD`, `MAX_DAILY_BUDGET_USD`,
+  `MAX_MONTHLY_BUDGET_USD`):** cuánto está dispuesto a gastar el operador no es
+  una decisión que pueda tomar el código. Un default plausible se convierte en
+  el presupuesto real de todo el mundo sin que nadie lo haya decidido. Se
+  declaran en `METIS_LIMITS`; **sin ellos, `OpenAIAdapter` y `AnthropicAdapter`
+  rechazan la llamada** antes de tocar la red (`BUDGET_UNCONFIGURED`).
+
+Los límites de política —intervenciones, tool calls, retries— sí llevan default,
+porque son forma del ciclo, no dinero del operador.
 
 Reglas que el código impone, no sólo documenta:
 
@@ -179,9 +190,14 @@ runUnitTests();        // suites de la spec §17 + partición, vigencia, presupu
 runAcceptanceCases();  // los 10 casos de la spec §16
 runAllTests();         // todo, con veredicto PASS/FAIL
 
-// Nivel 1: una lectura real acotada por (contexto, fuente). Sin modelos,
-// sin plan, sin simulación, sin escritura. Requiere RUN_LEVEL = LEVEL_1.
-smokeTestLevel1();
+// Nivel 1: una lectura real acotada por (contexto, fuente), incluida
+// calendar.read sobre una ventana corta. Sin modelos, sin plan, sin
+// simulación, sin escritura. Requiere RUN_LEVEL = LEVEL_1.
+smokeTestLevel1();                          // ventana de 7 días
+smokeTestLevel1({ calendar_window_days: 1 });
+
+// Valida los documentos ADMITIDOS en la sesión, no el array crudo del
+// adaptador: si una fuente devuelve algo de otro contexto, el smoke test FALLA.
 ```
 
 Fuera de Apps Script, para poder **imprimir** los resultados sin desplegar:
@@ -211,7 +227,7 @@ Comprobado, no sólo declarado (`node tools/static_guards.js`):
 | G5 | `SimulatedWriteAdapter.gs` no referencia ninguna superficie externa |
 | G6 | `appsscript.json` declara exactamente tres scopes, todos de lectura |
 | G7 | ningún literal con forma de secreto en código ni fixtures |
-| G8 | ninguna tabla de precios embebida: el costo se lee de configuración |
+| G8 | ninguna tabla de precios ni techo de gasto embebido; ambos adaptadores exigen techos declarados antes de llamar |
 | G9 | todo adaptador de lectura exige partición declarada antes de leer |
 
 El análisis se hace sobre el código con comentarios y literales de cadena
@@ -248,8 +264,8 @@ auto-ampliación:
 | intervenciones de modelo | 4 — un ciclo cerrado: productor (lectura + producción) y auditor (lectura + veredicto) |
 | tool calls | 16 |
 | retries de lectura | 2 |
-| presupuesto por corrida | 0.50 USD estimados |
-| techo diario / mensual | 5 / 25 USD estimados |
+| presupuesto por corrida | **sin default** — `METIS_LIMITS` |
+| techo diario / mensual | **sin default** — `METIS_LIMITS` |
 | TTL de handoff | 15 min |
 | retención del ledger | 24 h |
 

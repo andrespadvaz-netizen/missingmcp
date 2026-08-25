@@ -80,12 +80,54 @@ var NotionReadAdapter = (function () {
     return JSON.parse(response.getContentText());
   }
 
+  /** Tope defensivo de páginas por consulta. Ver `collectPages`. */
+  var MAX_PAGES = 20;
+
   /** Query de data source (API 2025-09-03). Es una LECTURA, aunque use POST. */
-  function _queryDataSource(dataSourceId, filter, pageSize) {
+  function _queryDataSource(dataSourceId, filter, pageSize, startCursor) {
     var body = { page_size: pageSize ? pageSize : 25 };
     if (filter) { body.filter = filter; }
+    if (startCursor) { body.start_cursor = startCursor; }
     return _request('https://api.notion.com/v1/data_sources/' +
       encodeURIComponent(dataSourceId) + '/query', 'post', body);
+  }
+
+  /**
+   * Recorre TODAS las páginas de un query siguiendo `has_more`/`next_cursor`.
+   *
+   * Importa para la vigencia: una cadena de sustitución puede tener su eslabón
+   * terminal en la segunda página. Quedarse con la primera haría que la cadena
+   * no cerrara y el prototipo se abstuviera sin motivo real — un falso "no
+   * puedo afirmar estado" es tan malo como afirmar de más.
+   *
+   * `fetchPage(cursor)` devuelve `{results, has_more, next_cursor}`.
+   * Tope defensivo: `maxPages`. Alcanzarlo NO se silencia — lanza, porque
+   * devolver un conjunto truncado como si fuera completo es exactamente el
+   * modo de fallo "cobertura incompleta presentada como exhaustiva".
+   */
+  function collectPages(fetchPage, maxPages) {
+    var cap = (maxPages === undefined || maxPages === null) ? MAX_PAGES : maxPages;
+    var out = [];
+    var cursor = null;
+    var pages = 0;
+    var seenCursors = {};
+
+    while (pages < cap) {
+      var res = fetchPage(cursor) || {};
+      out = out.concat(res.results || []);
+      pages++;
+      if (!res.has_more) { return out; }
+      var next = res.next_cursor;
+      if (!next) { return out; }
+      // Un cursor repetido sería un bucle infinito servido por el proveedor.
+      if (seenCursors[next]) {
+        throw Errors.readFailed('NOTION', 'cursor repetido en la paginación');
+      }
+      seenCursors[next] = true;
+      cursor = next;
+    }
+    throw Errors.readFailed('NOTION',
+      'la consulta excede ' + cap + ' páginas; el resultado estaría truncado');
   }
 
   /** Filtro por contexto: la propiedad `Proyecto` es la clave de partición. */
@@ -144,11 +186,14 @@ var NotionReadAdapter = (function () {
           ? partition.decision_data_sources
           : partition.data_sources;
         var filter = _projectFilter(partition);
+        var pageSize = (options && options.page_size) ? options.page_size : 100;
         var out = [];
         for (var i = 0; i < dataSources.length; i++) {
-          var res = _queryDataSource(dataSources[i], filter,
-            (options && options.page_size) ? options.page_size : 100);
-          var results = res.results || [];
+          var dataSourceId = dataSources[i];
+          // Paginación completa: la cadena de vigencia puede cruzar páginas.
+          var results = collectPages(function (cursor) {
+            return _queryDataSource(dataSourceId, filter, pageSize, cursor);
+          }, options ? options.max_pages : null);
           for (var r = 0; r < results.length; r++) {
             out.push(_normalizePage(results[r], null, partition));
           }
@@ -321,6 +366,9 @@ var NotionReadAdapter = (function () {
   return {
     DECISION_PROPS: DECISION_PROPS,
     DECISION_STATES: DECISION_STATES,
+    MAX_PAGES: MAX_PAGES,
+    collectPages: collectPages,
+    normalizePage: function (page, snippet, partition) { return _normalizePage(page, snippet, partition); },
     useBackend: useBackend,
     resetBackend: resetBackend,
     classify: classify,

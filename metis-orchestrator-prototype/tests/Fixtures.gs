@@ -24,6 +24,13 @@ var Fixtures = (function () {
   var _failingSources = {};
   var _ledgerStore = null;
 
+  /** Techos de gasto del entorno de test. No son un default del prototipo. */
+  var TEST_BUDGETS = {
+    MAX_RUN_BUDGET_USD: 0.50,
+    MAX_DAILY_BUDGET_USD: 5.00,
+    MAX_MONTHLY_BUDGET_USD: 25.00
+  };
+
   /**
    * Contenedores por contexto. Son el equivalente sintético de los data sources
    * de Notion, proyectos de Asana, carpetas de Drive y calendarios reales.
@@ -105,11 +112,17 @@ var Fixtures = (function () {
     // ---- contexto ANDREA
     { source: 'NOTION', id: 'and-01', container: 'ds-andrea', title: 'Reorganización comercial Andrea',
       context: 'ANDREA', kind: 'NOTE', snippet: 'Notas de la reorganización comercial del área.' },
-    { source: 'ASANA', id: 'and-task-77', container: 'proj-andrea', title: 'Actualizar plan comercial',
+    { source: 'ASANA', id: 'and-task-77', container: 'proj-andrea', project_name: 'Andrea — Comercial',
+      title: 'Actualizar plan comercial',
       context: 'ANDREA', kind: 'TASK', snippet: 'Tarea operativa del plan comercial.' },
 
     // ---- contexto METIS (Asana)
-    { source: 'ASANA', id: 'met-task-12', container: 'proj-metis', title: 'Registrar decisión de gobernanza',
+    // El nombre del proyecto NO coincide con la clave de contexto `METIS`.
+    // Derivar el contexto de este nombre daba "METIS___SISTEMA_OPERATIVO" y la
+    // tarea se descartaba por contaminación. El contexto viene ya resuelto.
+    { source: 'ASANA', id: 'met-task-12', container: 'proj-metis',
+      project_name: 'Metis — Sistema Operativo',
+      title: 'Registrar decisión de gobernanza',
       context: 'METIS', kind: 'TASK', snippet: 'Tarea operativa de Metis para registro interno.' },
 
     // ---- contexto SHOKKO
@@ -156,6 +169,19 @@ var Fixtures = (function () {
       decision: doc.decision ? doc.decision : null,
       claim: doc.claim ? doc.claim : null,
       container: doc.container
+    };
+  }
+
+  /** Forma cruda de una tarea tal y como la devuelve la API de Asana. */
+  function _rawAsanaTask(doc) {
+    return {
+      gid: doc.id,
+      name: doc.title,
+      notes: doc.snippet === undefined ? null : doc.snippet,
+      completed: false,
+      due_on: null,
+      permalink_url: null,
+      projects: [{ gid: doc.container, name: doc.project_name ? doc.project_name : doc.container }]
     };
   }
 
@@ -233,9 +259,20 @@ var Fixtures = (function () {
         return docs.filter(function (d) { return !!d.decision; });
       }
     });
+    // Asana pasa por la normalización REAL del adaptador: es la que decide el
+    // contexto del resultado, y es justo lo que hay que probar.
     AsanaReadAdapter.useBackend({
-      search: function (query, options) { return _search('ASANA', query, options); },
-      get: function (id, options) { return _fetch('ASANA', id, options); }
+      search: function (query, options) {
+        return _search('ASANA', query, options).map(function (doc) {
+          return AsanaReadAdapter.normalizeTask(_rawAsanaTask(doc), doc.snippet,
+            options ? options.context : null);
+        });
+      },
+      get: function (id, options) {
+        var doc = _fetch('ASANA', id, options);
+        return AsanaReadAdapter.normalizeTask(_rawAsanaTask(doc), doc.snippet,
+          options ? options.context : null);
+      }
     });
     DriveReadAdapter.useBackend({
       search: function (query, options) { return _search('DRIVE', query, options); },
@@ -325,12 +362,16 @@ var Fixtures = (function () {
     HandoffBuilder.resetRegistry();
     Config._setRunLevel(Config.LEVELS.LEVEL_0);
     Config._setPartitions(PARTITIONS);
-    Config._setLimits(null);
+    // Los techos monetarios no tienen default en el código: es el entorno quien
+    // los declara. El entorno de test declara los suyos, igual que tendría que
+    // hacerlo el operador en METIS_LIMITS.
+    Config._setLimits(TEST_BUDGETS);
     installBackends();
   }
 
   return {
     BASE_TIME_MS: BASE_TIME_MS,
+    TEST_BUDGETS: TEST_BUDGETS,
     CORPUS: CORPUS,
     PARTITIONS: PARTITIONS,
     docsById: docsById,

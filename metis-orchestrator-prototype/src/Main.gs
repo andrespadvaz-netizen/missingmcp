@@ -121,9 +121,14 @@ function _containerCount(partition) {
  * Smoke test de Nivel 1: una lectura real acotada por fuente y contexto.
  *
  * Qué hace: comprueba nivel y credenciales, y ejecuta UNA lectura por cada
- * (contexto, fuente) con partición declarada.
+ * (contexto, fuente) con partición declarada, incluida `calendar.read` sobre
+ * una ventana temporal corta (`calendar_window_days`, 7 por defecto).
  * Qué NO hace: no invoca ningún modelo, no construye plan, no simula ninguna
  * acción y no escribe absolutamente nada. Es sólo lectura.
+ *
+ * Qué VALIDA: los documentos realmente ADMITIDOS en `session.documents`, no el
+ * array crudo que devolvió el adaptador. Si una fuente devuelve algo de otro
+ * contexto, el smoke test FALLA: significa que la partición no acotó en origen.
  *
  * Devuelve conteos y errores redactados; nunca contenido recuperado.
  */
@@ -162,6 +167,14 @@ function smokeTestLevel1(options) {
     return ContextResolver.scopeFor([context], context);
   };
 
+  // Ventana temporal ACOTADA para Calendar: nunca "todo el calendario".
+  var windowDays = (typeof opts.calendar_window_days === 'number') ? opts.calendar_window_days : 7;
+  var nowMs = Schemas.nowMs();
+  var timeWindow = {
+    start: Schemas.toIso(new Date(nowMs)),
+    end: Schemas.toIso(new Date(nowMs + windowDays * 24 * 60 * 60 * 1000))
+  };
+
   contexts.forEach(function (context) {
     var session = ToolBroker.newSession({ execution_id: 'smoke-' + context },
       scopeOf(context), AuthorityPolicy.preRetrievalGrant([context]));
@@ -169,21 +182,48 @@ function smokeTestLevel1(options) {
     [['notion.search', { query: opts.query ? opts.query : '', page_size: 3 }],
      ['notion.decisions', { page_size: 5 }],
      ['asana.search', { query: opts.query ? opts.query : '', page_size: 3 }],
-     ['drive.search', { query: opts.query ? opts.query : '', page_size: 3 }]
+     ['drive.search', { query: opts.query ? opts.query : '', page_size: 3 }],
+     ['calendar.read', { query: opts.query ? opts.query : '', time_window: timeWindow }]
     ].forEach(function (pair) {
       var tool = pair[0];
       if (!Config.partitionFor(context, ToolBroker.READ_TOOLS[tool].source)) {
         check(context + '/' + tool, true, 'sin partición declarada: no se lee (correcto)');
         return;
       }
+      // Lo que cuenta es lo que ENTRÓ a la sesión, no lo que devolvió la fuente:
+      // un documento puede volver de la fuente y ser descartado por contexto.
+      // Contar el array crudo del adaptador daría por buena una lectura que la
+      // sesión rechazó entera.
+      var before = session.documents.length;
       try {
         var result = ToolBroker.invoke(session, tool, pair[1]);
-        check(context + '/' + tool, result.ok !== false,
-          result.ok === false ? result.error : ('documentos: ' + result.documents.length));
+        var admitted = session.documents.length - before;
+        var returned = (result.returned_by_source === undefined) ? admitted : result.returned_by_source;
+        var discarded = returned - admitted;
+        if (result.ok === false) {
+          check(context + '/' + tool, false, result.error);
+        } else {
+          check(context + '/' + tool, discarded === 0,
+            'admitidos en sesión: ' + admitted + ' de ' + returned + ' devueltos' +
+            (discarded > 0 ? ' — ' + discarded + ' DESCARTADOS por contexto' : ''));
+        }
       } catch (e) {
         check(context + '/' + tool, false, (e.code ? e.code : 'ERROR') + ': ' + Errors.redactText(e.message));
       }
     });
+
+    // Contaminación: cualquier descarte por contexto es un fallo del smoke test,
+    // no una nota al margen. Significa que la partición dejó pasar algo ajeno.
+    var descartes = session.risk_signals.filter(function (s) {
+      return s.signal === 'CROSS_CONTEXT_RESULT_DISCARDED';
+    });
+    check(context + '/sin_contaminacion', descartes.length === 0,
+      descartes.length ? (descartes.length + ' resultados de otro contexto llegaron de la fuente')
+                       : 'ningún resultado ajeno llegó de la fuente');
+
+    check(context + '/documentos_en_sesion', true,
+      'total admitido: ' + session.documents.length +
+      ', evidencias: ' + session.evidence_refs.length);
 
     // Vigencia: sólo se reporta si el registro devolvió decisiones.
     if (session.decisions.length) {
