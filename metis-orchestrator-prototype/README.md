@@ -194,10 +194,21 @@ runAllTests();         // todo, con veredicto PASS/FAIL
 // calendar.read sobre una ventana corta. Sin modelos, sin plan, sin
 // simulación, sin escritura. Requiere RUN_LEVEL = LEVEL_1.
 smokeTestLevel1();                          // ventana de 7 días
-smokeTestLevel1({ calendar_window_days: 1 });
 
-// Valida los documentos ADMITIDOS en la sesión, no el array crudo del
-// adaptador: si una fuente devuelve algo de otro contexto, el smoke test FALLA.
+// Con canarios: objetos que sabes que existen y que la fuente DEBE devolver.
+smokeTestLevel1({
+  contexts: ['METIS'],
+  calendar_window_days: 1,
+  canaries: {
+    METIS: {
+      'notion.search':    { query: 'gate', expect_id: '<page-id>' },
+      'notion.decisions': { min_results: 3 },
+      'asana.search':     { query: 'registrar', expect_title_contains: 'gobernanza' },
+      'drive.search':     { query: 'notas' },
+      'calendar.read':    { min_results: 1 }
+    }
+  }
+});
 ```
 
 Fuera de Apps Script, para poder **imprimir** los resultados sin desplegar:
@@ -213,6 +224,28 @@ con los globals de Apps Script emulados. **No se sube al proyecto, ningún `.gs`
 lo importa y no cambia el runtime.** Durante los tests bloquea `UrlFetchApp`,
 `DriveApp`, `CalendarApp`, `GmailApp` y `ScriptApp`: cualquier intento de salida
 externa lanza excepción. Ver `ENTREGA.md` §7 para el detalle de esta desviación.
+
+### Veredicto del smoke test
+
+Tres estados, y **cero resultados no es PASS**:
+
+| Estado | Cuándo |
+| --- | --- |
+| `PASS` | la fuente devolvió al menos un resultado real admitido, y el canario declarado apareció |
+| `NO_DEMOSTRADO` | no hubo error, pero tampoco evidencia: 0 resultados, o menos de `min_results` |
+| `FAIL` | la lectura falló, hubo descarte por contexto, o la fuente respondió **sin** el canario esperado |
+| `OMITIDA` | sin partición declarada: no se lee, por diseño |
+
+`report.status` es `FAIL` si algo falló; si no, `NO_DEMOSTRADO` cuando queda
+alguna fuente sin demostrar **o cuando no se validó ninguna**; `PASS` sólo si
+todo lo leído quedó demostrado. `report.ok` es `true` únicamente con `PASS`.
+
+Por qué importa la distinción: una fuente vacía, una partición que apunta a un
+contenedor equivocado, un filtro por `Proyecto` que no casa y una credencial que
+no ve nada **devuelven todas cero**, y sólo la primera es aceptable. El canario
+—un objeto que el operador sabe que existe— es lo que separa "leí y no hay nada"
+de "no estoy leyendo lo que creo". Que una fuente responda pero sin el canario es
+`FAIL`, no `NO_DEMOSTRADO`: está leyendo, y no lo que se creía.
 
 ## 7. Cero triggers, cero escrituras productivas
 

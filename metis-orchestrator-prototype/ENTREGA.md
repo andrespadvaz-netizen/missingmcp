@@ -190,7 +190,15 @@ Script.
   PASS  ningún proveedor real acepta llamada sin techos declarados  (3 asserts)
   PASS  un techo sin declarar no se compara contra el gasto  (2 asserts)
 
-Total: 59 | PASS: 59 | FAIL: 0 | asserts: 276 | nivel: LEVEL_0
+-- Smoke
+  PASS  una fuente sin resultados es NO_DEMOSTRADO, nunca PASS  (9 asserts)
+  PASS  un canario presente valida la fuente  (9 asserts)
+  PASS  una fuente que responde pero sin el canario es FAIL  (4 asserts)
+  PASS  sin fuentes validadas el veredicto no puede ser PASS  (4 asserts)
+  PASS  una lectura fallida y el nivel equivocado son FAIL  (5 asserts)
+  PASS  el evaluador de canarios distingue los tres desenlaces  (8 asserts)
+
+Total: 65 | PASS: 65 | FAIL: 0 | asserts: 315 | nivel: LEVEL_0
 ```
 
 Las siete suites exigidas por §17 están cubiertas con sus assertions nombradas,
@@ -272,7 +280,7 @@ RESULTADO: PASS
 | Condición | Estado |
 | --- | --- |
 | los 10 casos de aceptación pasan | ✅ 10/10, 118 asserts |
-| todos los tests unitarios pasan | ✅ 59/59, 276 asserts |
+| todos los tests unitarios pasan | ✅ 65/65, 315 asserts |
 | cero escrituras externas durante ejecución y tests | ✅ verificado por guards + bloqueo total de superficies externas en la ejecución de los tests |
 | cero contaminación entre contextos | ✅ AC-04, invariante 2, y **partición en origen**: sin partición declarada no se lee, y un objeto de otro contexto es inalcanzable (guard G9 + suite Partición) |
 | cero handoff manual dentro de una corrida | ✅ AC-02: el handoff lo emite `HandoffBuilder` desde el orquestador |
@@ -655,6 +663,7 @@ cambia runtime ni activa nada.
 | 3 | Sin default para `MAX_RUN_BUDGET_USD`, `MAX_DAILY_BUDGET_USD`, `MAX_MONTHLY_BUDGET_USD`; exigidos antes de toda llamada real | un default plausible se vuelve el presupuesto de todos sin que nadie lo decida | guard G8 ampliado, suite Presupuesto |
 | 4 | `smokeTestLevel1()` incluye `calendar.read` con ventana acotada (7 días por defecto, `calendar_window_days`) | Calendar era la única fuente particionada sin ejercitar | `Main.gs` |
 | 5 | El smoke test valida `session.documents`, no el array crudo del adaptador | contar lo devuelto por la fuente daría por buena una lectura que la sesión rechazó entera | `Main.gs` |
+| 6 | **Canarios positivos**: cada (contexto, fuente) admite un objeto esperado; sin al menos un resultado real admitido el estado es `NO_DEMOSTRADO`, nunca `PASS` | una fuente vacía, una partición mal apuntada, un filtro por `Proyecto` que no casa y una credencial ciega **devuelven todas cero**; sólo la primera es aceptable | suite Smoke, 39 asserts |
 
 El tope de paginación **no trunca en silencio**: alcanzarlo lanza. Devolver un
 conjunto truncado como si fuera completo es exactamente el modo de fallo
@@ -674,9 +683,20 @@ conjunto truncado como si fuera completo es exactamente el modo de fallo
   excepción en `PROVIDER_ERROR`, mandando al operador a diagnosticar la API en
   vez de su propia configuración. La credencial se resuelve ahora fuera del `try`.
 
-Los cuatro tests nuevos están **verificados en negativo**: revirtiendo los tres
+Los tests nuevos están **verificados en negativo**: revirtiendo los tres
 arreglos de código (contexto de Asana, documentos admitidos, paginación) fallan
-los cuatro y el proceso sale con código 1.
+los cuatro tests correspondientes; y haciendo que "cero resultados" vuelva a
+contar como `PASS`, fallan dos de la suite Smoke. En todos los casos el proceso
+sale con código 1.
+
+### Sobre el veredicto del smoke test
+
+El estado global tiene tres valores y `report.ok` sólo es `true` con `PASS`. Hay
+una regla que conviene no perder de vista al leer el reporte: **si no se validó
+ninguna fuente, el veredicto es `NO_DEMOSTRADO` aunque nada haya fallado**. Un
+smoke test que no leyó nada —porque no había particiones declaradas, o porque
+todas quedaron omitidas— no es un smoke test verde. Sin esa regla, la
+configuración vacía sería el camino más fácil hacia un PASS.
 
 ### Nota sobre los fixtures
 

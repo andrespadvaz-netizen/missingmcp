@@ -282,4 +282,120 @@
     }, 'declarado el techo, el gasto acumulado lo supera y detiene');
   });
 
+  // ------------------------------------------------------------ smoke test
+  //
+  // Se ejecuta en Nivel 1 con los backends de fixture instalados: la guarda de
+  // nivel pasa, pero no hay red — el arnés la bloquea, así que cualquier salida
+  // externa lanzaría.
+
+  function smokeEnLevel1(opciones) {
+    Config._setRunLevel(Config.LEVELS.LEVEL_1);
+    var r = smokeTestLevel1(opciones);
+    Config._setRunLevel(Config.LEVELS.LEVEL_0);
+    return r;
+  }
+
+  function estadoDe(report, etiqueta) {
+    var c = report.checks.filter(function (x) { return x.check === etiqueta; })[0];
+    return c ? c.status : null;
+  }
+
+  TestRunner.unit('Smoke', 'una fuente sin resultados es NO_DEMOSTRADO, nunca PASS', function (t) {
+    // SHOKKO tiene partición de Asana/Drive/Calendar, pero el corpus sólo tiene
+    // una nota de Notion: las demás fuentes devuelven cero.
+    var r = smokeEnLevel1({ contexts: ['SHOKKO'] });
+
+    t.equals(estadoDe(r, 'SHOKKO/notion.search'), 'PASS', 'la fuente con resultados sí valida');
+    t.equals(estadoDe(r, 'SHOKKO/asana.search'), 'NO_DEMOSTRADO', 'cero resultados no es PASS');
+    t.equals(estadoDe(r, 'SHOKKO/drive.search'), 'NO_DEMOSTRADO', 'ni en Drive');
+    t.equals(estadoDe(r, 'SHOKKO/calendar.read'), 'NO_DEMOSTRADO', 'ni en Calendar');
+    t.equals(r.status, 'NO_DEMOSTRADO', 'el veredicto global no es PASS');
+    t.equals(r.ok, false, '`ok` sólo es true con PASS');
+    t.ok(r.undemonstrated >= 3, 'se cuentan las fuentes sin demostrar');
+    t.equals(r.models_invoked, 0, 'cero modelos');
+    t.equals(r.writes_attempted, 0, 'cero escrituras');
+  });
+
+  TestRunner.unit('Smoke', 'un canario presente valida la fuente', function (t) {
+    var r = smokeEnLevel1({
+      contexts: ['METIS'],
+      canaries: {
+        METIS: {
+          'notion.search':    { query: 'gate', expect_id: 'met-gate-01' },
+          'notion.decisions': { min_results: 2 },
+          'asana.search':     { query: 'registrar', expect_title_contains: 'gobernanza' },
+          'drive.search':     { query: 'notas' },
+          'calendar.read':    { min_results: 1 }
+        }
+      }
+    });
+
+    ['notion.search', 'notion.decisions', 'asana.search', 'drive.search', 'calendar.read']
+      .forEach(function (tool) {
+        t.equals(estadoDe(r, 'METIS/' + tool), 'PASS', tool + ' validada con canario');
+      });
+    t.equals(r.status, 'PASS', 'veredicto global PASS');
+    t.equals(r.ok, true, 'y `ok` en true');
+    t.equals(r.failed, 0, 'sin fallos');
+    t.equals(r.undemonstrated, 0, 'sin fuentes por demostrar');
+  });
+
+  TestRunner.unit('Smoke', 'una fuente que responde pero sin el canario es FAIL', function (t) {
+    var r = smokeEnLevel1({
+      contexts: ['METIS'],
+      // La fuente devuelve documentos, pero no el que el operador esperaba:
+      // está leyendo, y no lo que se creía. Eso es peor que no leer.
+      canaries: { METIS: { 'notion.search': { query: 'gate', expect_id: 'no-existe-en-metis' } } }
+    });
+    t.equals(estadoDe(r, 'METIS/notion.search'), 'FAIL', 'canario ausente es FAIL, no NO_DEMOSTRADO');
+    t.includes(r.checks.filter(function (c) { return c.check === 'METIS/notion.search'; })[0].detail,
+      'no-existe-en-metis', 'el motivo nombra el canario que faltó');
+    t.equals(r.status, 'FAIL', 'el veredicto global es FAIL');
+
+    var porTitulo = smokeEnLevel1({
+      contexts: ['METIS'],
+      canaries: { METIS: { 'notion.search': { query: 'gate', expect_title_contains: 'inexistente' } } }
+    });
+    t.equals(estadoDe(porTitulo, 'METIS/notion.search'), 'FAIL', 'el criterio por título también decide');
+  });
+
+  TestRunner.unit('Smoke', 'sin fuentes validadas el veredicto no puede ser PASS', function (t) {
+    // VENTURE_QUEST no tiene ninguna partición declarada en los fixtures:
+    // todo queda OMITIDA. Nada falla, pero tampoco se demostró nada.
+    var r = smokeEnLevel1({ contexts: ['VENTURE_QUEST'] });
+    t.equals(r.failed, 0, 'no falla nada');
+    t.equals(r.validated, 0, 'pero no se validó ninguna fuente');
+    t.ok(r.omitted >= 4, 'todas quedaron omitidas por falta de partición');
+    t.equals(r.status, 'NO_DEMOSTRADO', 'un smoke que no leyó nada no es verde');
+  });
+
+  TestRunner.unit('Smoke', 'una lectura fallida y el nivel equivocado son FAIL', function (t) {
+    Fixtures.failSource('DRIVE');
+    var r = smokeEnLevel1({ contexts: ['METIS'] });
+    t.equals(estadoDe(r, 'METIS/drive.search'), 'FAIL', 'una fuente que falla es FAIL, no NO_DEMOSTRADO');
+    t.equals(r.status, 'FAIL', 'y arrastra el veredicto');
+    Fixtures.clearFailures();
+
+    // En Nivel 0 no se lee nada: la guarda de nivel corta antes.
+    var nivel0 = smokeTestLevel1({ contexts: ['METIS'] });
+    t.equals(estadoDe(nivel0, 'nivel'), 'FAIL', 'Nivel 0 detiene el smoke test');
+    t.equals(nivel0.status, 'FAIL', 'veredicto FAIL');
+    t.equals(nivel0.validated, 0, 'sin ninguna lectura');
+  });
+
+  TestRunner.unit('Smoke', 'el evaluador de canarios distingue los tres desenlaces', function (t) {
+    var docs = [{ id: 'a', title: 'Gate Ciclo 1 a Ciclo 2' }, { id: 'b', title: 'Otra cosa' }];
+
+    t.equals(smokeEvaluateCanary(null, []).status, 'NO_DEMOSTRADO', 'sin canario y sin resultados');
+    t.equals(smokeEvaluateCanary(null, docs).status, 'PASS', 'sin canario, un resultado basta');
+    t.equals(smokeEvaluateCanary({ min_results: 3 }, docs).status, 'NO_DEMOSTRADO', 'min_results no alcanzado');
+    t.equals(smokeEvaluateCanary({ expect_id: 'a' }, docs).status, 'PASS', 'canario por id presente');
+    t.equals(smokeEvaluateCanary({ expect_id: 'z' }, docs).status, 'FAIL', 'canario por id ausente');
+    t.equals(smokeEvaluateCanary({ expect_title_contains: 'ciclo 1' }, docs).status, 'PASS',
+      'el título se compara normalizado');
+    t.equals(smokeEvaluateCanary({ expect_title_contains: 'zzz' }, docs).status, 'FAIL', 'título ausente');
+    t.equals(smokeEvaluateCanary({ min_results: 0 }, []).status, 'PASS',
+      'min_results 0 permite declarar explícitamente que se acepta vacío');
+  });
+
 })();
