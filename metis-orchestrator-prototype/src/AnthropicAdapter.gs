@@ -1,0 +1,118 @@
+/**
+ * AnthropicAdapter.gs — invoca la Messages API y traduce al MISMO contrato
+ * interno que `OpenAIAdapter` (spec §11).
+ *
+ * Secretos: leídos de Script Properties en el momento de la llamada. Ningún
+ * proveedor conoce el secreto del otro.
+ */
+var AnthropicAdapter = (function () {
+
+  /** Referencia de costo aproximado, sólo para el contador agregado (spec §13). */
+  var PRICE_PER_1K = { input: 0.003, output: 0.015 };
+
+  var Adapter = class AnthropicAdapterImpl {
+
+    get name() { return 'ANTHROPIC'; }
+
+    toolsFor(toolContract) {
+      return (toolContract || []).map(function (t) {
+        return {
+          name: t.name.replace(/\./g, '__'),
+          description: t.description,
+          input_schema: t.input_schema
+        };
+      });
+    }
+
+    buildRequest(request, toolContract) {
+      var body = {
+        model: request.model ? request.model : Config.PROVIDERS.ANTHROPIC.model,
+        max_tokens: request.max_output_tokens ? request.max_output_tokens : Config.PROVIDERS.ANTHROPIC.max_tokens,
+        system: request.system,
+        messages: [{ role: 'user', content: [{ type: 'text', text: request.prompt }] }]
+      };
+      if (toolContract && toolContract.length) { body.tools = this.toolsFor(toolContract); }
+      return body;
+    }
+
+    complete(request) {
+      return this.completeWithTools(request, null);
+    }
+
+    completeWithTools(request, toolContract) {
+      var body = this.buildRequest(request, toolContract);
+      var response;
+      try {
+        response = UrlFetchApp.fetch(Config.PROVIDERS.ANTHROPIC.endpoint, {
+          method: 'post',
+          contentType: 'application/json',
+          muteHttpExceptions: true,
+          headers: {
+            'x-api-key': Config.secret('ANTHROPIC_API_KEY'),
+            'anthropic-version': Config.PROVIDERS.ANTHROPIC.version_header
+          },
+          payload: JSON.stringify(body)
+        });
+      } catch (e) {
+        var redacted = this.redactProviderError(e);
+        throw Errors.providerError('ANTHROPIC', null, redacted.message);
+      }
+      var code = response.getResponseCode();
+      if (code < 200 || code >= 300) {
+        throw Errors.providerError('ANTHROPIC', code, 'respuesta no exitosa');
+      }
+      return this.normalizeResponse(JSON.parse(response.getContentText()));
+    }
+
+    normalizeResponse(raw) {
+      var text = '';
+      var toolRequests = [];
+      var content = (raw && raw.content) ? raw.content : [];
+      for (var i = 0; i < content.length; i++) {
+        var block = content[i];
+        if (block.type === 'text') {
+          text += block.text;
+        } else if (block.type === 'tool_use') {
+          toolRequests.push({
+            id: block.id ? block.id : null,
+            name: String(block.name).replace(/__/g, '.'),
+            arguments: block.input ? block.input : {}
+          });
+        }
+      }
+      var usage = null;
+      if (raw && raw.usage) {
+        usage = {
+          input_tokens: raw.usage.input_tokens ? raw.usage.input_tokens : 0,
+          output_tokens: raw.usage.output_tokens ? raw.usage.output_tokens : 0,
+          estimated_cost_usd: estimateCost(raw.usage)
+        };
+      }
+      var normalized = {
+        text: text,
+        tool_requests: toolRequests,
+        usage: usage,
+        stop_reason: (raw && raw.stop_reason) ? raw.stop_reason : null,
+        provider_request_id: (raw && raw.id) ? raw.id : null
+      };
+      ProviderAdapter.assertNormalizedShape(normalized);
+      return normalized;
+    }
+
+    redactProviderError(error, status) {
+      return Errors.redactProviderError('ANTHROPIC', error, status === undefined ? null : status);
+    }
+  };
+
+  function estimateCost(usage) {
+    var inTok = usage.input_tokens ? usage.input_tokens : 0;
+    var outTok = usage.output_tokens ? usage.output_tokens : 0;
+    return (inTok / 1000) * PRICE_PER_1K.input + (outTok / 1000) * PRICE_PER_1K.output;
+  }
+
+  return {
+    PRICE_PER_1K: PRICE_PER_1K,
+    create: function () { return new Adapter(); },
+    Impl: Adapter
+  };
+})();

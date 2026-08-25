@@ -1,0 +1,65 @@
+{
+  "_comentario": [
+    "Plantilla de NOMBRES de Script Properties (spec §12, §21.3).",
+    "Este archivo documenta NOMBRES, nunca VALORES.",
+    "No lo llenes con secretos y no lo subas con valores reales:",
+    "las credenciales se cargan a mano en el editor de Apps Script,",
+    "en Configuración del proyecto -> Propiedades del script.",
+    "El prototipo arranca en Nivel 0 y no lee ninguna de estas propiedades",
+    "hasta que el operador cambie RUN_LEVEL en Config.gs de forma explícita."
+  ],
+
+  "secretos": {
+    "METIS_OPENAI_API_KEY": {
+      "clave_simbolica": "OPENAI_API_KEY",
+      "usado_por": "OpenAIAdapter",
+      "obligatorio_en": "Nivel 0-2 sólo si se invoca a OpenAI en una corrida manual",
+      "valor": "<pegar en el editor de Apps Script, nunca aquí>"
+    },
+    "METIS_ANTHROPIC_API_KEY": {
+      "clave_simbolica": "ANTHROPIC_API_KEY",
+      "usado_por": "AnthropicAdapter",
+      "obligatorio_en": "Nivel 0-2 sólo si se invoca a Anthropic en una corrida manual",
+      "valor": "<pegar en el editor de Apps Script, nunca aquí>"
+    },
+    "METIS_NOTION_API_KEY": {
+      "clave_simbolica": "NOTION_API_KEY",
+      "usado_por": "NotionReadAdapter",
+      "scope_minimo": "integración de Notion con permiso de LECTURA sobre las páginas del contexto",
+      "obligatorio_en": "Nivel 1 y 2",
+      "valor": "<pegar en el editor de Apps Script, nunca aquí>"
+    },
+    "METIS_ASANA_API_KEY": {
+      "clave_simbolica": "ASANA_API_KEY",
+      "usado_por": "AsanaReadAdapter",
+      "scope_minimo": "Personal Access Token de sólo lectura si el proveedor lo permite",
+      "obligatorio_en": "Nivel 1 y 2",
+      "valor": "<pegar en el editor de Apps Script, nunca aquí>"
+    }
+  },
+
+  "ajustes_no_secretos": {
+    "METIS_ASANA_WORKSPACE_GID": {
+      "clave_simbolica": "ASANA_WORKSPACE_GID",
+      "descripcion": "gid del workspace de Asana sobre el que se hace typeahead de sólo lectura",
+      "valor": "<gid>"
+    },
+    "METIS_CALENDAR_READ_IDS": {
+      "clave_simbolica": "CALENDAR_READ_IDS",
+      "descripcion": "ids de calendarios legibles, separados por coma. El calendario primario productivo es superficie prohibida y NO debe listarse.",
+      "valor": "<calendar-id-1>,<calendar-id-2>"
+    },
+    "METIS_DRIVE_READ_FOLDER_IDS": {
+      "clave_simbolica": "DRIVE_READ_FOLDER_IDS",
+      "descripcion": "ids de carpetas de Drive acotadas para lectura (reservado; la búsqueda actual usa título)",
+      "valor": "<folder-id-1>"
+    }
+  },
+
+  "propiedades_generadas_en_runtime": {
+    "_comentario": "El prototipo escribe estas claves por su cuenta. No se cargan a mano.",
+    "METIS_LEDGER_<execution_id>:<ordinal>": "entrada del ledger técnico (ids, hashes, estado). Retención corta.",
+    "METIS_BUDGET_DAILY_<YYYYMMDD>": "contador agregado de costo estimado del día",
+    "METIS_BUDGET_MONTHLY_<YYYYMM>": "contador agregado de costo estimado del mes"
+  }
+}
