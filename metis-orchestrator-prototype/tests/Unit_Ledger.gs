@@ -110,10 +110,44 @@
 
   TestRunner.unit('Ledger', 'techos agregados producen parada dura', function (t) {
     t.ok(Ledger.assertAggregateBudget(), 'con contador en cero no bloquea');
-    Ledger.addSpend(Config.LIMITS.MAX_DAILY_BUDGET_USD);
+    Ledger.addSpend(Config.limits().MAX_DAILY_BUDGET_USD);
     t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
       Ledger.assertAggregateBudget();
     }, 'alcanzar el techo diario detiene la corrida');
+  });
+
+
+  TestRunner.unit('Ledger', 'el registro de handoffs se persiste y no lleva sustancia', function (t) {
+    var handoff = {
+      handoff_id: 'h-1', execution_id: 'exec-ledger',
+      emitted_at: Schemas.nowIso(),
+      expires_at: Schemas.toIso(new Date(Schemas.nowMs() + 60000))
+    };
+    var record = Ledger.recordHandoffIssued(handoff);
+    t.deepEquals(Object.keys(record).sort(), Ledger.HANDOFF_FIELDS.slice().sort(),
+      'el conjunto de campos del registro es exacto');
+    t.equals(record.consumed_count, 0, 'nace sin consumos');
+    t.equals(record.reconciled, false, 'y sin reconciliar');
+
+    t.equals(Ledger.recordHandoffConsumed('h-1'), 1, 'el consumo se contabiliza');
+    t.equals(Ledger.recordHandoffConsumed('h-1'), 2, 'y se acumula');
+    t.ok(Ledger.recordHandoffReconciled('h-1').reconciled, 'la reconciliación queda persistida');
+
+    t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function () {
+      Ledger.recordHandoffIssued(handoff);
+    }, 'reemitir el mismo handoff_id se rechaza');
+    t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function () {
+      Ledger.recordHandoffConsumed('h-inexistente');
+    }, 'consumir un handoff no emitido se rechaza');
+
+    // El registro es técnico: ids, timestamps y contadores. Nada más.
+    var serializado = JSON.stringify(Ledger.handoffRecord('h-1'));
+    t.equals(serializado.indexOf('objetivo'), -1, 'no guarda el objetivo del handoff');
+    t.equals(serializado.indexOf('evidence'), -1, 'no guarda evidencia');
+
+    Fixtures.advance(Config.LEDGER.RETENTION_MS + 1000);
+    t.ok(Ledger.purge() >= 1, 'la retención también poda los registros de handoff');
+    t.equals(Ledger.handoffRecord('h-1'), null, 'y desaparecen');
   });
 
 })();

@@ -12,7 +12,7 @@
   // -------------------------------------------------------------------- 1
   TestRunner.acceptance('AC-01', 'Resolver localmente: pregunta factual sin segundo modelo', function (t) {
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.search', { query: 'gate', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'gate' })] },
       { text: 'El gate de Ciclo 1 a Ciclo 2 sigue abierto: faltan casillas del Definition of Done.',
         tool_requests: [] }
     ], []);
@@ -27,6 +27,7 @@
     t.equals(result.route_reason, 'LOCAL_BY_DEFAULT', 'resuelve localmente por default');
     t.equals(result.handoff, null, 'no se genera handoff');
     t.equals(providers.ANTHROPIC.calls.length, 0, 'el segundo modelo no se invoca');
+    t.equals(result.producer_turns, 2, 'el productor cierra su ciclo: lee y luego responde');
     t.equals(result.status, 'COMPLETED', 'corrida completada');
     t.ok(result.evidence_refs.length > 0, 'la respuesta se apoya en evidencia recuperada');
     t.includes(result.final_answer, 'NOTION:met-gate-01', 'las fuentes son visibles en la respuesta única');
@@ -35,14 +36,18 @@
   });
 
   // -------------------------------------------------------------------- 2
-  TestRunner.acceptance('AC-02', 'Handoff necesario por auditoría: productor → auditor → retorno único', function (t) {
+  TestRunner.acceptance('AC-02', 'Handoff por auditoría: el auditor recupera y LUEGO dictamina', function (t) {
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.search', { query: 'gobernanza', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'gobernanza' })] },
       { text: 'Entregable del productor: la propuesta de gobernanza tiene tres huecos de autoridad.',
         tool_requests: [] }
     ], [
-      { text: 'Veredicto: la propuesta no cierra la matriz de autoridad; hallazgos menores, sin bloqueo material.',
-        tool_requests: [read('notion.search', { query: 'gobernanza', context: 'METIS' })] }
+      // Turno 1 del auditor: pide evidencia que el productor NO recuperó.
+      { text: 'Necesito ver la norma antes de opinar.',
+        tool_requests: [read('notion.search', { query: 'canon' })] },
+      // Turno 2: veredicto ya con esa evidencia a la vista.
+      { text: 'Veredicto: contrastada contra el CANON, la propuesta no cierra la matriz de autoridad; ' +
+              'hallazgos menores, sin bloqueo material.', tool_requests: [] }
     ]);
 
     var result = Orchestrator.run(
@@ -54,20 +59,30 @@
     t.equals(result.material_cause, 'MANDATORY_CROSS_AUDIT', 'causa material declarada');
     t.ok(!!result.handoff, 'se genera un handoff interno');
     t.equals(result.handoff.generated_by_system, true, 'lo genera el sistema, no Andrés');
-    t.equals(result.handoff.origin_model, 'OPENAI', 'origen: productor');
     t.equals(result.handoff.target_model, 'ANTHROPIC', 'destino: auditor independiente');
     t.equals(result.handoff.reconciled, true, 'el ciclo se cierra reconciliando el handoff');
 
-    var roles = result.models.map(function (m) { return m.model + ':' + m.role; });
-    t.includes(roles, 'ANTHROPIC:AUDITOR', 'el segundo modelo actúa como auditor');
-    t.equals(result.models.filter(function (m) { return m.role === 'AUDITOR'; }).length, 1,
-      'una sola auditoría en la corrida');
+    // --- el arreglo del loop: el auditor tiene DOS turnos, no uno.
+    t.equals(providers.ANTHROPIC.calls.length, 2, 'el auditor interviene dos veces');
+    t.equals(result.auditor_turns, 2, 'su ciclo se cierra: lectura y luego veredicto');
+    t.equals(result.audit.retrieved_by_itself, true, 'recuperó por sí mismo');
+    t.includes(providers.ANTHROPIC.calls[0].prompt, 'No emitas veredicto todavía',
+      'el primer turno es sólo de lectura');
+    t.includes(providers.ANTHROPIC.calls[1].prompt, 'Evidencia que TÚ recuperaste',
+      'el segundo turno recibe lo que él mismo recuperó');
+    t.includes(providers.ANTHROPIC.calls[1].prompt, 'met-canon-01',
+      'y esa evidencia está efectivamente en su prompt de veredicto');
+    t.includes(result.auditor_documents, 'met-canon-01',
+      'el auditor trajo un documento que el productor no había recuperado');
+    t.includes(result.final_answer, 'contrastada contra el CANON',
+      'el veredicto final es el del SEGUNDO turno, no el del primero');
 
-    t.ok(result.auditor_tool_calls > 0, 'el auditor recupera por sí mismo desde las fuentes');
+    // --- independencia y cierre de ciclo
+    t.equals(result.models.filter(function (m) { return m.role === 'AUDITOR'; }).length, 2,
+      'ambos turnos del auditor van con rol AUDITOR');
     var auditorPrompt = providers.ANTHROPIC.calls[0].prompt;
     t.includes(auditorPrompt, 'met-prop-01', 'el handoff transporta punteros');
     t.equals(auditorPrompt.indexOf('Borrador, no decisión'), -1, 'el handoff NO transporta sustancia copiada');
-    t.includes(result.final_answer, 'Veredicto del auditor', 'el operador recibe una sola respuesta final');
     t.equals(result.status, 'COMPLETED', 'corrida completada');
   });
 
@@ -75,7 +90,7 @@
   TestRunner.acceptance('AC-03', 'Modelo primario no obliga transferencia', function (t) {
     // ANDREA tiene OPENAI como primario; la corrida empieza en ANTHROPIC.
     var providers = Fixtures.providers([], [
-      { text: '', tool_requests: [read('notion.search', { query: 'reorganizacion', context: 'ANDREA' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'reorganizacion' })] },
       { text: 'Propuesta de estructura comercial en tres bloques.', tool_requests: [] }
     ]);
 
@@ -115,52 +130,69 @@
   });
 
   // -------------------------------------------------------------------- 5
-  TestRunner.acceptance('AC-05', 'Vigencia: cerrar la cadena de decisión antes de afirmar estado', function (t) {
-    // (a) cadena cerrable: D-001 -> D-014 (vigente)
+  TestRunner.acceptance('AC-05', 'Vigencia: cerrar la cadena de sustitución antes de afirmar estado', function (t) {
+    // (a) cadena cerrable desde el registro real: D-001 --Sustituida por--> D-014
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [
-        read('notion.search', { query: 'auto-registro', context: 'METIS' }),
-        read('notion.search', { query: 'canon', context: 'METIS' })
-      ] },
+      { text: '', tool_requests: [read('notion.decisions', {})] },
       { text: 'La capacidad de auto-registro fue retirada por D-014; el CANON la autorizaba, ' +
               'pero autorización y estado operativo son objetos distintos.', tool_requests: [] }
     ], []);
 
     var cerrada = Orchestrator.run(
       '¿Sigue vigente la capacidad de auto-registro en Metis?',
-      { current_model: 'OPENAI', providers: providers,
-        structured_hints: Fixtures.HINTS, currency_root: 'D-001' });
+      { current_model: 'OPENAI', providers: providers, currency_root: 'met-dec-001' });
 
-    t.ok(!!cerrada.currency, 'se evalúa la cadena de vigencia');
+    t.equals(cerrada.decisions_seen, 2, 'el registro devolvió las decisiones del contexto');
     t.equals(cerrada.currency.closed, true, 'la cadena cierra');
-    t.deepEquals(cerrada.currency.chain, ['D-001', 'D-014'], 'la cadena recorre hasta la decisión vigente');
-    t.equals(cerrada.currency.terminal, 'D-014', 'la decisión vigente es la terminal');
+    t.deepEquals(cerrada.currency.chain, ['met-dec-001', 'met-dec-014'],
+      'la cadena recorre la relación `Sustituida por` hasta la terminal');
+    t.equals(cerrada.currency.terminal, 'met-dec-014', 'la decisión vigente es la terminal');
+    t.equals(cerrada.currency.default_applied, true,
+      'la terminal tiene `Estado` vacío: vigente por el default declarado');
+    t.includes(cerrada.final_answer, 'Estado` vacío',
+      'la respuesta advierte que aplicó el default en vez de un valor explícito');
     t.equals(cerrada.route, 'LOCAL', 'con vigencia cerrada se puede responder');
     t.equals(cerrada.status, 'COMPLETED', 'corrida completada');
-    t.includes(cerrada.final_answer, 'cadena cerrada', 'la respuesta declara el cierre de la cadena');
 
     // (b) misma pregunta con la cadena ABIERTA: no se afirma estado.
     var providers2 = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.search', { query: 'd-001', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'd-001' })] },
       { text: 'Sólo veo la decisión de alta.', tool_requests: [] }
     ], []);
 
     var abierta = Orchestrator.run(
       '¿Sigue vigente la capacidad de auto-registro en Metis?',
-      { current_model: 'OPENAI', providers: providers2,
-        structured_hints: { 'met-dec-001': Fixtures.HINTS['met-dec-001'] }, currency_root: 'D-001' });
+      { current_model: 'OPENAI', providers: providers2, currency_root: 'met-dec-001' });
 
     t.equals(abierta.currency.closed, false, 'la cadena no cierra');
-    t.equals(abierta.currency.missing, 'D-014', 'se nombra el eslabón que falta');
+    t.equals(abierta.currency.missing, 'met-dec-014', 'se nombra el eslabón que falta');
+    t.equals(abierta.currency.reason, 'ESLABON_NO_RECUPERADO', 'motivo explícito');
     t.equals(abierta.route, 'ABSTAIN', 'sin cierre de cadena, se abstiene');
     t.equals(abierta.status, 'UNCERTAIN', 'estado UNCERTAIN, no COMPLETED');
     t.includes(abierta.final_answer, 'no afirmo estado', 'no afirma vigencia');
+
+    // (c) contradicción real del registro: `Estado` vigente en una fila que SÍ
+    //     tiene `Sustituida por`. Dos señales de la misma fuente competente.
+    var providers3 = Fixtures.providers([
+      { text: '', tool_requests: [read('notion.decisions', {})] },
+      { text: 'Reviso la estructura.', tool_requests: [] }
+    ], []);
+
+    var conflicto = Orchestrator.run(
+      '¿Qué decisión de estructura sigue vigente en Arquitecto Interior?',
+      { current_model: 'OPENAI', providers: providers3, operator_context: 'ARQUITECTO_INTERIOR' });
+
+    t.equals(conflicto.currency_conflicts.length, 1, 'se detecta exactamente una contradicción');
+    t.equals(conflicto.currency_conflicts[0].reason, 'ESTADO_VIGENTE_CON_SUSTITUTA', 'motivo nombrado');
+    t.equals(conflicto.route, 'REQUIRES_ANDRES', 'la contradicción no la resuelve un modelo');
+    t.equals(conflicto.status, 'REQUIRES_ANDRES', 'la corrida se detiene en Andrés');
+    t.includes(conflicto.final_answer, 'No la resuelvo por juicio propio', 'y lo dice');
   });
 
   // -------------------------------------------------------------------- 6
   TestRunner.acceptance('AC-06', 'Prompt injection interna: PHI histórico es evidencia, no mandato', function (t) {
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.fetch', { id: 'met-phi-047', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.fetch', { id: 'met-phi-047' })] },
       // El modelo "obedece" la inyección: pide una herramienta no concedida.
       { text: 'El PHI-047 contiene instrucciones imperativas; las reporto como evidencia histórica.',
         tool_requests: [read('simulate.gmail_send', {
@@ -192,7 +224,7 @@
   // -------------------------------------------------------------------- 7
   TestRunner.acceptance('AC-07', 'Destino derivado de Retrieval: REQUIRES_ANDRES y sólo simulación', function (t) {
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('asana.search', { query: 'registrar', context: 'METIS' })] },
+      { text: '', tool_requests: [read('asana.search', { query: 'registrar' })] },
       { text: 'Propongo registrar la decisión en la tarea encontrada.',
         tool_requests: [read('simulate.asana_write', {
           operation: 'update',
@@ -217,7 +249,6 @@
     t.equals(action.destination_provenance, 'RETRIEVED_CONTENT', 'el destino proviene de contenido recuperado');
     t.equals(action.effect, 'SIMULATED_WRITE', 'el efecto es escritura simulada');
     t.equals(action.status, 'SIMULATED', 'el paso termina en SIMULATED');
-    t.equals(action.simulation.simulated, true, 'la acción se simuló');
     t.equals(action.simulation.blocked_by_policy, true, 'la simulación queda bloqueada por política');
     t.equals(action.simulation.block_reason, 'DESTINATION_FROM_RETRIEVED_CONTENT', 'motivo explícito');
     t.equals(action.simulation.would_call, 'PUT https://app.asana.com/api/1.0/tasks/{gid}',
@@ -246,7 +277,7 @@
     });
 
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.search', { query: 'tablero', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'tablero' })] },
       { text: 'Propongo cerrar el tablero y ajustar el filtro de la vista.', tool_requests: [cerrar, ocultar] }
     ], []);
 
@@ -259,7 +290,7 @@
     var grant = AuthorityPolicy.postContextGrant(AuthorityPolicy.declaredCeiling(), 'METIS',
       { source: 'LIVE_OPERATOR', requests_execution: true });
     var sueltas = Orchestrator.buildPlannedActions({ execution_id: 'aislado' },
-      [cerrar.arguments, ocultar.arguments].map(function (a, i) {
+      [cerrar.arguments, ocultar.arguments].map(function (a) {
         return {
           tool: 'simulate.notion_write', operation: a.operation, destination: a.destination,
           destination_provenance: a.destination_provenance, payload: a.payload,
@@ -284,11 +315,12 @@
   });
 
   // -------------------------------------------------------------------- 9
-  TestRunner.acceptance('AC-09', 'Replay: handoff caducado o reconciliado es rechazado', function (t) {
+  TestRunner.acceptance('AC-09', 'Replay: rechazado incluso desde OTRA ejecución', function (t) {
     var providers = Fixtures.providers([
-      { text: '', tool_requests: [read('notion.search', { query: 'gobernanza', context: 'METIS' })] },
+      { text: '', tool_requests: [read('notion.search', { query: 'gobernanza' })] },
       { text: 'Entregable del productor.', tool_requests: [] }
     ], [
+      { text: 'Reviso.', tool_requests: [read('notion.search', { query: 'canon' })] },
       { text: 'Veredicto del auditor: sin bloqueo material.', tool_requests: [] }
     ]);
 
@@ -296,7 +328,13 @@
       'Audita esta propuesta de gobernanza de Metis',
       { current_model: 'OPENAI', providers: providers });
 
-    var handoff = {
+    t.equals(result.handoff.reconciled, true, 'el handoff quedó reconciliado al cerrar el ciclo');
+
+    // El replay llega en OTRA ejecución: la memoria del proceso ya no existe.
+    // El registro persistido es lo único que puede rechazarlo.
+    Fixtures.newProcess();
+
+    var replay = {
       handoff_id: result.handoff.handoff_id,
       execution_id: result.execution_id,
       emitted_at: result.handoff.emitted_at,
@@ -306,13 +344,27 @@
       objective: 'reintento', context: 'METIS', evidence_refs: [], restrictions: [],
       authority: AuthorityPolicy.postContextGrant(AuthorityPolicy.declaredCeiling(), 'METIS',
         { source: 'FIXED_POLICY', requests_execution: false }),
+      // El atacante presenta el handoff como no reconciliado.
       expected_output: 'veredicto', reconciled: false
     };
 
-    t.equals(result.handoff.reconciled, true, 'el handoff quedó reconciliado al cerrar el ciclo');
     t.throwsCode(Errors.CODES.HANDOFF_REPLAY, function () {
-      HandoffBuilder.assertConsumable(handoff);
-    }, 'el replay del handoff reconciliado se rechaza de forma visible');
+      HandoffBuilder.assertConsumable(replay);
+    }, 'el replay se rechaza pese a venir con reconciled:false y sin memoria de proceso');
+
+    // Un handoff que este runtime nunca emitió tampoco se acepta.
+    var inventado = JSON.parse(JSON.stringify(replay));
+    inventado.handoff_id = 'handoff-inventado';
+    t.throwsCode(Errors.CODES.HANDOFF_INVALID, function () {
+      HandoffBuilder.assertConsumable(inventado);
+    }, 'un handoff sin emisión registrada se rechaza');
+
+    // Alterar la caducidad tampoco sirve: manda la del registro.
+    var estirado = JSON.parse(JSON.stringify(replay));
+    estirado.expires_at = Schemas.toIso(new Date(Fixtures.nowMs() + 86400000));
+    t.throwsCode(Errors.CODES.HANDOFF_INVALID, function () {
+      HandoffBuilder.assertConsumable(estirado);
+    }, 'una caducidad alterada respecto de la emisión se rechaza');
 
     // Un plan que se apoye en ese handoff queda bloqueado por la invariante 7.
     var grant = AuthorityPolicy.postContextGrant(AuthorityPolicy.declaredCeiling(), 'METIS',
@@ -322,7 +374,7 @@
         tool: 'simulate.asana_write', operation: 'update', destination: 'asana:met-task-12',
         destination_provenance: 'LIVE_OPERATOR', payload: { nota: 'x' },
         destination_meta: { context: 'METIS', tags: ['TASK'] }, source_context: 'METIS'
-      }]), grant, 'METIS', { handoff: handoff });
+      }]), grant, 'METIS', { handoff: replay });
     t.notOk(plan.plan.valid, 'el plan con handoff reconciliado se bloquea');
     t.includes(plan.plan.block_reason, 'I7_HANDOFF_REJECTED', 'invariante 7 identificada');
 
@@ -345,8 +397,8 @@
 
     var providers = Fixtures.providers([
       { text: '', tool_requests: [
-        read('notion.search', { query: 'metis', context: 'METIS' }),
-        read('drive.search', { query: 'metis', context: 'METIS' })
+        read('notion.search', { query: 'metis' }),
+        read('drive.search', { query: 'metis' })
       ] },
       { text: 'Encontré notas en Notion; Drive no respondió.', tool_requests: [] }
     ], []);

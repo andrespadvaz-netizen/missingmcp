@@ -57,6 +57,8 @@ var Router = (function () {
    * @param {string|null} input.resolved_context
    * @param {string|null} input.context_route        ruta impuesta por ContextResolver
    * @param {boolean} input.authority_conflict
+   * @param {boolean} input.currency_conflict   contradicción Estado vs relación
+   * @param {boolean} input.currency_open       cadena de sustitución sin cerrar
    * @param {{complete:boolean}|null} input.coverage
    * @param {boolean} input.audit_completed
    * @param {boolean} input.audit_blocks_materially
@@ -82,17 +84,24 @@ var Router = (function () {
       return _decision('REQUIRES_ANDRES', null, 'AUTHORITY_CONFLICT');
     }
 
-    // 3. Vigencia no cerrable: no se afirma estado.
+    // 3. Contradicción dentro del registro de decisiones (p. ej. `Estado`
+    //    vigente en una fila que sí tiene `Sustituida por`). Dos señales de la
+    //    misma fuente competente que se contradicen: no lo resuelve un modelo.
+    if (input.currency_conflict) {
+      return _decision('REQUIRES_ANDRES', null, 'CURRENCY_CONFLICT');
+    }
+
+    // 4. Vigencia no cerrable: no se afirma estado.
     if (input.currency_open) {
       return _decision('ABSTAIN', null, 'CURRENCY_CHAIN_OPEN');
     }
 
-    // 4. Cobertura insuficiente: abstenerse o acotar, nunca fingir exhaustividad.
+    // 5. Cobertura insuficiente: abstenerse o acotar, nunca fingir exhaustividad.
     if (input.coverage && input.coverage.complete === false) {
       return _decision('ABSTAIN', null, 'COVERAGE_INCOMPLETE');
     }
 
-    // 5. Cierre de ciclo: tras una auditoría el veredicto vuelve al originador.
+    // 6. Cierre de ciclo: tras una auditoría el veredicto vuelve al originador.
     if (input.audit_completed) {
       if (input.audit_blocks_materially) {
         return _decision('REQUIRES_ANDRES', null, 'AUDIT_BLOCKS_MATERIALLY');
@@ -101,7 +110,7 @@ var Router = (function () {
         [{ model: current, role: 'LOCAL' }]);
     }
 
-    // 6. Instrucción expresa del operador.
+    // 7. Instrucción expresa del operador.
     if (input.operator_model_instruction) {
       var wanted = input.operator_model_instruction;
       if (wanted === current) {
@@ -112,28 +121,28 @@ var Router = (function () {
         [{ model: current, role: 'PRODUCER' }, { model: wanted, role: 'PRODUCER' }]);
     }
 
-    // 7. Auditoría cruzada obligatoria: productor + auditor independiente.
+    // 8. Auditoría cruzada obligatoria: productor + auditor independiente.
     if (input.requires_cross_audit) {
       var auditor = other(current);
       return _decision('CROSS_AUDIT', auditor, 'MANDATORY_CROSS_AUDIT', MATERIAL_CAUSES.MANDATORY_CROSS_AUDIT,
         [{ model: current, role: 'PRODUCER' }, { model: auditor, role: 'AUDITOR' }]);
     }
 
-    // 8. Gap de capacidad técnica.
+    // 9. Gap de capacidad técnica.
     if (input.capability_gap && input.capability_gap.available_in && input.capability_gap.available_in !== current) {
       var capTarget = input.capability_gap.available_in;
       return _decision(capTarget, capTarget, 'CAPABILITY_GAP', MATERIAL_CAUSES.CAPABILITY_GAP,
         [{ model: current, role: 'PRODUCER' }, { model: capTarget, role: 'PRODUCER' }]);
     }
 
-    // 9. Herramienta exclusiva del otro entorno.
+    // 10. Herramienta exclusiva del otro entorno.
     if (input.exclusive_tool && input.exclusive_tool.environment && input.exclusive_tool.environment !== current) {
       var toolTarget = input.exclusive_tool.environment;
       return _decision(toolTarget, toolTarget, 'EXCLUSIVE_TOOL', MATERIAL_CAUSES.EXCLUSIVE_TOOL,
         [{ model: current, role: 'PRODUCER' }, { model: toolTarget, role: 'PRODUCER' }]);
     }
 
-    // 10. Continuidad material: sólo con artefacto verificable nombrable.
+    // 11. Continuidad material: sólo con artefacto verificable nombrable.
     if (input.continuity && input.continuity.artifact_id) {
       var primary = Config.primaryFor(input.resolved_context);
       if (primary && primary !== current) {
@@ -142,7 +151,7 @@ var Router = (function () {
       }
     }
 
-    // 11. Default: resolver localmente. El primario NO obliga transferencia.
+    // 12. Default: resolver localmente. El primario NO obliga transferencia.
     return _decision('LOCAL', null, 'LOCAL_BY_DEFAULT', null, [{ model: current, role: 'LOCAL' }]);
   }
 

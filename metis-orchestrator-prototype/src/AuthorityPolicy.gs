@@ -13,7 +13,8 @@
  */
 var AuthorityPolicy = (function () {
 
-  var READ_TOOLS = ['notion.search', 'notion.fetch', 'asana.search', 'asana.get',
+  var READ_TOOLS = ['notion.search', 'notion.fetch', 'notion.decisions',
+                    'asana.search', 'asana.get',
                     'calendar.read', 'drive.search', 'drive.fetch'];
 
   var SIMULATED_WRITE_TOOLS = ['simulate.notion_write', 'simulate.asana_write',

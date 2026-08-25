@@ -32,7 +32,10 @@ var ToolBroker = (function () {
     'asana.get':      { capability: 'asana_read',    source: 'ASANA',    substance: true },
     'calendar.read':  { capability: 'calendar_read', source: 'CALENDAR', substance: false },
     'drive.search':   { capability: 'drive_read',    source: 'DRIVE',    substance: false },
-    'drive.fetch':    { capability: 'drive_read',    source: 'DRIVE',    substance: true }
+    'drive.fetch':    { capability: 'drive_read',    source: 'DRIVE',    substance: true },
+    // Lectura estructurada del registro de decisiones: query de data source con
+    // filtro por Proyecto y relaciones de sustitución (spec §9, precedencia).
+    'notion.decisions': { capability: 'notion_read',  source: 'NOTION',   substance: true }
   };
 
   var DESCRIPTIONS = {
@@ -43,6 +46,8 @@ var ToolBroker = (function () {
     'calendar.read': 'Lee eventos de calendarios declarados en una ventana temporal.',
     'drive.search': 'Busca archivos en Drive por título. Devuelve punteros.',
     'drive.fetch': 'Recupera el contenido de texto de un archivo de Drive por id.',
+    'notion.decisions': 'Consulta el registro de decisiones del contexto resuelto y devuelve ' +
+      'cada decisión con su Estado y sus relaciones de sustitución, para poder cerrar vigencia.',
     'simulate.notion_write': 'Propone una escritura en Notion. SIMULADA: no ejecuta nada.',
     'simulate.asana_write': 'Propone una escritura en Asana. SIMULADA: no ejecuta nada.',
     'simulate.calendar_write': 'Propone una escritura en Calendar. SIMULADA: no ejecuta nada.',
@@ -81,6 +86,7 @@ var ToolBroker = (function () {
       evidence_refs: [],
       documents: [],
       proposed_actions: [],
+      decisions: [],
       risk_signals: [],
       tool_errors: [],
       source_status: {},
@@ -95,7 +101,7 @@ var ToolBroker = (function () {
   function _withRetries(session, source, fn) {
     var attempts = 0;
     var lastError = null;
-    while (attempts <= Config.LIMITS.MAX_READ_RETRIES) {
+    while (attempts <= Config.limits().MAX_READ_RETRIES) {
       try {
         var result = fn();
         _markSource(session, source, true, null);
@@ -142,6 +148,12 @@ var ToolBroker = (function () {
       };
       session.documents.push(stored);
 
+      // Señal estructurada del registro de decisiones: se conserva aparte de la
+      // sustancia para poder cerrar la cadena de vigencia sin releer el texto.
+      if (doc.decision) {
+        session.decisions.push(doc.decision);
+      }
+
       if (wantsSubstance && doc.snippet) {
         var injection = RetrievalPolicy.detectInjection(doc.snippet);
         if (injection.is_injection_attempt) {
@@ -169,7 +181,7 @@ var ToolBroker = (function () {
     if (session.grant.allowed_tools.indexOf(toolName) === -1) {
       throw Errors.toolNotAllowed(toolName);
     }
-    if (session.tool_calls >= Config.LIMITS.MAX_TOOL_CALLS) {
+    if (session.tool_calls >= Config.limits().MAX_TOOL_CALLS) {
       throw Errors.limitExceeded('MAX_TOOL_CALLS', session.tool_calls);
     }
     session.tool_calls++;
@@ -201,15 +213,34 @@ var ToolBroker = (function () {
 
     ContextResolver.assertReadAllowed(session.scope, params.context ? params.context : null, spec.substance);
 
+    // Ninguna lectura sin contexto resuelto. Antes de resolver no se toca una
+    // fuente: es lo que impide desambiguar leyendo de los dos contextos.
+    if (!session.scope.resolved) {
+      throw Errors.contextAmbiguous(session.scope.candidates);
+    }
+
+    // Partición efectiva: la consulta se acota EN ORIGEN al contenedor
+    // declarado para (contexto, fuente). Sin partición declarada no se lee
+    // esa fuente — fail closed, no "lee todo y filtra después".
+    var partition = Config.partitionFor(session.scope.resolved, spec.source);
+    if (!partition) {
+      throw Errors.sourcePartitionUndeclared(session.scope.resolved, spec.source);
+    }
+    var scoped = { partition: partition, context: session.scope.resolved };
+    Object.keys(params).forEach(function (k) {
+      if (k !== 'partition' && k !== 'context') { scoped[k] = params[k]; }
+    });
+
     var outcome = _withRetries(session, spec.source, function () {
       switch (toolName) {
-        case 'notion.search': return NotionReadAdapter.search(params.query, params);
-        case 'notion.fetch':  return [NotionReadAdapter.fetch(params.id)];
-        case 'asana.search':  return AsanaReadAdapter.search(params.query, params);
-        case 'asana.get':     return [AsanaReadAdapter.get(params.id)];
-        case 'calendar.read': return CalendarReadAdapter.read(params.query, params.time_window);
-        case 'drive.search':  return DriveReadAdapter.search(params.query, params);
-        case 'drive.fetch':   return [DriveReadAdapter.fetch(params.id)];
+        case 'notion.search':    return NotionReadAdapter.search(scoped.query, scoped);
+        case 'notion.fetch':     return [NotionReadAdapter.fetch(scoped.id, scoped)];
+        case 'notion.decisions': return NotionReadAdapter.decisions(scoped);
+        case 'asana.search':     return AsanaReadAdapter.search(scoped.query, scoped);
+        case 'asana.get':        return [AsanaReadAdapter.get(scoped.id, scoped)];
+        case 'calendar.read':    return CalendarReadAdapter.read(scoped.query, scoped.time_window, scoped);
+        case 'drive.search':     return DriveReadAdapter.search(scoped.query, scoped);
+        case 'drive.fetch':      return [DriveReadAdapter.fetch(scoped.id, scoped)];
         default: throw Errors.toolNotAllowed(toolName);
       }
     });
@@ -229,7 +260,8 @@ var ToolBroker = (function () {
         return {
           id: d.id, title: d.title, context: d.context, kind: d.kind,
           epistemic_status: d.epistemic_status,
-          snippet: spec.substance ? (d.snippet === undefined ? null : d.snippet) : null
+          snippet: spec.substance ? (d.snippet === undefined ? null : d.snippet) : null,
+          decision: d.decision ? d.decision : null
         };
       })
     };

@@ -39,14 +39,14 @@ tools/                         arnés local de ejecución (NO se sube a Apps Scr
 | `Schemas.gs` | contratos de la spec §4 con validación de campos **exacta**, hashes, reloj e ids inyectables |
 | `Ledger.gs` | ledger técnico: identidad `execution_id + ordinal`, guarda de consistencia, máquina de estados, retención, contadores de costo |
 | `ContextResolver.gs` | contexto e intención; bloquea antes de mezclar sustancia de contextos incompatibles |
-| `RetrievalPolicy.gs` | precedencia de fuentes, cierre de cadena de vigencia, cobertura, etiquetas epistémicas, detección de prompt injection |
+| `RetrievalPolicy.gs` | precedencia de fuentes, vigencia por `Estado` + relaciones de sustitución, cobertura, etiquetas epistémicas, detección de prompt injection |
 | `AuthorityPolicy.gs` | techo predeclarado, fase de lectura, fase de acción (sólo estrecha), procedencia de destino |
 | `Router.gs` | LOCAL por default; transferencia sólo por causa material; cierre de ciclo |
 | `HandoffBuilder.gs` | handoff generado por el sistema, con TTL, anti-replay y punteros (no corpus) |
 | `PlanValidator.gs` | las 7 invariantes de la spec §7 sobre el **plan completo** |
 | `ProviderAdapter.gs` / `OpenAIAdapter.gs` / `AnthropicAdapter.gs` | interfaz común y misma respuesta normalizada para ambos proveedores |
 | `ToolBroker.gs` | contrato común de herramientas, guardas de alcance, tope de tool calls, retries acotados |
-| `*ReadAdapter.gs` | lectura **real** de sólo lectura de Notion, Asana, Drive y Calendar |
+| `*ReadAdapter.gs` | lectura **real** de sólo lectura de Notion (incluida la query de data source del registro de decisiones), Asana, Drive y Calendar, siempre acotada a la partición del contexto |
 | `SimulatedWriteAdapter.gs` | escritura exclusivamente simulada; no referencia ninguna superficie externa |
 | `Orchestrator.gs` | el flujo completo y el contrato de salida mínimo |
 | `Main.gs` | puntos de entrada **manuales** |
@@ -84,9 +84,29 @@ Configuración del proyecto → *Propiedades del script*.
 | `METIS_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` | invocar la Messages API |
 | `METIS_NOTION_API_KEY` | `NOTION_API_KEY` | lectura de Notion |
 | `METIS_ASANA_API_KEY` | `ASANA_API_KEY` | lectura de Asana |
-| `METIS_ASANA_WORKSPACE_GID` | `ASANA_WORKSPACE_GID` | workspace del typeahead |
-| `METIS_CALENDAR_READ_IDS` | `CALENDAR_READ_IDS` | calendarios legibles (**nunca el primario productivo**) |
-| `METIS_DRIVE_READ_FOLDER_IDS` | `DRIVE_READ_FOLDER_IDS` | carpetas acotadas (reservado) |
+| `METIS_SOURCE_PARTITIONS` | `SOURCE_PARTITIONS` | qué contenedor de cada fuente pertenece a cada contexto |
+| `METIS_PRICING` | `PRICING` | precio por 1.000 tokens, por proveedor y modelo |
+| `METIS_LIMITS` | `LIMITS` | override opcional de los límites por corrida |
+| `METIS_DECISIONS_DATA_SOURCE_ID` | `DECISIONS_DATA_SOURCE_ID` | data source del registro de decisiones (opcional) |
+
+### Partición de fuentes por contexto
+
+`METIS_SOURCE_PARTITIONS` es lo que hace real la separación de contexto: cada
+consulta se acota **en origen** al contenedor declarado —data source de Notion
+con filtro por `Proyecto`, proyecto de Asana, carpeta de Drive, calendario— en
+vez de leer todo y descartar después. **Sin partición declarada para
+(contexto, fuente), esa fuente no se lee.** Un objeto de otro contexto no es
+"filtrado": es inalcanzable, y pedirlo por id lanza `PARTITION_VIOLATION`.
+
+Nunca declares ahí el calendario primario productivo, ni los data sources de
+CANON, Chat Log o Handoffs PHI: son superficies prohibidas.
+
+### Precios
+
+No hay tabla de precios en el código, y el guard G8 lo impide. Los precios
+cambian; uno obsoleto produce un contador de costo falso, que es peor que no
+tenerlo. Si falta el precio del modelo que se usó, el costo queda **desconocido**
+y la corrida **falla cerrada** en vez de estimar contra un contador ciego.
 
 Reglas que el código impone, no sólo documenta:
 
@@ -142,7 +162,7 @@ Opciones útiles de `Orchestrator.run(request, options)`:
 | `requires_cross_audit` | fuerza auditoría cruzada |
 | `capability_gap`, `exclusive_tool`, `continuity` | causas materiales de transferencia |
 | `required_sources` | fuentes que deben tener cobertura para poder afirmar exhaustividad |
-| `currency_root` | decisión raíz cuya cadena de vigencia hay que cerrar |
+| `currency_root` | id de la decisión raíz cuya cadena de sustitución hay que cerrar |
 
 Cada corrida devuelve el contrato de salida mínimo: `execution_id`, contexto,
 intención, ruta y motivo, modelos y rol, fuentes consultadas, cobertura,
@@ -155,9 +175,13 @@ vigencia, evidencia con etiqueta epistémica, señales de riesgo, handoff,
 Dentro de Apps Script, a mano:
 
 ```javascript
-runUnitTests();        // 7 suites de la spec §17 (+ contrato de proveedor y adaptadores)
+runUnitTests();        // suites de la spec §17 + partición, vigencia, presupuesto y contratos
 runAcceptanceCases();  // los 10 casos de la spec §16
 runAllTests();         // todo, con veredicto PASS/FAIL
+
+// Nivel 1: una lectura real acotada por (contexto, fuente). Sin modelos,
+// sin plan, sin simulación, sin escritura. Requiere RUN_LEVEL = LEVEL_1.
+smokeTestLevel1();
 ```
 
 Fuera de Apps Script, para poder **imprimir** los resultados sin desplegar:
@@ -187,13 +211,32 @@ Comprobado, no sólo declarado (`node tools/static_guards.js`):
 | G5 | `SimulatedWriteAdapter.gs` no referencia ninguna superficie externa |
 | G6 | `appsscript.json` declara exactamente tres scopes, todos de lectura |
 | G7 | ningún literal con forma de secreto en código ni fixtures |
+| G8 | ninguna tabla de precios embebida: el costo se lee de configuración |
+| G9 | todo adaptador de lectura exige partición declarada antes de leer |
 
 El análisis se hace sobre el código con comentarios y literales de cadena
 eliminados, de modo que la tabla documental `WOULD_CALL` (que menciona
 `GmailApp.sendEmail(...)` como texto) no produzca falsos positivos ni tape una
 referencia real. Los guards están verificados en negativo: al inyectar
-deliberadamente un trigger, una llamada a Gmail y un scope de escritura, G1, G2,
-G5 y G6 fallan.
+deliberadamente un trigger, una llamada a Gmail y un scope de escritura fallan
+G1, G2, G5 y G6; al embeber un precio y quitar la guarda de partición de un
+adaptador fallan G8 y G9.
+
+## 7 bis. Vigencia: cómo se decide
+
+El registro de decisiones da **dos** señales y no siempre coinciden: la relación
+`Sustituida por` y el select `Estado` (`vigente` | `modificada` | `derogada`).
+La regla implementada, contrastada contra los datos reales:
+
+- **la relación manda** cuando el `Estado` falta — está vacío en la mayoría de
+  las filas reales, así que el vacío se resuelve por el default declarado en la
+  propia propiedad ("por defecto vigente") y la respuesta lo **dice**;
+- **cuando ambas señales hablan y se contradicen** —una fila marcada `vigente`
+  que sí tiene sustituta— no manda ninguna: es `CURRENCY_CONFLICT` y la corrida
+  para en `REQUIRES_ANDRES`;
+- la cadena se recorre por `Sustituida por` hasta la terminal. Si falta un
+  eslabón, hay ciclo, o alguna decisión de la cadena está en conflicto, la
+  cadena **no cierra** y no se afirma estado.
 
 ## 8. Límites de la corrida
 
@@ -202,8 +245,8 @@ auto-ampliación:
 
 | Límite | Default |
 | --- | --- |
-| intervenciones de modelo | 3 (productor con Retrieval + producción, y auditor) |
-| tool calls | 12 |
+| intervenciones de modelo | 4 — un ciclo cerrado: productor (lectura + producción) y auditor (lectura + veredicto) |
+| tool calls | 16 |
 | retries de lectura | 2 |
 | presupuesto por corrida | 0.50 USD estimados |
 | techo diario / mensual | 5 / 25 USD estimados |

@@ -6,6 +6,12 @@
  *  - Lleva emisión, caducidad, `handoff_id`, `execution_id` y estado `reconciled`.
  *  - Replay de handoff caducado o ya reconciliado: rechazo visible.
  *  - Conserva la etiqueta epistémica de cada evidencia.
+ *
+ * El estado de consumo/reconciliación se PERSISTE en el ledger técnico, no en
+ * memoria del proceso: el replay que de verdad importa llega en otra ejecución,
+ * y un registro process-local se pierde entre corridas. Sin ledger disponible
+ * no se puede probar que un handoff no fue consumido ya, así que consumirlo
+ * falla cerrado.
  */
 var HandoffBuilder = (function () {
 
@@ -18,7 +24,10 @@ var HandoffBuilder = (function () {
     MAX_EVIDENCE_REFS: 8
   };
 
-  /** Registro de consumo, local a la corrida. No es fuente de verdad. */
+  /**
+   * Espejo en memoria del registro persistido: acelera la corrida en curso,
+   * pero NUNCA es la autoridad. Toda decisión de replay consulta el ledger.
+   */
   var _registry = {};
 
   function resetRegistry() { _registry = {}; }
@@ -73,6 +82,9 @@ var HandoffBuilder = (function () {
     };
 
     Schemas.assertValid('Handoff', handoff);
+    // Emisión registrada de forma persistente: es lo que permite detectar un
+    // replay llegado en otra ejecución.
+    Ledger.recordHandoffIssued(handoff);
     _registry[handoff.handoff_id] = { reconciled: false, consumed_count: 0 };
     return handoff;
   }
@@ -82,9 +94,15 @@ var HandoffBuilder = (function () {
     return new Date(handoff.expires_at).getTime() <= t;
   }
 
+  /**
+   * Autoridad = ledger persistido. El objeto en mano puede venir de un replay
+   * con `reconciled:false` fabricado; el registro no.
+   */
   function isReconciled(handoff) {
-    var record = _registry[handoff.handoff_id];
-    if (record && record.reconciled) { return true; }
+    var persisted = Ledger.handoffRecord(handoff.handoff_id);
+    if (persisted && persisted.reconciled) { return true; }
+    var local = _registry[handoff.handoff_id];
+    if (local && local.reconciled) { return true; }
     return handoff.reconciled === true;
   }
 
@@ -94,6 +112,19 @@ var HandoffBuilder = (function () {
    */
   function assertConsumable(handoff, nowMs) {
     Schemas.assertValid('Handoff', handoff);
+
+    // Sin ledger no se puede demostrar que no fue consumido: fail closed.
+    var persisted = Ledger.handoffRecord(handoff.handoff_id);
+    if (!persisted) {
+      throw Errors.make(Errors.CODES.HANDOFF_INVALID,
+        'Handoff sin emisión registrada: ' + handoff.handoff_id +
+        '. No se acepta un handoff que este runtime no emitió.');
+    }
+    // La caducidad manda la del registro, no la del objeto presentado.
+    if (persisted.expires_at !== handoff.expires_at) {
+      throw Errors.make(Errors.CODES.HANDOFF_INVALID,
+        'Caducidad alterada respecto de la emisión: ' + handoff.handoff_id);
+    }
     if (isReconciled(handoff)) {
       throw Errors.handoffReplay(handoff.handoff_id);
     }
@@ -105,23 +136,15 @@ var HandoffBuilder = (function () {
 
   function consume(handoff, nowMs) {
     assertConsumable(handoff, nowMs);
-    var record = _registry[handoff.handoff_id];
-    if (!record) {
-      record = { reconciled: false, consumed_count: 0 };
-      _registry[handoff.handoff_id] = record;
-    }
-    record.consumed_count += 1;
-    return record.consumed_count;
+    var count = Ledger.recordHandoffConsumed(handoff.handoff_id);
+    _registry[handoff.handoff_id] = { reconciled: false, consumed_count: count };
+    return count;
   }
 
   /** Cierre de ciclo: el handoff queda reconciliado y no se reejecuta. */
   function reconcile(handoff) {
-    var record = _registry[handoff.handoff_id];
-    if (!record) {
-      record = { reconciled: false, consumed_count: 0 };
-      _registry[handoff.handoff_id] = record;
-    }
-    record.reconciled = true;
+    var persisted = Ledger.recordHandoffReconciled(handoff.handoff_id);
+    _registry[handoff.handoff_id] = { reconciled: true, consumed_count: persisted.consumed_count };
     handoff.reconciled = true;
     return handoff;
   }

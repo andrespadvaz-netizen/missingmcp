@@ -14,7 +14,9 @@
  *   G5  `SimulatedWriteAdapter.gs` no referencia ninguna superficie externa;
  *   G6  `appsscript.json` declara exactamente los scopes de sólo lectura, sin
  *       scope de escritura ni de `script.scriptapp` (que permitiría triggers);
- *   G7  no hay literales que parezcan secretos en el código ni en los fixtures.
+ *   G7  no hay literales que parezcan secretos en el código ni en los fixtures;
+ *   G8  no hay tablas de precio en el código: el costo se lee de configuración;
+ *   G9  todo adaptador de lectura exige partición declarada antes de leer.
  *
  * El análisis se hace sobre el código con COMENTARIOS Y LITERALES DE CADENA
  * ELIMINADOS, de modo que la tabla documental `WOULD_CALL` (que sí menciona
@@ -197,6 +199,48 @@ guard('G7', 'sin literales que parezcan secretos', () => {
         fails.push(f.name + ': posible secreto literal ' + hit[0].slice(0, 12) + '...');
       }
     }
+  }
+  return fails;
+});
+
+// -------------------------------------------------------------------- G8
+guard('G8', 'sin tablas de precio en el código', () => {
+  const fails = [];
+  for (const f of files) {
+    if (/PRICE_PER_1K|PRICE_TABLE/.test(f.code)) {
+      fails.push(f.name + ': tabla de precios embebida');
+    }
+    // Un precio por token escrito a mano en el código queda obsoleto y produce
+    // un contador de costo falso; debe venir de METIS_PRICING.
+    if (/(input|output)_per_1k\s*:\s*[0-9]/.test(f.code)) {
+      fails.push(f.name + ': precio numérico literal');
+    }
+  }
+  for (const name of ['OpenAIAdapter.gs', 'AnthropicAdapter.gs']) {
+    const f = files.filter((x) => x.name === name)[0];
+    if (!f) { fails.push('falta ' + name); continue; }
+    if (f.code.indexOf('Config.priceFor') === -1) {
+      fails.push(name + ': no lee el precio de la configuración');
+    }
+  }
+  return fails;
+});
+
+// -------------------------------------------------------------------- G9
+guard('G9', 'todo adaptador de lectura exige partición', () => {
+  const adapters = ['NotionReadAdapter.gs', 'AsanaReadAdapter.gs',
+                    'DriveReadAdapter.gs', 'CalendarReadAdapter.gs'];
+  const fails = [];
+  for (const name of adapters) {
+    const f = files.filter((x) => x.name === name)[0];
+    if (!f) { fails.push('falta ' + name); continue; }
+    if (f.code.indexOf('sourcePartitionUndeclared') === -1) {
+      fails.push(name + ': no rechaza la lectura sin partición declarada');
+    }
+  }
+  const broker = files.filter((x) => x.name === 'ToolBroker.gs')[0];
+  if (!broker || broker.code.indexOf('Config.partitionFor') === -1) {
+    fails.push('ToolBroker.gs: no resuelve la partición antes de invocar la lectura');
   }
   return fails;
 });

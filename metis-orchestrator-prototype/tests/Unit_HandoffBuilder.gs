@@ -89,4 +89,45 @@
     }, 'un handoff al mismo modelo no aporta independencia y se rechaza');
   });
 
+
+  TestRunner.unit('HandoffBuilder', 'el anti-replay sobrevive al fin del proceso', function (t) {
+    var handoff = build();
+    HandoffBuilder.consume(handoff);
+    HandoffBuilder.reconcile(handoff);
+
+    // Otra ejecución: la memoria del proceso se pierde, el ledger no.
+    Fixtures.newProcess();
+    t.deepEquals(HandoffBuilder.isReconciled({ handoff_id: handoff.handoff_id, reconciled: false }), true,
+      'el estado reconciliado se lee del registro persistido, no de memoria');
+
+    var falsificado = JSON.parse(JSON.stringify(handoff));
+    falsificado.reconciled = false;
+    t.throwsCode(Errors.CODES.HANDOFF_REPLAY, function () {
+      HandoffBuilder.assertConsumable(falsificado);
+    }, 'presentarlo como no reconciliado no sirve');
+  });
+
+  TestRunner.unit('HandoffBuilder', 'sólo se aceptan handoffs que este runtime emitió', function (t) {
+    var ajeno = build();
+    var copia = JSON.parse(JSON.stringify(ajeno));
+    copia.handoff_id = 'handoff-de-otro-runtime';
+    t.throwsCode(Errors.CODES.HANDOFF_INVALID, function () {
+      HandoffBuilder.assertConsumable(copia);
+    }, 'un handoff sin emisión registrada se rechaza');
+
+    var estirado = JSON.parse(JSON.stringify(ajeno));
+    estirado.expires_at = Schemas.toIso(new Date(Schemas.nowMs() + 86400000));
+    t.throwsCode(Errors.CODES.HANDOFF_INVALID, function () {
+      HandoffBuilder.assertConsumable(estirado);
+    }, 'alargar la caducidad respecto de la emisión se rechaza');
+  });
+
+  TestRunner.unit('HandoffBuilder', 'sin ledger no se puede probar que no hubo replay', function (t) {
+    var handoff = build();
+    Fixtures.ledgerStore().setAvailable(false);
+    t.throwsCode(Errors.CODES.LEDGER_UNAVAILABLE, function () {
+      HandoffBuilder.assertConsumable(handoff);
+    }, 'fail closed: sin registro no se consume');
+  });
+
 })();

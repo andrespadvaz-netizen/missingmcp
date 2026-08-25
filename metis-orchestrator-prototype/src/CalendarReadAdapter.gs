@@ -2,9 +2,9 @@
  * CalendarReadAdapter.gs — lectura REAL de sólo lectura de Google Calendar.
  *
  * Scope `calendar.readonly`. No existe función de creación, edición ni borrado
- * de eventos. Los calendarios legibles se declaran en Script Properties
- * (`METIS_CALENDAR_READ_IDS`, separados por coma); el calendario primario
- * productivo es superficie prohibida y no se enumera por default.
+ * de eventos. Los calendarios legibles se declaran POR CONTEXTO en la partición
+ * de fuentes (`METIS_SOURCE_PARTITIONS`); el calendario primario productivo es
+ * superficie prohibida y no se declara en ninguna partición.
  */
 var CalendarReadAdapter = (function () {
 
@@ -19,18 +19,25 @@ var CalendarReadAdapter = (function () {
     }
   }
 
-  function readableCalendarIds() {
-    var raw = Config.setting('CALENDAR_READ_IDS');
-    if (!raw) { return []; }
-    return String(raw).split(',').map(function (s) { return s.trim(); }).filter(function (s) { return !!s; });
+  /**
+   * Los calendarios legibles ya no son una lista global: se declaran POR
+   * CONTEXTO en la partición. Un calendario de otro contexto no es alcanzable
+   * desde esta corrida, y el calendario primario productivo no se declara nunca.
+   */
+  function readableCalendarIds(options) {
+    var partition = options && options.partition ? options.partition : null;
+    if (!partition || !partition.calendar_ids || !partition.calendar_ids.length) {
+      throw Errors.sourcePartitionUndeclared(
+        (options && options.context) ? options.context : 'DESCONOCIDO', 'CALENDAR');
+    }
+    return partition.calendar_ids.slice();
   }
 
   function _realBackend() {
     return {
-      read: function (query, timeWindow) {
+      read: function (query, timeWindow, options) {
         _assertLevel();
-        var ids = readableCalendarIds();
-        if (!ids.length) { throw Errors.configError('Sin calendarios declarados en METIS_CALENDAR_READ_IDS'); }
+        var ids = readableCalendarIds(options);
         var start = new Date(timeWindow.start);
         var end = new Date(timeWindow.end);
         var out = [];
@@ -68,7 +75,7 @@ var CalendarReadAdapter = (function () {
 
   function backend() { return _backend ? _backend : _realBackend(); }
 
-  function read(query, timeWindow) { return backend().read(query, timeWindow); }
+  function read(query, timeWindow, options) { return backend().read(query, timeWindow, options || {}); }
 
   return {
     useBackend: useBackend,

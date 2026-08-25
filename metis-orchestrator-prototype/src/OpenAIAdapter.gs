@@ -7,8 +7,12 @@
  */
 var OpenAIAdapter = (function () {
 
-  /** Referencia de costo aproximado, sólo para el contador agregado (spec §13). */
-  var PRICE_PER_1K = { input: 0.0025, output: 0.010 };
+  /**
+   * Los precios NO viven en el código: cambian y un número obsoleto produce un
+   * contador de costo falso, que es peor que no tenerlo. Se declaran en la
+   * Script Property `METIS_PRICING`. Sin precio para el modelo usado, el costo
+   * queda DESCONOCIDO (`null`) y el orquestador falla cerrado.
+   */
 
   var Adapter = class OpenAIAdapterImpl {
 
@@ -91,7 +95,9 @@ var OpenAIAdapter = (function () {
         usage = {
           input_tokens: raw.usage.input_tokens ? raw.usage.input_tokens : 0,
           output_tokens: raw.usage.output_tokens ? raw.usage.output_tokens : 0,
-          estimated_cost_usd: estimateCost(raw.usage)
+          // `null` = precio no configurado. El orquestador lo trata como
+          // costo desconocido y detiene la corrida, no como cero.
+          estimated_cost_usd: estimateCost(raw.usage, raw.model ? raw.model : null)
         };
       }
       var normalized = {
@@ -111,14 +117,16 @@ var OpenAIAdapter = (function () {
     }
   };
 
-  function estimateCost(usage) {
+  function estimateCost(usage, model) {
+    var price = Config.priceFor('OPENAI', model);
+    if (!price) { return null; }
     var inTok = usage.input_tokens ? usage.input_tokens : 0;
     var outTok = usage.output_tokens ? usage.output_tokens : 0;
-    return (inTok / 1000) * PRICE_PER_1K.input + (outTok / 1000) * PRICE_PER_1K.output;
+    return (inTok / 1000) * price.input_per_1k + (outTok / 1000) * price.output_per_1k;
   }
 
   return {
-    PRICE_PER_1K: PRICE_PER_1K,
+    estimateCost: estimateCost,
     create: function () { return new Adapter(); },
     Impl: Adapter
   };

@@ -187,13 +187,15 @@ var Ledger = (function () {
     return out;
   }
 
-  /** Retención corta: poda por antigüedad (spec §5). */
+  /** Retención corta: poda por antigüedad (spec §5). Cubre acciones y handoffs. */
   function purge(retentionMs) {
     var cutoff = Schemas.nowMs() - (retentionMs === undefined ? Config.LEDGER.RETENTION_MS : retentionMs);
     var keys = store().keys();
     var removed = 0;
     for (var i = 0; i < keys.length; i++) {
-      if (keys[i].indexOf(Config.LEDGER.PROPERTY_PREFIX) !== 0) { continue; }
+      var isAction = keys[i].indexOf(Config.LEDGER.PROPERTY_PREFIX) === 0;
+      var isHandoff = keys[i].indexOf(Config.LEDGER.HANDOFF_PREFIX) === 0;
+      if (!isAction && !isHandoff) { continue; }
       var entry = JSON.parse(store().get(keys[i]));
       if (new Date(entry.timestamp).getTime() < cutoff) {
         store().remove(keys[i]);
@@ -201,6 +203,92 @@ var Ledger = (function () {
       }
     }
     return removed;
+  }
+
+  // ----------------------------------------------- anti-replay de handoffs
+  /**
+   * Registro TÉCNICO de handoffs, persistido en el mismo store que el ledger
+   * (spec §15: replay de handoff caducado o reconciliado se rechaza).
+   *
+   * Vive en el store —no en memoria del proceso— porque un replay que importa
+   * es precisamente el que llega en OTRA ejecución: un registro process-local
+   * se pierde entre corridas y no prueba nada. Guarda sólo identificadores,
+   * timestamps y contadores; ninguna sustancia, igual que el resto del ledger.
+   */
+  var HANDOFF_FIELDS = ['handoff_id', 'execution_id', 'issued_at', 'expires_at',
+                        'consumed_count', 'reconciled', 'timestamp'];
+
+  function _handoffKey(handoffId) {
+    return Config.LEDGER.HANDOFF_PREFIX + handoffId;
+  }
+
+  function _assertHandoffShape(record) {
+    var actual = Object.keys(record).sort();
+    if (HANDOFF_FIELDS.slice().sort().join(',') !== actual.join(',')) {
+      throw Errors.make(Errors.CODES.LEDGER_SUBSTANCE,
+        'Registro de handoff fuera de forma: ' + actual.join(','));
+    }
+    if (String(record.handoff_id).length > 96 || String(record.execution_id).length > 96) {
+      throw Errors.make(Errors.CODES.LEDGER_SUBSTANCE, 'Identificador de handoff demasiado largo');
+    }
+    return true;
+  }
+
+  function _writeHandoff(record) {
+    _assertHandoffShape(record);
+    store().set(_handoffKey(record.handoff_id), JSON.stringify(record));
+    return record;
+  }
+
+  function handoffRecord(handoffId) {
+    if (!available()) {
+      throw Errors.ledgerUnavailable('no se puede verificar el estado del handoff');
+    }
+    var raw = store().get(_handoffKey(handoffId));
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  function recordHandoffIssued(handoff) {
+    if (!available()) {
+      throw Errors.ledgerUnavailable('no se puede registrar la emisión del handoff');
+    }
+    var existing = handoffRecord(handoff.handoff_id);
+    if (existing) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY,
+        'handoff_id ya emitido: ' + handoff.handoff_id);
+    }
+    return _writeHandoff({
+      handoff_id: handoff.handoff_id,
+      execution_id: handoff.execution_id,
+      issued_at: handoff.emitted_at,
+      expires_at: handoff.expires_at,
+      consumed_count: 0,
+      reconciled: false,
+      timestamp: Schemas.nowIso()
+    });
+  }
+
+  function recordHandoffConsumed(handoffId) {
+    var record = handoffRecord(handoffId);
+    if (!record) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY,
+        'Consumo de un handoff no emitido: ' + handoffId);
+    }
+    record.consumed_count += 1;
+    record.timestamp = Schemas.nowIso();
+    _writeHandoff(record);
+    return record.consumed_count;
+  }
+
+  function recordHandoffReconciled(handoffId) {
+    var record = handoffRecord(handoffId);
+    if (!record) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY,
+        'Reconciliación de un handoff no emitido: ' + handoffId);
+    }
+    record.reconciled = true;
+    record.timestamp = Schemas.nowIso();
+    return _writeHandoff(record);
   }
 
   // --------------------------------------------------- contadores de costo
@@ -227,10 +315,10 @@ var Ledger = (function () {
 
   /** Parada dura al alcanzar cualquier techo agregado (spec §13). */
   function assertAggregateBudget() {
-    if (spend('DAILY') >= Config.LIMITS.MAX_DAILY_BUDGET_USD) {
+    if (spend('DAILY') >= Config.limits().MAX_DAILY_BUDGET_USD) {
       throw Errors.limitExceeded('MAX_DAILY_BUDGET_USD', spend('DAILY'));
     }
-    if (spend('MONTHLY') >= Config.LIMITS.MAX_MONTHLY_BUDGET_USD) {
+    if (spend('MONTHLY') >= Config.limits().MAX_MONTHLY_BUDGET_USD) {
       throw Errors.limitExceeded('MAX_MONTHLY_BUDGET_USD', spend('MONTHLY'));
     }
     return true;
@@ -248,6 +336,11 @@ var Ledger = (function () {
     get: get,
     entriesFor: entriesFor,
     purge: purge,
+    HANDOFF_FIELDS: HANDOFF_FIELDS,
+    handoffRecord: handoffRecord,
+    recordHandoffIssued: recordHandoffIssued,
+    recordHandoffConsumed: recordHandoffConsumed,
+    recordHandoffReconciled: recordHandoffReconciled,
     assertNoSubstance: assertNoSubstance,
     spend: spend,
     addSpend: addSpend,

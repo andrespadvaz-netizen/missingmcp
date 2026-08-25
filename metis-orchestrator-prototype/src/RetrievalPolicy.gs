@@ -57,10 +57,61 @@ var RetrievalPolicy = (function () {
   }
 
   /**
+   * Vigencia de UNA decisión del registro real (database "Decisiones Tomadas").
+   *
+   * Dos señales, y no siempre coinciden:
+   *   - la relación `Sustituida por` — dice si algo la reemplazó;
+   *   - el select `Estado` — vigente | modificada | derogada.
+   *
+   * Realidad del registro (verificada 2026-08-25 sobre 316 filas):
+   *   - 202 filas tienen `Estado` VACÍO. La descripción de la propiedad declara
+   *     "por defecto vigente", así que el vacío se resuelve por ese default,
+   *     pero se marca `default_applied` para que la respuesta pueda decirlo.
+   *   - 1 fila está marcada `vigente` Y TIENE `Sustituida por`. Eso es una
+   *     contradicción entre dos señales de la misma fuente competente: no se
+   *     resuelve por juicio propio, se reporta como CONFLICT.
+   *
+   * Manda la relación sobre el select cuando el select es el que falta; cuando
+   * ambos hablan y se contradicen, nadie manda: conflicto.
+   */
+  function decisionStatus(decision) {
+    var superseded = !!(decision.superseded_by && decision.superseded_by.length);
+    var estado = decision.estado ? decision.estado : null;
+    var claimsSuperseded = (estado === 'modificada' || estado === 'derogada');
+
+    if (estado === 'vigente' && superseded) {
+      return {
+        status: 'CONFLICT', superseded: true, default_applied: false,
+        reason: 'ESTADO_VIGENTE_CON_SUSTITUTA'
+      };
+    }
+    if (claimsSuperseded && !superseded) {
+      return {
+        status: 'CONFLICT', superseded: false, default_applied: false,
+        reason: 'ESTADO_' + String(estado).toUpperCase() + '_SIN_SUSTITUTA'
+      };
+    }
+    if (superseded) {
+      return { status: 'SUPERSEDED', superseded: true, default_applied: false, reason: estado ? ('ESTADO_' + estado) : 'RELACION_SUSTITUIDA_POR' };
+    }
+    if (estado === 'vigente') {
+      return { status: 'CURRENT', superseded: false, default_applied: false, reason: 'ESTADO_VIGENTE' };
+    }
+    // `Estado` vacío y sin sustituta: vigente por el default declarado en la
+    // propia propiedad, pero declarándolo.
+    return { status: 'CURRENT', superseded: false, default_applied: true, reason: 'ESTADO_VACIO_DEFAULT_VIGENTE' };
+  }
+
+  /**
    * Cierre de cadena de decisión antes de afirmar estado (spec §16.5).
-   * @param {Array<{id:string, superseded_by:string|null}>} decisions
+   *
+   * Recorre `Sustituida por` desde la raíz hasta la decisión terminal. La cadena
+   * NO cierra si falta un eslabón (no fue recuperado), si hay ciclo, o si alguna
+   * decisión de la cadena está en conflicto: en los tres casos no se puede
+   * afirmar estado.
+   *
+   * @param {Array<{id:string, superseded_by:string[]|string|null}>} decisions
    * @param {string} rootId
-   * @return {{closed:boolean, chain:string[], terminal:string|null, missing:string|null}}
    */
   function closeCurrencyChain(decisions, rootId) {
     var byId = {};
@@ -69,23 +120,63 @@ var RetrievalPolicy = (function () {
     var chain = [];
     var seen = {};
     var currentId = rootId;
+    var conflicts = [];
 
     while (currentId) {
       if (seen[currentId]) {
-        return { closed: false, chain: chain, terminal: null, missing: currentId };
+        return { closed: false, chain: chain, terminal: null, missing: currentId,
+                 conflicts: conflicts, reason: 'CICLO_EN_LA_CADENA' };
       }
       seen[currentId] = true;
       var node = byId[currentId];
       if (!node) {
-        return { closed: false, chain: chain, terminal: null, missing: currentId };
+        return { closed: false, chain: chain, terminal: null, missing: currentId,
+                 conflicts: conflicts, reason: 'ESLABON_NO_RECUPERADO' };
       }
       chain.push(currentId);
-      if (!node.superseded_by) {
-        return { closed: true, chain: chain, terminal: currentId, missing: null };
+
+      var verdict = decisionStatus(node);
+      if (verdict.status === 'CONFLICT') {
+        conflicts.push({ id: currentId, reason: verdict.reason });
+        return { closed: false, chain: chain, terminal: null, missing: null,
+                 conflicts: conflicts, reason: 'CONFLICTO_ENTRE_ESTADO_Y_RELACION' };
       }
-      currentId = node.superseded_by;
+      if (!verdict.superseded) {
+        return { closed: true, chain: chain, terminal: currentId, missing: null,
+                 conflicts: conflicts, default_applied: verdict.default_applied,
+                 reason: verdict.reason };
+      }
+      currentId = _firstSupersededBy(node);
     }
-    return { closed: false, chain: chain, terminal: null, missing: rootId };
+    return { closed: false, chain: chain, terminal: null, missing: rootId,
+             conflicts: conflicts, reason: 'RAIZ_INEXISTENTE' };
+  }
+
+  /** `Sustituida por` es una relación: puede traer más de un destino. */
+  function _firstSupersededBy(node) {
+    var value = node.superseded_by;
+    if (!value) { return null; }
+    if (Object.prototype.toString.call(value) === '[object Array]') {
+      return value.length ? value[0] : null;
+    }
+    return value;
+  }
+
+  /** Decisiones vigentes de un conjunto, con los conflictos aparte. */
+  function currentDecisions(decisions) {
+    var current = [];
+    var conflicting = [];
+    var defaults = 0;
+    for (var i = 0; i < decisions.length; i++) {
+      var verdict = decisionStatus(decisions[i]);
+      if (verdict.status === 'CONFLICT') {
+        conflicting.push({ id: decisions[i].id, title: decisions[i].title, reason: verdict.reason });
+      } else if (verdict.status === 'CURRENT') {
+        current.push(decisions[i]);
+        if (verdict.default_applied) { defaults++; }
+      }
+    }
+    return { current: current, conflicting: conflicting, default_applied_count: defaults };
   }
 
   /**
@@ -185,7 +276,9 @@ var RetrievalPolicy = (function () {
     INJECTION_PATTERNS: INJECTION_PATTERNS,
     epistemicFor: epistemicFor,
     competentSourcesFor: competentSourcesFor,
+    decisionStatus: decisionStatus,
     closeCurrencyChain: closeCurrencyChain,
+    currentDecisions: currentDecisions,
     detectAuthorityConflict: detectAuthorityConflict,
     assessCoverage: assessCoverage,
     detectInjection: detectInjection,

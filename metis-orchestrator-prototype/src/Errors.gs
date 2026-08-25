@@ -26,7 +26,11 @@ var Errors = (function () {
     READ_FAILED: 'READ_FAILED',
     SCHEMA: 'SCHEMA_ERROR',
     REAL_WRITE_ATTEMPT: 'REAL_WRITE_ATTEMPT',
-    LEVEL_VIOLATION: 'LEVEL_VIOLATION'
+    LEVEL_VIOLATION: 'LEVEL_VIOLATION',
+    SOURCE_PARTITION_UNDECLARED: 'SOURCE_PARTITION_UNDECLARED',
+    PARTITION_VIOLATION: 'PARTITION_VIOLATION',
+    PRICE_UNKNOWN: 'PRICE_UNKNOWN',
+    CURRENCY_CONFLICT: 'CURRENCY_CONFLICT'
   };
 
   /** Fragmentos que nunca deben aparecer en un mensaje expuesto. */
@@ -76,6 +80,29 @@ var Errors = (function () {
     return make(CODES.REAL_WRITE_ATTEMPT, 'Intento de escritura real bloqueado: ' + tool, { tool: tool });
   }
   function levelViolation(msg) { return make(CODES.LEVEL_VIOLATION, msg); }
+
+  /** Sin partición declarada para (contexto, fuente) no se lee esa fuente. */
+  function sourcePartitionUndeclared(context, source) {
+    return make(CODES.SOURCE_PARTITION_UNDECLARED,
+      'Sin partición declarada para ' + context + '/' + source +
+      '. No se lee una fuente que no esté acotada al contexto resuelto.',
+      { context: context, source: source });
+  }
+
+  /** El objeto pedido existe pero está fuera del contenedor del contexto. */
+  function partitionViolation(objectId, context) {
+    return make(CODES.PARTITION_VIOLATION,
+      'Objeto fuera de la partición del contexto ' + context,
+      { object_id: objectId, context: context });
+  }
+
+  /** Sin precio configurado no se estima costo: se detiene. */
+  function priceUnknown(provider, model) {
+    return make(CODES.PRICE_UNKNOWN,
+      'Sin precio declarado para ' + provider + '/' + model +
+      '. Configura METIS_PRICING; el prototipo no inventa un costo.',
+      { provider: provider, model: model });
+  }
   function readFailed(source, safeReason) {
     return make(CODES.READ_FAILED, 'Lectura fallida en ' + source + ': ' + redactText(safeReason), { source: source });
   }
@@ -138,6 +165,9 @@ var Errors = (function () {
     schemaError: schemaError,
     realWriteAttempt: realWriteAttempt,
     levelViolation: levelViolation,
+    sourcePartitionUndeclared: sourcePartitionUndeclared,
+    partitionViolation: partitionViolation,
+    priceUnknown: priceUnknown,
     readFailed: readFailed,
     redactText: redactText,
     redactProviderError: redactProviderError,

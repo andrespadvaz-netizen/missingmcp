@@ -1,7 +1,7 @@
 {
   "_comentario": [
     "Plantilla de NOMBRES de Script Properties (spec §12, §21.3).",
-    "Este archivo documenta NOMBRES, nunca VALORES.",
+    "Este archivo documenta NOMBRES y FORMA, nunca VALORES.",
     "No lo llenes con secretos y no lo subas con valores reales:",
     "las credenciales se cargan a mano en el editor de Apps Script,",
     "en Configuración del proyecto -> Propiedades del script.",
@@ -13,52 +13,108 @@
     "METIS_OPENAI_API_KEY": {
       "clave_simbolica": "OPENAI_API_KEY",
       "usado_por": "OpenAIAdapter",
-      "obligatorio_en": "Nivel 0-2 sólo si se invoca a OpenAI en una corrida manual",
       "valor": "<pegar en el editor de Apps Script, nunca aquí>"
     },
     "METIS_ANTHROPIC_API_KEY": {
       "clave_simbolica": "ANTHROPIC_API_KEY",
       "usado_por": "AnthropicAdapter",
-      "obligatorio_en": "Nivel 0-2 sólo si se invoca a Anthropic en una corrida manual",
       "valor": "<pegar en el editor de Apps Script, nunca aquí>"
     },
     "METIS_NOTION_API_KEY": {
       "clave_simbolica": "NOTION_API_KEY",
       "usado_por": "NotionReadAdapter",
-      "scope_minimo": "integración de Notion con permiso de LECTURA sobre las páginas del contexto",
+      "scope_minimo": "integración de Notion con permiso de LECTURA sobre los data sources declarados",
       "obligatorio_en": "Nivel 1 y 2",
       "valor": "<pegar en el editor de Apps Script, nunca aquí>"
     },
     "METIS_ASANA_API_KEY": {
       "clave_simbolica": "ASANA_API_KEY",
       "usado_por": "AsanaReadAdapter",
-      "scope_minimo": "Personal Access Token de sólo lectura si el proveedor lo permite",
+      "riesgo_residual": "Asana no ofrece tokens de sólo lectura; el token arrastra los permisos del usuario. Mitigado porque el adaptador no tiene ninguna función de escritura (guards G2/G3), pero es riesgo a nivel credencial.",
       "obligatorio_en": "Nivel 1 y 2",
       "valor": "<pegar en el editor de Apps Script, nunca aquí>"
     }
   },
 
-  "ajustes_no_secretos": {
-    "METIS_ASANA_WORKSPACE_GID": {
-      "clave_simbolica": "ASANA_WORKSPACE_GID",
-      "descripcion": "gid del workspace de Asana sobre el que se hace typeahead de sólo lectura",
-      "valor": "<gid>"
+  "METIS_SOURCE_PARTITIONS": {
+    "_comentario": [
+      "Partición de fuentes POR CONTEXTO. Es lo que acota cada consulta EN ORIGEN.",
+      "Sin partición declarada para (contexto, fuente), esa fuente NO se lee: fail closed.",
+      "`project` es el valor EXACTO de la propiedad select `Proyecto` de la database",
+      "Decisiones Tomadas. Nunca declares aquí el calendario primario productivo,",
+      "ni el data source de CANON, Chat Log o Handoffs PHI: son superficies prohibidas.",
+      "El valor real de esta propiedad es el JSON de `ejemplo`, en una sola cadena."
+    ],
+    "ejemplo": {
+      "METIS": {
+        "notion": {
+          "data_sources": ["<uuid-del-data-source-operativo-de-metis>"],
+          "decision_data_sources": ["1436a1fc-159a-4e99-a6d6-0313f5932560"],
+          "project": "Metis"
+        },
+        "asana": { "project_gids": ["<gid-del-proyecto-metis>"] },
+        "drive": { "folder_ids": ["<id-de-carpeta-metis>"] },
+        "calendar": { "calendar_ids": ["<id-de-calendario-no-primario>"] }
+      },
+      "ANDREA": {
+        "notion": {
+          "data_sources": ["<uuid>"],
+          "decision_data_sources": ["1436a1fc-159a-4e99-a6d6-0313f5932560"],
+          "project": "Andrea"
+        },
+        "asana": { "project_gids": ["<gid>"] }
+      }
     },
-    "METIS_CALENDAR_READ_IDS": {
-      "clave_simbolica": "CALENDAR_READ_IDS",
-      "descripcion": "ids de calendarios legibles, separados por coma. El calendario primario productivo es superficie prohibida y NO debe listarse.",
-      "valor": "<calendar-id-1>,<calendar-id-2>"
-    },
-    "METIS_DRIVE_READ_FOLDER_IDS": {
-      "clave_simbolica": "DRIVE_READ_FOLDER_IDS",
-      "descripcion": "ids de carpetas de Drive acotadas para lectura (reservado; la búsqueda actual usa título)",
-      "valor": "<folder-id-1>"
+    "valores_validos_de_project": [
+      "Shokko", "Andrea", "Venture Quest", ".Final_Final",
+      "Arquitecto Interior", "Metis", "Personal"
+    ]
+  },
+
+  "METIS_PRICING": {
+    "_comentario": [
+      "Precio por 1.000 tokens, por proveedor y modelo. NO hay default en el código:",
+      "los precios cambian y un número obsoleto produce un contador de costo falso.",
+      "Sin precio para el modelo usado, el costo queda DESCONOCIDO y la corrida",
+      "falla cerrada en vez de estimar. Tómalos de la página de precios vigente",
+      "del proveedor en el momento de configurar.",
+      "El valor real de esta propiedad es el JSON de `ejemplo`, en una sola cadena."
+    ],
+    "ejemplo": {
+      "OPENAI": { "<id-de-modelo>": { "input_per_1k": 0.0, "output_per_1k": 0.0 } },
+      "ANTHROPIC": { "<id-de-modelo>": { "input_per_1k": 0.0, "output_per_1k": 0.0 } }
     }
+  },
+
+  "METIS_LIMITS": {
+    "_comentario": [
+      "Opcional. Sobreescribe los límites por corrida y agregados de Config.DEFAULT_LIMITS.",
+      "Sólo se aceptan claves conocidas y valores numéricos; el resto se ignora.",
+      "El valor real de esta propiedad es el JSON de `ejemplo`, en una sola cadena."
+    ],
+    "ejemplo": {
+      "MAX_MODEL_INTERVENTIONS": 4,
+      "MAX_TOOL_CALLS": 16,
+      "MAX_READ_RETRIES": 2,
+      "MAX_RUN_BUDGET_USD": 0.5,
+      "MAX_DAILY_BUDGET_USD": 5.0,
+      "MAX_MONTHLY_BUDGET_USD": 25.0
+    }
+  },
+
+  "METIS_DECISIONS_DATA_SOURCE_ID": {
+    "_comentario": [
+      "Opcional. Data source por defecto del registro de decisiones cuando una",
+      "partición no declara `decision_data_sources`. Preferible declararlo por",
+      "contexto en METIS_SOURCE_PARTITIONS."
+    ],
+    "valor": "<uuid del data source de Decisiones Tomadas>"
   },
 
   "propiedades_generadas_en_runtime": {
     "_comentario": "El prototipo escribe estas claves por su cuenta. No se cargan a mano.",
     "METIS_LEDGER_<execution_id>:<ordinal>": "entrada del ledger técnico (ids, hashes, estado). Retención corta.",
+    "METIS_HANDOFF_<handoff_id>": "registro anti-replay del handoff (emisión, caducidad, consumos, reconciliado). Sin sustancia.",
     "METIS_BUDGET_DAILY_<YYYYMMDD>": "contador agregado de costo estimado del día",
     "METIS_BUDGET_MONTHLY_<YYYYMM>": "contador agregado de costo estimado del mes"
   }

@@ -5,6 +5,11 @@
  *   - sólo referencia CLAVES SIMBÓLICAS de Script Properties, nunca valores;
  *   - ningún secreto vive en este archivo, en logs, prompts, handoffs ni ledger.
  *
+ * Lo que es POLÍTICA vive aquí con un default declarado (límites de corrida).
+ * Lo que es DATO DEL ENTORNO — precios de proveedor, ids de fuentes por
+ * contexto — NO tiene default inventado: se externaliza a Script Properties y,
+ * si falta, la corrida falla cerrada en vez de estimar o adivinar.
+ *
  * Este archivo NO registra triggers y NO expone ninguna operación de escritura.
  */
 var Config = (function () {
@@ -34,11 +39,12 @@ var Config = (function () {
     ASANA_API_KEY: 'METIS_ASANA_API_KEY'
   };
 
-  /** Parámetros no secretos, también en Script Properties (ids de espacio, etc.). */
+  /** Parámetros no secretos, también en Script Properties. */
   var SETTING_PROPERTY_NAMES = {
-    ASANA_WORKSPACE_GID: 'METIS_ASANA_WORKSPACE_GID',
-    CALENDAR_READ_IDS: 'METIS_CALENDAR_READ_IDS',
-    DRIVE_READ_FOLDER_IDS: 'METIS_DRIVE_READ_FOLDER_IDS'
+    SOURCE_PARTITIONS: 'METIS_SOURCE_PARTITIONS',
+    PRICING: 'METIS_PRICING',
+    LIMITS: 'METIS_LIMITS',
+    DECISIONS_DATA_SOURCE_ID: 'METIS_DECISIONS_DATA_SOURCE_ID'
   };
 
   /** Capacidades abstractas visibles para los modelos (spec §12). */
@@ -66,26 +72,40 @@ var Config = (function () {
     }
   };
 
-  var NOTION_VERSION = '2022-06-28';
+  /**
+   * Versión de la API de Notion. `2025-09-03` es la que expone data sources y
+   * el endpoint `/v1/data_sources/{id}/query`, que es la vía competente para
+   * leer Decisiones Tomadas con su filtro por Proyecto y sus relaciones.
+   */
+  var NOTION_VERSION = '2025-09-03';
 
   /**
    * Contextos de Metis. `primary` orienta continuidad pero NO obliga handoff
    * (spec §8). `signals` son marcadores léxicos usados SOLO para detectar
    * candidatos antes de recuperar sustancia (spec §6.3, fase de lectura previa).
+   * `notion_project` es el valor EXACTO de la propiedad select `Proyecto` en la
+   * database Decisiones Tomadas; es la clave de partición real de esa fuente.
    */
   var CONTEXTS = {
-    METIS:               { primary: 'ANTHROPIC', signals: ['metis', 'canon', 'ciclo 1', 'ciclo 2', 'gate', 'orquestacion', 'phi'] },
-    ANDREA:              { primary: 'OPENAI',    signals: ['andrea', 'comercial', 'armando'] },
-    SHOKKO:              { primary: 'ANTHROPIC', signals: ['shokko'] },
-    VENTURE_QUEST:       { primary: 'ANTHROPIC', signals: ['venture quest', 'venture'] },
-    ARQUITECTO_INTERIOR: { primary: 'ANTHROPIC', signals: ['arquitecto interior'] },
-    SISTEMA_PERSONAL:    { primary: 'ANTHROPIC', signals: ['sistema personal'] },
-    FINAL_FINAL:         { primary: 'OPENAI',    signals: ['.final_final', 'final final'] }
+    METIS:               { primary: 'ANTHROPIC', notion_project: 'Metis',
+                           signals: ['metis', 'canon', 'ciclo 1', 'ciclo 2', 'gate', 'orquestacion', 'phi'] },
+    ANDREA:              { primary: 'OPENAI',    notion_project: 'Andrea',
+                           signals: ['andrea', 'comercial', 'armando'] },
+    SHOKKO:              { primary: 'ANTHROPIC', notion_project: 'Shokko',
+                           signals: ['shokko'] },
+    VENTURE_QUEST:       { primary: 'ANTHROPIC', notion_project: 'Venture Quest',
+                           signals: ['venture quest', 'venture'] },
+    ARQUITECTO_INTERIOR: { primary: 'ANTHROPIC', notion_project: 'Arquitecto Interior',
+                           signals: ['arquitecto interior'] },
+    PERSONAL:            { primary: 'ANTHROPIC', notion_project: 'Personal',
+                           signals: ['sistema personal', 'personal'] },
+    FINAL_FINAL:         { primary: 'OPENAI',    notion_project: '.Final_Final',
+                           signals: ['.final_final', 'final final'] }
   };
 
   /**
    * Superficies prohibidas para cualquier acción material, incluso simulada
-   * (spec §7.4 y §19). Lista negativa dura: se evalúa sobre destino y etiquetas.
+   * (spec §7.4 y §19).
    */
   var FORBIDDEN_SURFACES = [
     'CANON',
@@ -118,16 +138,38 @@ var Config = (function () {
     'MUTATE_PRODUCTIVE_SOURCE'
   ];
 
-  /** Límites por corrida y agregados (spec §13). Alcanzarlos = parada dura. */
-  var LIMITS = {
-    // Un ciclo cerrado: productor (Retrieval + producción) + auditor. Sin bucles.
-    MAX_MODEL_INTERVENTIONS: 3,
-    MAX_TOOL_CALLS: 12,
+  /**
+   * Límites por corrida y agregados (spec §13). Son POLÍTICA: llevan default
+   * declarado y se pueden sobreescribir con la Script Property `METIS_LIMITS`
+   * (JSON parcial). Alcanzarlos = parada dura, nunca auto-ampliación.
+   */
+  var DEFAULT_LIMITS = {
+    // Un ciclo cerrado: productor (lectura + producción) + auditor (lectura +
+    // veredicto). Cuatro intervenciones, sin bucles adicionales.
+    MAX_MODEL_INTERVENTIONS: 4,
+    MAX_TOOL_CALLS: 16,
     MAX_READ_RETRIES: 2,
     MAX_RUN_BUDGET_USD: 0.50,
     MAX_DAILY_BUDGET_USD: 5.00,
     MAX_MONTHLY_BUDGET_USD: 25.00
   };
+
+  var _limitsOverride = null;
+
+  /** Límites efectivos: defaults + override externo. */
+  function limits() {
+    var effective = {};
+    Object.keys(DEFAULT_LIMITS).forEach(function (k) { effective[k] = DEFAULT_LIMITS[k]; });
+    var override = _limitsOverride !== null ? _limitsOverride : _readJson('LIMITS');
+    if (override) {
+      Object.keys(override).forEach(function (k) {
+        if (Object.prototype.hasOwnProperty.call(effective, k) && typeof override[k] === 'number') {
+          effective[k] = override[k];
+        }
+      });
+    }
+    return effective;
+  }
 
   /** Handoff: TTL corto; replay y caducidad se rechazan visiblemente (§15). */
   var HANDOFF_TTL_MS = 15 * 60 * 1000;
@@ -135,6 +177,7 @@ var Config = (function () {
   /** Ledger técnico: retención corta y configurable (spec §5). */
   var LEDGER = {
     PROPERTY_PREFIX: 'METIS_LEDGER_',
+    HANDOFF_PREFIX: 'METIS_HANDOFF_',
     RETENTION_MS: 24 * 60 * 60 * 1000,
     COUNTER_PREFIX: 'METIS_BUDGET_'
   };
@@ -149,6 +192,55 @@ var Config = (function () {
     OPERATIONAL_STATE: ['DECISION_REGISTRY', 'ASANA', 'CALENDAR', 'DRIVE', 'NOTION_OPERATIONAL']
   };
 
+  // -------------------------------------------------- partición por contexto
+  var _partitionsOverride = null;
+
+  /**
+   * Partición de fuentes por contexto (spec §6.3: lectura acotada al contexto).
+   * Los ids son del entorno, no del código: se declaran en la Script Property
+   * `METIS_SOURCE_PARTITIONS`. Forma:
+   *
+   *   { "METIS": {
+   *       "notion":   { "data_sources": ["<uuid>"], "project": "Metis" },
+   *       "asana":    { "project_gids": ["..."] },
+   *       "drive":    { "folder_ids": ["..."] },
+   *       "calendar": { "calendar_ids": ["..."] } }, ... }
+   *
+   * Sin partición declarada para (contexto, fuente) NO se lee esa fuente.
+   */
+  function partitionFor(context, source) {
+    var all = _partitionsOverride !== null ? _partitionsOverride : _readJson('SOURCE_PARTITIONS');
+    if (!all || !all[context]) { return null; }
+    var key = String(source).toLowerCase();
+    return all[context][key] ? all[context][key] : null;
+  }
+
+  function declaredPartitionContexts() {
+    var all = _partitionsOverride !== null ? _partitionsOverride : _readJson('SOURCE_PARTITIONS');
+    return all ? Object.keys(all) : [];
+  }
+
+  // ------------------------------------------------------------- precios
+  /**
+   * Precio por 1.000 tokens, por proveedor y modelo. NO hay default: los
+   * precios cambian y un número inventado produce un contador de costo falso.
+   * Se declaran en `METIS_PRICING`:
+   *
+   *   { "OPENAI": { "gpt-5": { "input_per_1k": 0.0, "output_per_1k": 0.0 } },
+   *     "ANTHROPIC": { "claude-opus-4-5": { ... } } }
+   *
+   * Sin precio para el modelo usado, el costo queda DESCONOCIDO y el
+   * orquestador falla cerrado en vez de estimar.
+   */
+  function priceFor(provider, model) {
+    var pricing = _readJson('PRICING');
+    if (!pricing || !pricing[provider] || !pricing[provider][model]) { return null; }
+    var entry = pricing[provider][model];
+    if (typeof entry.input_per_1k !== 'number' || typeof entry.output_per_1k !== 'number') { return null; }
+    return { input_per_1k: entry.input_per_1k, output_per_1k: entry.output_per_1k };
+  }
+
+  // -------------------------------------------------------------- helpers
   function levelAllowsRealReads(level) {
     var l = level || RUN_LEVEL;
     return l === LEVELS.LEVEL_1 || l === LEVELS.LEVEL_2;
@@ -165,6 +257,10 @@ var Config = (function () {
 
   function primaryFor(context) {
     return CONTEXTS[context] ? CONTEXTS[context].primary : null;
+  }
+
+  function notionProjectFor(context) {
+    return CONTEXTS[context] ? CONTEXTS[context].notion_project : null;
   }
 
   /**
@@ -197,16 +293,28 @@ var Config = (function () {
     return !!_readProperty(propName);
   }
 
+  function _readJson(symbolicKey) {
+    var raw = setting(symbolicKey);
+    if (!raw) { return null; }
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      throw Errors.configError('Script Property ' + SETTING_PROPERTY_NAMES[symbolicKey] + ' no es JSON válido');
+    }
+  }
+
   function _readProperty(name) {
     if (typeof PropertiesService === 'undefined') { return null; }
     return PropertiesService.getScriptProperties().getProperty(name);
   }
 
-  /** Override sólo para pruebas locales; nunca usado en una corrida real. */
+  /** Overrides sólo para pruebas locales; una corrida real usa Script Properties. */
   function _setRunLevel(level) {
     if (!LEVELS[level]) { throw Errors.configError('Nivel inválido: ' + level); }
     RUN_LEVEL = level;
   }
+  function _setPartitions(map) { _partitionsOverride = map; }
+  function _setLimits(map) { _limitsOverride = map; }
 
   function runLevel() { return RUN_LEVEL; }
 
@@ -214,6 +322,8 @@ var Config = (function () {
     LEVELS: LEVELS,
     runLevel: runLevel,
     _setRunLevel: _setRunLevel,
+    _setPartitions: _setPartitions,
+    _setLimits: _setLimits,
     SECRET_PROPERTY_NAMES: SECRET_PROPERTY_NAMES,
     SETTING_PROPERTY_NAMES: SETTING_PROPERTY_NAMES,
     CAPABILITIES: CAPABILITIES,
@@ -223,14 +333,19 @@ var Config = (function () {
     FORBIDDEN_SURFACES: FORBIDDEN_SURFACES,
     PROTECTED_DATE_FIELDS: PROTECTED_DATE_FIELDS,
     FORBIDDEN_EFFECTS: FORBIDDEN_EFFECTS,
-    LIMITS: LIMITS,
+    DEFAULT_LIMITS: DEFAULT_LIMITS,
+    limits: limits,
     HANDOFF_TTL_MS: HANDOFF_TTL_MS,
     LEDGER: LEDGER,
     SOURCE_COMPETENCE: SOURCE_COMPETENCE,
+    partitionFor: partitionFor,
+    declaredPartitionContexts: declaredPartitionContexts,
+    priceFor: priceFor,
     levelAllowsRealReads: levelAllowsRealReads,
     levelAllowsPlanConstruction: levelAllowsPlanConstruction,
     contextNames: contextNames,
     primaryFor: primaryFor,
+    notionProjectFor: notionProjectFor,
     secret: secret,
     setting: setting,
     hasSecret: hasSecret

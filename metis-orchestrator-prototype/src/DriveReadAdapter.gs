@@ -20,23 +20,40 @@ var DriveReadAdapter = (function () {
     }
   }
 
+  function _partitionOf(options) {
+    var partition = options && options.partition ? options.partition : null;
+    if (!partition || !partition.folder_ids || !partition.folder_ids.length) {
+      throw Errors.sourcePartitionUndeclared(
+        (options && options.context) ? options.context : 'DESCONOCIDO', 'DRIVE');
+    }
+    return partition;
+  }
+
   function _realBackend() {
     return {
+      /** La búsqueda se acota a las carpetas declaradas para el contexto. */
       search: function (query, options) {
         _assertLevel();
+        var partition = _partitionOf(options);
         var limit = (options && options.page_size) ? options.page_size : 10;
-        // `searchFiles` con sintaxis de la API de Drive; sólo lectura.
         var escaped = String(query || '').replace(/'/g, "\\'");
-        var iterator = DriveApp.searchFiles("title contains '" + escaped + "' and trashed = false");
         var out = [];
-        while (iterator.hasNext() && out.length < limit) {
-          out.push(_normalizeFile(iterator.next(), null));
+        for (var f = 0; f < partition.folder_ids.length && out.length < limit; f++) {
+          var criteria = "title contains '" + escaped + "' and trashed = false and '" +
+            partition.folder_ids[f] + "' in parents";
+          var iterator = DriveApp.searchFiles(criteria);
+          while (iterator.hasNext() && out.length < limit) {
+            out.push(_normalizeFile(iterator.next(), null));
+          }
         }
         return out;
       },
-      fetch: function (id) {
+
+      fetch: function (id, options) {
         _assertLevel();
+        var partition = _partitionOf(options);
         var file = DriveApp.getFileById(id);
+        _assertInPartition(file, partition, options);
         var text = null;
         var mime = file.getMimeType();
         if (mime === 'text/plain' || mime === 'text/markdown' || mime === 'application/json') {
@@ -45,6 +62,16 @@ var DriveReadAdapter = (function () {
         return _normalizeFile(file, text);
       }
     };
+  }
+
+  /** El archivo debe colgar de alguna de las carpetas declaradas. */
+  function _assertInPartition(file, partition, options) {
+    var parents = file.getParents();
+    while (parents.hasNext()) {
+      if (partition.folder_ids.indexOf(parents.next().getId()) !== -1) { return true; }
+    }
+    throw Errors.partitionViolation(file.getId(),
+      (options && options.context) ? options.context : null);
   }
 
   function _normalizeFile(file, snippet) {
@@ -63,7 +90,7 @@ var DriveReadAdapter = (function () {
   function backend() { return _backend ? _backend : _realBackend(); }
 
   function search(query, options) { return backend().search(query, options || {}); }
-  function fetch(id) { return backend().fetch(id); }
+  function fetch(id, options) { return backend().fetch(id, options || {}); }
 
   return {
     useBackend: useBackend,

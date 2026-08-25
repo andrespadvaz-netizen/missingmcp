@@ -9,6 +9,11 @@
  * validación de plan y simulación. Los modelos interpretan, analizan, piden
  * herramientas autorizadas y proponen; no deciden sus propios permisos.
  *
+ * Un ciclo de modelo son DOS turnos: pedir lecturas y, con lo recuperado a la
+ * vista, producir. Productor y auditor usan el mismo ciclo; si el auditor sólo
+ * tuviera un turno, pediría evidencia y emitiría su veredicto sin haberla leído
+ * nunca, que es una auditoría decorativa.
+ *
  * Toda acción externa material termina como SIMULADA o como bloqueo explícito.
  */
 var Orchestrator = (function () {
@@ -40,10 +45,13 @@ var Orchestrator = (function () {
       current_model: options.current_model ? options.current_model : 'OPENAI',
       model_interventions: 0,
       cost_usd: 0,
+      cost_known: true,
       models: [],
       audit: null,
       handoff: null,
       blocks: [],
+      producer_turns: 0,
+      auditor_turns: 0,
       notes: []
     };
   }
@@ -62,7 +70,8 @@ var Orchestrator = (function () {
 
   /** Una intervención de modelo, con límites y contador de costo. */
   function _modelTurn(options, runtime, model, role, request, toolContract) {
-    if (runtime.model_interventions >= Config.LIMITS.MAX_MODEL_INTERVENTIONS) {
+    var limits = Config.limits();
+    if (runtime.model_interventions >= limits.MAX_MODEL_INTERVENTIONS) {
       throw Errors.limitExceeded('MAX_MODEL_INTERVENTIONS', runtime.model_interventions);
     }
     Ledger.assertAggregateBudget();
@@ -76,11 +85,19 @@ var Orchestrator = (function () {
     runtime.model_interventions++;
     runtime.models.push({ model: model, role: role });
 
-    if (normalized.usage && typeof normalized.usage.estimated_cost_usd === 'number') {
-      runtime.cost_usd += normalized.usage.estimated_cost_usd;
-      Ledger.addSpend(normalized.usage.estimated_cost_usd);
-      if (runtime.cost_usd > Config.LIMITS.MAX_RUN_BUDGET_USD) {
-        throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
+    if (normalized.usage) {
+      var cost = normalized.usage.estimated_cost_usd;
+      if (typeof cost === 'number') {
+        runtime.cost_usd += cost;
+        Ledger.addSpend(cost);
+        if (runtime.cost_usd > limits.MAX_RUN_BUDGET_USD) {
+          throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
+        }
+      } else {
+        // Sin precio configurado no se puede vigilar el techo de la corrida.
+        // Fail closed: no se sigue gastando contra un contador ciego.
+        runtime.cost_known = false;
+        throw Errors.priceUnknown(model, request.model ? request.model : 'modelo por defecto');
       }
     }
     return normalized;
@@ -106,6 +123,40 @@ var Orchestrator = (function () {
     return results;
   }
 
+  /**
+   * Ciclo de modelo: turno de lectura + turno de producción sobre lo leído.
+   * Es el mismo para productor y auditor.
+   *
+   * @param {{model, role, session, readGrant, actionGrant, readPrompt, producePrompt}} spec
+   * @return {{text:string, turns:number, retrieved:boolean}}
+   */
+  function _modelCycle(options, runtime, spec) {
+    var readTurn = _modelTurn(options, runtime, spec.model, spec.role, {
+      system: SYSTEM_POLICY,
+      prompt: spec.readPrompt
+    }, ToolBroker.contract(spec.readGrant));
+
+    var toolResults = _executeToolRequests(spec.session, readTurn.tool_requests);
+    var text = readTurn.text;
+    var turns = 1;
+
+    if (toolResults.length) {
+      var grant = spec.actionGrant ? spec.actionGrant : spec.readGrant;
+      spec.session.grant = grant;
+
+      var produceTurn = _modelTurn(options, runtime, spec.model, spec.role, {
+        system: SYSTEM_POLICY,
+        prompt: spec.producePrompt(_renderEvidence(spec.session))
+      }, ToolBroker.contract(grant));
+
+      _executeToolRequests(spec.session, produceTurn.tool_requests);
+      if (produceTurn.text) { text = produceTurn.text; }
+      turns = 2;
+    }
+
+    return { text: text, turns: turns, retrieved: toolResults.length > 0 };
+  }
+
   /** Punteros + sustancia acotada, siempre marcados como evidencia. */
   function _renderEvidence(session) {
     if (!session.documents.length) { return '(sin evidencia recuperada)'; }
@@ -124,51 +175,43 @@ var Orchestrator = (function () {
   }
 
   /**
-   * Deriva señales estructuradas de la evidencia recuperada.
-   * Los documentos pueden traer pistas estructuradas (`decision`, `claim`) desde
-   * propiedades de la fuente; si no las traen, las señales quedan vacías y el
-   * orquestador no afirma nada sobre vigencia.
+   * Señales derivadas de lo recuperado. Las decisiones llegan estructuradas
+   * desde el propio registro (`notion.decisions`), no de un canal aparte.
    */
   function _analyzeEvidence(session, options) {
-    var decisions = [];
-    var claims = [];
-    for (var i = 0; i < session.documents.length; i++) {
-      var doc = session.documents[i];
-      var raw = _rawDocFor(session, doc.id);
-      if (raw && raw.decision) { decisions.push(raw.decision); }
-      if (raw && raw.claim) {
-        claims.push({
-          subject: raw.claim.subject,
-          type: raw.claim.type,
-          value: raw.claim.value,
-          source: doc.kind
-        });
-      }
-    }
+    var decisions = session.decisions.slice();
 
     var currency = null;
     if (options.currency_root) {
       currency = RetrievalPolicy.closeCurrencyChain(decisions, options.currency_root);
     }
+    var registry = RetrievalPolicy.currentDecisions(decisions);
 
+    var claims = [];
+    for (var i = 0; i < session.documents.length; i++) {
+      var doc = session.documents[i];
+      if (doc.claim) {
+        claims.push({ subject: doc.claim.subject, type: doc.claim.type, value: doc.claim.value, source: doc.kind });
+      }
+    }
     var conflict = RetrievalPolicy.detectAuthorityConflict(claims);
 
     var required = options.required_sources ? options.required_sources : Object.keys(session.source_status);
     var coverage = RetrievalPolicy.assessCoverage(required, session.source_status);
 
-    return { decisions: decisions, claims: claims, currency: currency, conflict: conflict, coverage: coverage };
-  }
-
-  var _rawDocIndex = {};
-  function _indexRawDocs(session) {
-    _rawDocIndex = {};
-    for (var i = 0; i < session.documents.length; i++) {
-      _rawDocIndex[session.documents[i].id] = session.documents[i];
+    var currencyConflicts = registry.conflicting.slice();
+    if (currency && currency.conflicts) {
+      currencyConflicts = currencyConflicts.concat(currency.conflicts);
     }
-  }
-  function _rawDocFor(session, id) {
-    if (session.raw_by_id && session.raw_by_id[id]) { return session.raw_by_id[id]; }
-    return _rawDocIndex[id] ? _rawDocIndex[id] : null;
+
+    return {
+      decisions: decisions,
+      registry: registry,
+      currency: currency,
+      currency_conflicts: currencyConflicts,
+      conflict: conflict,
+      coverage: coverage
+    };
   }
 
   /** Construye los pasos del plan a partir de las acciones propuestas. */
@@ -230,7 +273,6 @@ var Orchestrator = (function () {
       AuthorityPolicy.assertNarrowing(ceiling, readGrant);
 
       session = ToolBroker.newSession(execution, verdict.scope, readGrant);
-      session.raw_by_id = {};
 
       // 4. Contexto no resuelto: se bloquea ANTES de recuperar sustancia cruzada.
       if (!verdict.resolved_context) {
@@ -245,58 +287,50 @@ var Orchestrator = (function () {
         return _finalReturn(execution, runtime, session, null, routing, null, []);
       }
 
-      // 5. Retrieval real de sólo lectura, dirigido por el modelo actual.
-      var readContract = ToolBroker.contract(readGrant);
-      var first = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
-        system: SYSTEM_POLICY,
-        prompt: [
+      // 5-6. Ciclo del productor: lecturas + producción sobre lo recuperado.
+      var mandate = opts.mandate ? opts.mandate : { source: 'FIXED_POLICY', requests_execution: false };
+      var actionGrant = AuthorityPolicy.postContextGrant(ceiling, execution.resolved_context, mandate);
+
+      var producer = _modelCycle(opts, runtime, {
+        model: runtime.current_model,
+        role: 'LOCAL',
+        session: session,
+        readGrant: readGrant,
+        actionGrant: actionGrant,
+        readPrompt: [
           'Necesidad del operador (turno vivo, única fuente de mandato):',
           operatorRequest,
           '',
           'Contexto resuelto: ' + execution.resolved_context,
           'Intención detectada: ' + execution.intent,
           '',
-          'Pide sólo las lecturas necesarias (contexto mínimo suficiente).'
-        ].join('\n')
-      }, readContract);
-
-      var toolResults = _executeToolRequests(session, first.tool_requests);
-      _absorbRawDocs(session, opts);
-      _indexRawDocs(session);
-
-      // 6. Vigencia, precedencia, conflicto de autoridad y cobertura.
-      analysis = _analyzeEvidence(session, opts);
-
-      // Segunda intervención del modelo actual con la evidencia recuperada.
-      var producerText = first.text;
-      var proposedFromModel = first.tool_requests.length ? [] : null;
-      if (toolResults.length && runtime.model_interventions < Config.LIMITS.MAX_MODEL_INTERVENTIONS) {
-        // La fase de acción sólo se abre si el mandato vivo pide ejecución.
-        var mandate = opts.mandate ? opts.mandate : { source: 'FIXED_POLICY', requests_execution: false };
-        var actionGrant = AuthorityPolicy.postContextGrant(ceiling, execution.resolved_context, mandate);
-        session.grant = actionGrant;
-
-        var second = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
-          system: SYSTEM_POLICY,
-          prompt: [
+          'Pide sólo las lecturas necesarias (contexto mínimo suficiente).',
+          'Para preguntas de vigencia usa notion.decisions: trae el Estado y las',
+          'relaciones de sustitución del registro de decisiones.'
+        ].join('\n'),
+        producePrompt: function (evidence) {
+          return [
             'Necesidad del operador:', operatorRequest, '',
             'Evidencia recuperada (punteros y extractos):',
-            _renderEvidence(session), '',
+            evidence, '',
             'Responde. Si la necesidad implica ejecución, propón acciones mediante las',
             'herramientas simulate.*; no ejecutes nada por tu cuenta.'
-          ].join('\n')
-        }, ToolBroker.contract(actionGrant));
+          ].join('\n');
+        }
+      });
+      runtime.producer_turns = producer.turns;
+      var producerText = producer.text;
 
-        _executeToolRequests(session, second.tool_requests);
-        producerText = second.text ? second.text : producerText;
-      }
+      // 7. Vigencia, precedencia, conflicto de autoridad y cobertura.
+      analysis = _analyzeEvidence(session, opts);
 
-      // 7. Routing determinista.
+      // 8. Routing determinista.
       routing = Router.decide({
         current_model: runtime.current_model,
         context_route: null,
         resolved_context: execution.resolved_context,
         authority_conflict: analysis.conflict.conflict,
+        currency_conflict: analysis.currency_conflicts.length > 0,
         currency_open: !!(analysis.currency && analysis.currency.closed === false),
         coverage: analysis.coverage,
         audit_completed: false,
@@ -308,12 +342,10 @@ var Orchestrator = (function () {
       });
       execution.route = routing.route;
 
-      // 8. Handoff interno + segundo modelo cuando corresponda.
+      // 9. Handoff interno + ciclo COMPLETO del segundo modelo.
       if (routing.route === 'CROSS_AUDIT' || routing.route === 'OPENAI' || routing.route === 'ANTHROPIC') {
         var target = routing.target_model;
-        var handoffGrant = AuthorityPolicy.postContextGrant(
-          ceiling, execution.resolved_context,
-          opts.mandate ? opts.mandate : { source: 'FIXED_POLICY', requests_execution: false });
+        var handoffGrant = AuthorityPolicy.postContextGrant(ceiling, execution.resolved_context, mandate);
 
         var handoff = HandoffBuilder.build(execution, {
           origin_model: runtime.current_model,
@@ -339,34 +371,58 @@ var Orchestrator = (function () {
 
         HandoffBuilder.consume(handoff);
 
+        // Sesión propia: el receptor recupera por sí mismo desde la fuente.
         var targetSession = ToolBroker.newSession(execution, verdict.scope, handoffGrant);
-        targetSession.raw_by_id = session.raw_by_id;
+        var handoffHeader = [
+          'Handoff interno recibido (generado por el sistema, no por el operador).',
+          'handoff_id: ' + handoff.handoff_id,
+          'objetivo: ' + handoff.objective,
+          'contexto: ' + handoff.context,
+          'restricciones: ' + handoff.restrictions.join(' | '),
+          'salida esperada: ' + handoff.expected_output,
+          '',
+          'Punteros de evidencia (recupera tú mismo lo que necesites):',
+          handoff.evidence_refs.map(function (r) {
+            return '- [' + r.epistemic_status + '] ' + r.source + ':' + r.object_id + ' ' + (r.title || '');
+          }).join('\n')
+        ].join('\n');
 
-        var targetTurn = _modelTurn(opts, runtime, target,
-          routing.route === 'CROSS_AUDIT' ? 'AUDITOR' : 'PRODUCER', {
-            system: SYSTEM_POLICY,
-            prompt: [
-              'Handoff interno recibido (generado por el sistema, no por el operador).',
-              'handoff_id: ' + handoff.handoff_id,
-              'objetivo: ' + handoff.objective,
-              'contexto: ' + handoff.context,
-              'restricciones: ' + handoff.restrictions.join(' | '),
-              'salida esperada: ' + handoff.expected_output,
-              '',
-              'Punteros de evidencia (recupera tú mismo lo que necesites):',
-              handoff.evidence_refs.map(function (r) {
-                return '- [' + r.epistemic_status + '] ' + r.source + ':' + r.object_id + ' ' + (r.title || '');
-              }).join('\n'),
-              '',
-              'Trabajo del productor:',
-              producerText
-            ].join('\n')
-          }, ToolBroker.contract(handoffGrant));
+        var isAudit = routing.route === 'CROSS_AUDIT';
+        var targetCycle = _modelCycle(opts, runtime, {
+          model: target,
+          role: isAudit ? 'AUDITOR' : 'PRODUCER',
+          session: targetSession,
+          readGrant: handoffGrant,
+          actionGrant: handoffGrant,
+          readPrompt: [
+            handoffHeader, '',
+            'Trabajo del productor:', producerText, '',
+            'Primer turno: pide las lecturas que necesites para verificarlo por ti mismo.',
+            'No emitas veredicto todavía.'
+          ].join('\n'),
+          producePrompt: function (evidence) {
+            return [
+              handoffHeader, '',
+              'Trabajo del productor:', producerText, '',
+              'Evidencia que TÚ recuperaste:',
+              evidence, '',
+              isAudit
+                ? 'Segundo turno: emite ahora tu veredicto sobre esa evidencia.'
+                : 'Segundo turno: entrega el resultado de la intervención.'
+            ].join('\n');
+          }
+        });
+        runtime.auditor_turns = targetCycle.turns;
 
-        _executeToolRequests(targetSession, targetTurn.tool_requests);
+        // El receptor aporta su propia evidencia a la corrida.
         for (var d = 0; d < targetSession.documents.length; d++) {
           session.documents.push(targetSession.documents[d]);
-          session.evidence_refs.push(targetSession.evidence_refs[d]);
+        }
+        for (var er = 0; er < targetSession.evidence_refs.length; er++) {
+          session.evidence_refs.push(targetSession.evidence_refs[er]);
+        }
+        for (var dec = 0; dec < targetSession.decisions.length; dec++) {
+          session.decisions.push(targetSession.decisions[dec]);
         }
         for (var pa = 0; pa < targetSession.proposed_actions.length; pa++) {
           session.proposed_actions.push(targetSession.proposed_actions[pa]);
@@ -379,9 +435,12 @@ var Orchestrator = (function () {
           session.source_status[targetSources[ts]] = targetSession.source_status[targetSources[ts]];
         }
         runtime.auditor_tool_calls = targetSession.tool_calls;
+        runtime.auditor_documents = targetSession.documents.map(function (x) { return x.id; });
 
         runtime.audit = {
-          verdict_text: targetTurn.text,
+          verdict_text: targetCycle.text,
+          turns: targetCycle.turns,
+          retrieved_by_itself: targetCycle.retrieved,
           blocks_materially: opts.audit_blocks_materially === true
         };
 
@@ -400,15 +459,14 @@ var Orchestrator = (function () {
           execution.status = 'REQUIRES_ANDRES';
           runtime.blocks.push({ code: 'AUDIT_BLOCKS_MATERIALLY', detail: closing.reason });
         }
-        producerText = producerText + '\n\nVeredicto del auditor: ' + targetTurn.text;
+        producerText = producerText + '\n\nVeredicto del auditor: ' + targetCycle.text;
       }
 
-      // 9-11. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.
+      // 10-12. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.
       if (session.proposed_actions.length) {
-        var actionGrantForPlan = session.grant;
         var plannedActions = buildPlannedActions(execution, session.proposed_actions);
         planResult = PlanValidator.validate(
-          execution.execution_id, plannedActions, actionGrantForPlan,
+          execution.execution_id, plannedActions, session.grant,
           execution.resolved_context,
           {
             audit_completed: !!runtime.audit,
@@ -447,10 +505,16 @@ var Orchestrator = (function () {
           execution.status = planResult.requires_andres ? 'REQUIRES_ANDRES' : 'COMPLETED';
         }
       } else if (execution.status !== 'REQUIRES_ANDRES') {
-        execution.status = (routing.route === 'ABSTAIN') ? 'UNCERTAIN' : 'COMPLETED';
+        if (routing.route === 'REQUIRES_ANDRES') {
+          execution.status = 'REQUIRES_ANDRES';
+        } else if (routing.route === 'ABSTAIN') {
+          execution.status = 'UNCERTAIN';
+        } else {
+          execution.status = 'COMPLETED';
+        }
       }
 
-      // 12. Retorno único al operador.
+      // Retorno único al operador.
       execution.evidence_refs = RetrievalPolicy.minimumSufficient(session.evidence_refs, 8);
       execution.final_answer = _composeAnswer(execution, runtime, analysis, routing, producerText, simulations);
       Schemas.assertValid('Execution', execution);
@@ -464,22 +528,6 @@ var Orchestrator = (function () {
         (e.code ? e.code : 'ERROR') + ' — ' + Errors.redactText(e.message);
       runtime.blocks.push({ code: e.code ? e.code : 'ERROR', detail: Errors.redactText(e.message) });
       return _finalReturn(execution, runtime, session, analysis, routing, planResult, simulations);
-    }
-  }
-
-  /** Copia pistas estructuradas de los fixtures/propiedades a `raw_by_id`. */
-  function _absorbRawDocs(session, opts) {
-    if (!session.raw_by_id) { session.raw_by_id = {}; }
-    var hints = opts.structured_hints || {};
-    for (var i = 0; i < session.documents.length; i++) {
-      var doc = session.documents[i];
-      var hint = hints[doc.id];
-      if (hint) {
-        session.raw_by_id[doc.id] = {
-          decision: hint.decision ? hint.decision : null,
-          claim: hint.claim ? hint.claim : null
-        };
-      }
     }
   }
 
@@ -507,7 +555,16 @@ var Orchestrator = (function () {
     if (analysis && analysis.currency) {
       lines.push('Vigencia: cadena ' + (analysis.currency.closed ? 'cerrada' : 'ABIERTA') +
         ' (' + analysis.currency.chain.join(' -> ') + ')' +
-        (analysis.currency.closed ? '' : ' — no afirmo estado.'));
+        (analysis.currency.closed ? '' : ' — no afirmo estado. Motivo: ' + analysis.currency.reason));
+      if (analysis.currency.closed && analysis.currency.default_applied) {
+        lines.push('Aviso: la decisión vigente tiene `Estado` vacío; se aplica el default ' +
+          'declarado en la propiedad ("por defecto vigente"), no un valor explícito.');
+      }
+    }
+    if (analysis && analysis.currency_conflicts && analysis.currency_conflicts.length) {
+      lines.push('Contradicción en el registro de decisiones: ' +
+        analysis.currency_conflicts.map(function (c) { return c.id + ' (' + c.reason + ')'; }).join(', ') +
+        '. No la resuelvo por juicio propio.');
     }
     if (analysis && analysis.coverage && analysis.coverage.complete === false) {
       lines.push('Cobertura incompleta en: ' + analysis.coverage.missing.join(', ') +
@@ -551,6 +608,7 @@ var Orchestrator = (function () {
       }
     }
 
+    var limits = Config.limits();
     return {
       execution_id: execution.execution_id,
       created_at: execution.created_at,
@@ -562,9 +620,13 @@ var Orchestrator = (function () {
       route_reason: routing ? routing.reason : null,
       material_cause: routing ? routing.material_cause : null,
       models: runtime.models,
+      producer_turns: runtime.producer_turns,
+      auditor_turns: runtime.auditor_turns,
       sources_consulted: session ? Object.keys(session.source_status) : [],
       coverage: analysis ? analysis.coverage : null,
       currency: analysis ? analysis.currency : null,
+      currency_conflicts: analysis ? analysis.currency_conflicts : [],
+      decisions_seen: analysis ? analysis.decisions.length : 0,
       authority_conflict: analysis ? analysis.conflict : null,
       evidence_refs: execution.evidence_refs,
       risk_signals: session ? session.risk_signals : [],
@@ -578,20 +640,27 @@ var Orchestrator = (function () {
         reconciled: execution.handoff.reconciled,
         generated_by_system: true
       } : null,
+      audit: runtime.audit ? {
+        turns: runtime.audit.turns,
+        retrieved_by_itself: runtime.audit.retrieved_by_itself,
+        blocks_materially: runtime.audit.blocks_materially
+      } : null,
       action_plan: execution.action_plan,
       actions: actions,
       blocks: runtime.blocks,
       auditor_tool_calls: runtime.auditor_tool_calls === undefined ? 0 : runtime.auditor_tool_calls,
+      auditor_documents: runtime.auditor_documents === undefined ? [] : runtime.auditor_documents,
       final_answer: execution.final_answer,
       ledger: Ledger.available() ? Ledger.entriesFor(execution.execution_id) : [],
       limits: {
         model_interventions: runtime.model_interventions,
-        max_model_interventions: Config.LIMITS.MAX_MODEL_INTERVENTIONS,
+        max_model_interventions: limits.MAX_MODEL_INTERVENTIONS,
         tool_calls: session ? session.tool_calls : 0,
-        max_tool_calls: Config.LIMITS.MAX_TOOL_CALLS,
+        max_tool_calls: limits.MAX_TOOL_CALLS,
         read_retries: session ? session.read_retries : 0,
-        estimated_cost_usd: runtime.cost_usd,
-        max_run_budget_usd: Config.LIMITS.MAX_RUN_BUDGET_USD
+        estimated_cost_usd: runtime.cost_known ? runtime.cost_usd : null,
+        cost_known: runtime.cost_known,
+        max_run_budget_usd: limits.MAX_RUN_BUDGET_USD
       },
       level: Config.runLevel()
     };

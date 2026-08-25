@@ -178,10 +178,12 @@
     NotionReadAdapter.resetBackend();
     AsanaReadAdapter.resetBackend();
     t.equals(Config.runLevel(), Config.LEVELS.LEVEL_0, 'la corrida de test está en Nivel 0');
-    t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () { NotionReadAdapter.search('gate'); },
-      'Notion real bloqueado en Nivel 0');
-    t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () { AsanaReadAdapter.search('tarea'); },
-      'Asana real bloqueado en Nivel 0');
+    var partition = { partition: Fixtures.PARTITIONS.METIS.notion, context: 'METIS' };
+    t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () { NotionReadAdapter.search('gate', partition); },
+      'Notion real bloqueado en Nivel 0 aunque la partición sea válida');
+    t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () {
+      AsanaReadAdapter.search('tarea', { partition: Fixtures.PARTITIONS.METIS.asana, context: 'METIS' });
+    }, 'Asana real bloqueado en Nivel 0');
     Fixtures.installBackends();
   });
 
@@ -195,6 +197,41 @@
       'sin Script Property cargada, la credencial falta y la corrida se detiene');
     t.throwsCode(Errors.CODES.CONFIG, function () { Config.secret('CLAVE_INEXISTENTE'); },
       'una clave simbólica desconocida se rechaza');
+  });
+
+
+  // --------------------------------------------------- presupuesto y precios
+  TestRunner.unit('Presupuesto', 'sin precio configurado el costo es desconocido, no cero', function (t) {
+    var openai = OpenAIAdapter.create();
+    t.equals(Config.priceFor('OPENAI', 'gpt-5'), null, 'no hay tabla de precios en el código');
+    t.equals(openai.normalizeResponse({
+      id: 'r', status: 'completed', output: [], model: 'gpt-5',
+      usage: { input_tokens: 1000, output_tokens: 500 }
+    }).usage.estimated_cost_usd, null, 'el costo sale null, no un número inventado');
+
+    t.equals(AnthropicAdapter.estimateCost({ input_tokens: 1000, output_tokens: 500 }, 'claude-opus-5'), null,
+      'lo mismo del lado de Anthropic');
+  });
+
+  TestRunner.unit('Presupuesto', 'un costo desconocido detiene la corrida', function (t) {
+    var sinPrecio = Fixtures.providers([
+      { text: '', tool_requests: [], usage: { input_tokens: 100, output_tokens: 50, estimated_cost_usd: null } }
+    ], []);
+    var result = Orchestrator.run('¿Cuál es el estado del gate en Metis?',
+      { current_model: 'OPENAI', providers: sinPrecio });
+    t.equals(result.status, 'FAILED', 'la corrida falla cerrada');
+    t.includes(result.final_answer, Errors.CODES.PRICE_UNKNOWN, 'y nombra la causa');
+    t.equals(result.limits.cost_known, false, 'el costo queda declarado como desconocido');
+    t.equals(result.limits.estimated_cost_usd, null, 'no se reporta un total falso');
+  });
+
+  TestRunner.unit('Presupuesto', 'los límites se pueden externalizar', function (t) {
+    t.equals(Config.limits().MAX_TOOL_CALLS, Config.DEFAULT_LIMITS.MAX_TOOL_CALLS, 'por defecto, el default');
+    Config._setLimits({ MAX_TOOL_CALLS: 3, INVENTADO: 99 });
+    t.equals(Config.limits().MAX_TOOL_CALLS, 3, 'el override externo se aplica');
+    t.equals(Config.limits().INVENTADO, undefined, 'una clave desconocida se ignora');
+    t.equals(Config.limits().MAX_MODEL_INTERVENTIONS, Config.DEFAULT_LIMITS.MAX_MODEL_INTERVENTIONS,
+      'lo no sobreescrito conserva su default');
   });
 
 })();

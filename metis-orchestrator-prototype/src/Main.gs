@@ -81,16 +81,122 @@ function checkConfiguration() {
       present: !!Config.setting(symbolic)
     };
   });
+
+  // Qué contextos tienen partición declarada y sobre qué fuentes. Sólo cuenta
+  // contenedores; no imprime ids.
+  var partitions = {};
+  Config.contextNames().forEach(function (context) {
+    var sources = {};
+    ['NOTION', 'ASANA', 'DRIVE', 'CALENDAR'].forEach(function (source) {
+      var partition = Config.partitionFor(context, source);
+      sources[source] = partition ? _containerCount(partition) : 0;
+    });
+    partitions[context] = sources;
+  });
+
   var report = {
     level: Config.runLevel(),
     real_reads_enabled: Config.levelAllowsRealReads(),
     secrets: secrets,
     settings: settings,
+    partitions: partitions,
+    limits: Config.limits(),
+    pricing_configured: !!Config.priceFor('OPENAI', Config.PROVIDERS.OPENAI.model) ||
+                        !!Config.priceFor('ANTHROPIC', Config.PROVIDERS.ANTHROPIC.model),
     triggers_declared: 0,
     productive_write_tools: 0,
     simulated_write_tools: AuthorityPolicy.SIMULATED_WRITE_TOOLS.length,
     forbidden_surfaces: Config.FORBIDDEN_SURFACES
   };
+  Logger.log(JSON.stringify(report, null, 2));
+  return report;
+}
+
+function _containerCount(partition) {
+  return (partition.data_sources || partition.project_gids ||
+          partition.folder_ids || partition.calendar_ids || []).length;
+}
+
+/**
+ * Smoke test de Nivel 1: una lectura real acotada por fuente y contexto.
+ *
+ * Qué hace: comprueba nivel y credenciales, y ejecuta UNA lectura por cada
+ * (contexto, fuente) con partición declarada.
+ * Qué NO hace: no invoca ningún modelo, no construye plan, no simula ninguna
+ * acción y no escribe absolutamente nada. Es sólo lectura.
+ *
+ * Devuelve conteos y errores redactados; nunca contenido recuperado.
+ */
+function smokeTestLevel1(options) {
+  var opts = options || {};
+  var report = {
+    level: Config.runLevel(),
+    started_at: Schemas.nowIso(),
+    ok: true,
+    checks: [],
+    models_invoked: 0,
+    writes_attempted: 0
+  };
+
+  function check(name, ok, detail) {
+    report.checks.push({ check: name, ok: !!ok, detail: detail === undefined ? null : detail });
+    if (!ok) { report.ok = false; }
+  }
+
+  if (!Config.levelAllowsRealReads()) {
+    check('nivel', false, 'RUN_LEVEL es ' + Config.runLevel() +
+      '. Cambia Config.RUN_LEVEL a LEVEL_1 para ejecutar este smoke test.');
+    Logger.log(JSON.stringify(report, null, 2));
+    return report;
+  }
+  check('nivel', true, Config.runLevel());
+
+  ['NOTION_API_KEY', 'ASANA_API_KEY'].forEach(function (key) {
+    check('credencial:' + key, Config.hasSecret(key), Config.hasSecret(key) ? 'presente' : 'ausente');
+  });
+
+  var contexts = opts.contexts ? opts.contexts : Config.declaredPartitionContexts();
+  check('particiones_declaradas', contexts.length > 0, contexts.join(', '));
+
+  var scopeOf = function (context) {
+    return ContextResolver.scopeFor([context], context);
+  };
+
+  contexts.forEach(function (context) {
+    var session = ToolBroker.newSession({ execution_id: 'smoke-' + context },
+      scopeOf(context), AuthorityPolicy.preRetrievalGrant([context]));
+
+    [['notion.search', { query: opts.query ? opts.query : '', page_size: 3 }],
+     ['notion.decisions', { page_size: 5 }],
+     ['asana.search', { query: opts.query ? opts.query : '', page_size: 3 }],
+     ['drive.search', { query: opts.query ? opts.query : '', page_size: 3 }]
+    ].forEach(function (pair) {
+      var tool = pair[0];
+      if (!Config.partitionFor(context, ToolBroker.READ_TOOLS[tool].source)) {
+        check(context + '/' + tool, true, 'sin partición declarada: no se lee (correcto)');
+        return;
+      }
+      try {
+        var result = ToolBroker.invoke(session, tool, pair[1]);
+        check(context + '/' + tool, result.ok !== false,
+          result.ok === false ? result.error : ('documentos: ' + result.documents.length));
+      } catch (e) {
+        check(context + '/' + tool, false, (e.code ? e.code : 'ERROR') + ': ' + Errors.redactText(e.message));
+      }
+    });
+
+    // Vigencia: sólo se reporta si el registro devolvió decisiones.
+    if (session.decisions.length) {
+      var registry = RetrievalPolicy.currentDecisions(session.decisions);
+      check(context + '/vigencia', registry.conflicting.length === 0,
+        'decisiones: ' + session.decisions.length +
+        ', vigentes: ' + registry.current.length +
+        ', con Estado vacío: ' + registry.default_applied_count +
+        ', contradictorias: ' + registry.conflicting.length);
+    }
+  });
+
+  report.finished_at = Schemas.nowIso();
   Logger.log(JSON.stringify(report, null, 2));
   return report;
 }

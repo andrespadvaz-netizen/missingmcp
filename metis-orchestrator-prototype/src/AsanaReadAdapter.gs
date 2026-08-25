@@ -33,30 +33,64 @@ var AsanaReadAdapter = (function () {
     return JSON.parse(response.getContentText());
   }
 
+  var FIELDS = 'name,notes,completed,due_on,permalink_url,projects.name,projects.gid';
+
+  function _partitionOf(options) {
+    var partition = options && options.partition ? options.partition : null;
+    if (!partition || !partition.project_gids || !partition.project_gids.length) {
+      throw Errors.sourcePartitionUndeclared(
+        (options && options.context) ? options.context : 'DESCONOCIDO', 'ASANA');
+    }
+    return partition;
+  }
+
   function _realBackend() {
     return {
+      /**
+       * Se listan las tareas de los proyectos declarados para el contexto. No se
+       * usa el typeahead de workspace: buscaría en TODO el espacio y devolvería
+       * tareas de otros contextos, que es exactamente lo que la partición
+       * impide. El filtro por texto se aplica sobre ese conjunto ya acotado.
+       */
       search: function (query, options) {
         _assertLevel();
-        var workspace = Config.setting('ASANA_WORKSPACE_GID');
-        if (!workspace) { throw Errors.configError('Falta ASANA_WORKSPACE_GID en Script Properties'); }
-        var path = '/workspaces/' + encodeURIComponent(workspace) +
-                   '/typeahead?resource_type=task&count=' + ((options && options.page_size) ? options.page_size : 10) +
-                   '&query=' + encodeURIComponent(String(query || ''));
-        var res = _request(path);
+        var partition = _partitionOf(options);
+        var needle = ContextResolver.normalize(query || '');
+        var limit = (options && options.page_size) ? options.page_size : 10;
         var out = [];
-        var data = res.data || [];
-        for (var i = 0; i < data.length; i++) {
-          out.push(_normalizeTask(data[i], null));
+        for (var p = 0; p < partition.project_gids.length && out.length < limit; p++) {
+          var res = _request('/projects/' + encodeURIComponent(partition.project_gids[p]) +
+            '/tasks?limit=100&opt_fields=' + FIELDS);
+          var data = res.data || [];
+          for (var i = 0; i < data.length && out.length < limit; i++) {
+            var task = _normalizeTask(data[i], null);
+            if (!needle || ContextResolver.normalize(task.title || '').indexOf(needle) !== -1) {
+              out.push(task);
+            }
+          }
         }
         return out;
       },
-      get: function (gid) {
+
+      get: function (gid, options) {
         _assertLevel();
-        var res = _request('/tasks/' + encodeURIComponent(gid) +
-          '?opt_fields=name,notes,completed,due_on,permalink_url,projects.name');
-        return _normalizeTask(res.data || {}, (res.data && res.data.notes) ? res.data.notes : null);
+        var partition = _partitionOf(options);
+        var res = _request('/tasks/' + encodeURIComponent(gid) + '?opt_fields=' + FIELDS);
+        var data = res.data || {};
+        _assertInPartition(data, partition, options);
+        return _normalizeTask(data, data.notes ? data.notes : null);
       }
     };
+  }
+
+  /** La tarea debe pertenecer a alguno de los proyectos declarados. */
+  function _assertInPartition(task, partition, options) {
+    var projects = task.projects || [];
+    for (var i = 0; i < projects.length; i++) {
+      if (partition.project_gids.indexOf(String(projects[i].gid)) !== -1) { return true; }
+    }
+    throw Errors.partitionViolation(task.gid ? String(task.gid) : 'desconocido',
+      (options && options.context) ? options.context : null);
   }
 
   function _normalizeTask(task, snippet) {
@@ -79,7 +113,7 @@ var AsanaReadAdapter = (function () {
   function backend() { return _backend ? _backend : _realBackend(); }
 
   function search(query, options) { return backend().search(query, options || {}); }
-  function get(gid) { return backend().get(gid); }
+  function get(gid, options) { return backend().get(gid, options || {}); }
 
   return {
     useBackend: useBackend,
