@@ -21,11 +21,19 @@ var Config = (function () {
   };
 
   /**
-   * Nivel efectivo de la corrida. Por defecto LEVEL_0: una instalación recién
-   * clonada NO toca red aunque existan credenciales. Subir a LEVEL_1/LEVEL_2 es
-   * una acción manual y explícita del operador (README → Activación).
+   * Nivel efectivo de la corrida.
+   *
+   * >>> FIJADO EN LEVEL_1 PARA EL PRIMER ENSAYO REAL DE SÓLO LECTURA. <<<
+   *
+   * LEVEL_1 habilita la lectura real contra las fuentes declaradas en la
+   * partición. NO habilita escritura: la escritura no existe en este prototipo,
+   * y LEVEL_2 sólo añade construcción y validación de planes simulados.
+   *
+   * Devuélvelo a LEVEL_0 en cuanto termine el ensayo: en LEVEL_0 los cuatro
+   * adaptadores de lectura real están bloqueados por código (`LEVEL_VIOLATION`)
+   * aunque haya credenciales cargadas, que es el estado seguro por defecto.
    */
-  var RUN_LEVEL = LEVELS.LEVEL_0;
+  var RUN_LEVEL = LEVELS.LEVEL_1;
 
   /**
    * Nombres de Script Properties. VALORES NUNCA AQUÍ.

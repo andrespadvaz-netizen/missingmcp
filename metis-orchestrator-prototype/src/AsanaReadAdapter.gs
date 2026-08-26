@@ -35,6 +35,43 @@ var AsanaReadAdapter = (function () {
 
   var FIELDS = 'name,notes,completed,due_on,permalink_url,projects.name,projects.gid';
 
+  /** Tope defensivo de páginas por listado. Ver `collectPages`. */
+  var MAX_PAGES = 20;
+
+  /**
+   * Recorre TODAS las páginas de un listado siguiendo `next_page.offset`.
+   *
+   * Asana devuelve como máximo 100 elementos por página. Un proyecto con más
+   * tareas que eso deja fuera del primer lote a cualquier tarea antigua, y una
+   * búsqueda que sólo mire la primera página informaría "no existe" sobre algo
+   * que sí está. Igual que en Notion, alcanzar el tope LANZA en vez de devolver
+   * un resultado truncado como si fuera completo.
+   *
+   * `fetchPage(offset)` devuelve `{data, next_page:{offset}}`.
+   */
+  function collectPages(fetchPage, maxPages) {
+    var cap = (maxPages === undefined || maxPages === null) ? MAX_PAGES : maxPages;
+    var out = [];
+    var offset = null;
+    var pages = 0;
+    var seenOffsets = {};
+
+    while (pages < cap) {
+      var res = fetchPage(offset) || {};
+      out = out.concat(res.data || []);
+      pages++;
+      var next = (res.next_page && res.next_page.offset) ? res.next_page.offset : null;
+      if (!next) { return out; }
+      if (seenOffsets[next]) {
+        throw Errors.readFailed('ASANA', 'offset repetido en la paginación');
+      }
+      seenOffsets[next] = true;
+      offset = next;
+    }
+    throw Errors.readFailed('ASANA',
+      'el listado excede ' + cap + ' páginas; el resultado estaría truncado');
+  }
+
   function _partitionOf(options) {
     var partition = options && options.partition ? options.partition : null;
     if (!partition || !partition.project_gids || !partition.project_gids.length) {
@@ -58,10 +95,17 @@ var AsanaReadAdapter = (function () {
         var needle = ContextResolver.normalize(query || '');
         var limit = (options && options.page_size) ? options.page_size : 10;
         var out = [];
+
         for (var p = 0; p < partition.project_gids.length && out.length < limit; p++) {
-          var res = _request('/projects/' + encodeURIComponent(partition.project_gids[p]) +
-            '/tasks?limit=100&opt_fields=' + FIELDS);
-          var data = res.data || [];
+          var projectGid = partition.project_gids[p];
+          // Paginación completa del proyecto: la tarea buscada puede estar más
+          // allá de las primeras 100.
+          var data = collectPages(function (offset) {
+            return _request('/projects/' + encodeURIComponent(projectGid) +
+              '/tasks?limit=100&opt_fields=' + FIELDS +
+              (offset ? '&offset=' + encodeURIComponent(offset) : ''));
+          }, options ? options.max_pages : null);
+
           for (var i = 0; i < data.length && out.length < limit; i++) {
             var task = _normalizeTask(data[i], null, options ? options.context : null);
             if (!needle || ContextResolver.normalize(task.title || '').indexOf(needle) !== -1) {
@@ -125,6 +169,8 @@ var AsanaReadAdapter = (function () {
   function get(gid, options) { return backend().get(gid, options || {}); }
 
   return {
+    MAX_PAGES: MAX_PAGES,
+    collectPages: collectPages,
     useBackend: useBackend,
     resetBackend: resetBackend,
     // Expuesta para que el backend de Nivel 0 use la MISMA normalización que la

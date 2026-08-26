@@ -262,4 +262,40 @@
     t.equals(typeof NotionReadAdapter.MAX_PAGES, 'number', 'hay un tope defensivo declarado');
   });
 
+  TestRunner.unit('Partición', 'Asana pagina el proyecto entero para encontrar la tarea', function (t) {
+    // Un proyecto con más de 100 tareas: la buscada está en la SEGUNDA página.
+    // Mirar sólo la primera informaría "no existe" sobre algo que sí está.
+    var paginas = {
+      'INICIO': { data: [{ gid: '1', name: 'Ritual semanal' }],
+                  next_page: { offset: 'off-2' } },
+      'off-2':  { data: [{ gid: '1216646666201920', name: 'Diseñar orquestación inter-modelo de Metis' }],
+                  next_page: null }
+    };
+    var pedidas = [];
+    var todas = AsanaReadAdapter.collectPages(function (offset) {
+      pedidas.push(offset);
+      return paginas[offset === null ? 'INICIO' : offset];
+    });
+
+    t.equals(pedidas.length, 2, 'se piden las dos páginas');
+    t.equals(pedidas[0], null, 'la primera sin offset');
+    t.equals(pedidas[1], 'off-2', 'la segunda con el offset devuelto');
+    t.equals(todas.length, 2, 'se acumulan las tareas de ambas');
+    t.equals(todas[1].gid, '1216646666201920', 'la tarea de la segunda página está presente');
+
+    t.throwsCode(Errors.CODES.READ_FAILED, function () {
+      AsanaReadAdapter.collectPages(function () {
+        return { data: [{ gid: 'x' }], next_page: { offset: 'o-' + Schemas.uuid() } };
+      }, 3);
+    }, 'alcanzar el tope lanza en vez de truncar en silencio');
+
+    t.throwsCode(Errors.CODES.READ_FAILED, function () {
+      AsanaReadAdapter.collectPages(function () {
+        return { data: [], next_page: { offset: 'mismo' } };
+      }, 10);
+    }, 'un offset repetido se detecta como bucle');
+
+    t.equals(typeof AsanaReadAdapter.MAX_PAGES, 'number', 'hay un tope defensivo declarado');
+  });
+
 })();

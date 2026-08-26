@@ -381,6 +381,46 @@ function smokeTestLevel1(options) {
   return finish();
 }
 
+/**
+ * PRIMER ENSAYO REAL — smoke test de Nivel 1 acotado a METIS.
+ *
+ * Ejecútala a mano desde el editor. Es la única función que necesitas correr.
+ *
+ * Alcance deliberado del primer ensayo:
+ *   - contexto: METIS y sólo METIS;
+ *   - fuentes: Notion y Asana. Drive y Calendar quedan OMITIDAS porque no se
+ *     declara partición para ellas, y sin partición no se leen (fail closed);
+ *   - canarios: dos objetos verificados que las fuentes DEBEN devolver.
+ *
+ * Cero modelos, cero escrituras. No se invoca OpenAI ni Anthropic: este camino
+ * no pasa por `Orchestrator.run` ni toca ningún ProviderAdapter.
+ *
+ * `expect_id` de Asana va como CADENA: el adaptador normaliza `gid` a string y
+ * la comparación es estricta. Un número aquí nunca casaría.
+ */
+function smokeMetisPrimerEnsayo() {
+  return smokeTestLevel1({
+    contexts: ['METIS'],
+    canaries: {
+      METIS: {
+        'notion.search': {
+          query: 'Auditoría cruzada PAC demolición',
+          expect_id: '3c7df4e9-5ef0-8133-a653-c270d1f26e41',
+          min_results: 1
+        },
+        'notion.decisions': {
+          min_results: 1
+        },
+        'asana.search': {
+          query: 'Diseñar orquestación inter-modelo',
+          expect_id: '1216646666201920',
+          min_results: 1
+        }
+      }
+    }
+  });
+}
+
 /** Poda del ledger por retención (spec §5). Manual, nunca programada. */
 function purgeLedger() {
   var removed = Ledger.purge();
