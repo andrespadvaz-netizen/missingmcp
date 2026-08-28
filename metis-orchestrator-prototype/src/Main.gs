@@ -310,7 +310,12 @@ function smokeTestLevel1(options) {
     var contextCanaries = canaries[context] || {};
 
     [['notion.search', { page_size: 3 }],
-     ['notion.decisions', { page_size: 5 }],
+     // Sin `page_size`: `notion.decisions` es EXHAUSTIVO por diseño — recorre
+     // todas las páginas o falla, porque la cadena de vigencia puede cruzarlas.
+     // Un page_size pequeño no acorta la sonda, sólo multiplica las páginas
+     // hasta chocar con el tope defensivo (164 filas de METIS a 5 por página
+     // son 33 páginas, y el tope es 20). El default de 100 las resuelve en 2.
+     ['notion.decisions', {}],
      ['asana.search', { page_size: 3 }],
      ['drive.search', { page_size: 3 }],
      ['calendar.read', { time_window: timeWindow }]
