@@ -1,5 +1,14 @@
 /** Unit_Ledger.gs — spec §17 / Ledger. */
-(function () {
+/**
+ * Registro DIFERIDO: las pruebas de Ledger.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerUnitLedger() {
 
   function intent(ordinal, payload) {
     return {
@@ -150,4 +159,4 @@
     t.equals(Ledger.handoffRecord('h-1'), null, 'y desaparecen');
   });
 
-})();
+}

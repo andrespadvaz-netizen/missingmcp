@@ -1,5 +1,14 @@
 /** Unit_AuthorityPolicy.gs — spec §17 / AuthorityPolicy. */
-(function () {
+/**
+ * Registro DIFERIDO: las pruebas de AuthorityPolicy.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerUnitAuthorityPolicy() {
 
   function planned(overrides) {
     var step = {
@@ -116,4 +125,4 @@
       'sin mandato de ejecución no hay herramienta de escritura simulada');
   });
 
-})();
+}

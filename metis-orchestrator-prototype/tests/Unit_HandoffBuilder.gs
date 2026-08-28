@@ -1,5 +1,14 @@
 /** Unit_HandoffBuilder.gs — spec §17 / HandoffBuilder. */
-(function () {
+/**
+ * Registro DIFERIDO: las pruebas de HandoffBuilder.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerUnitHandoffBuilder() {
 
   var EXECUTION = { execution_id: 'exec-handoff' };
 
@@ -130,4 +139,4 @@
     }, 'fail closed: sin registro no se consume');
   });
 
-})();
+}

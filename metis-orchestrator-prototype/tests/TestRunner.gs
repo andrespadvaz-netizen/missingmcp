@@ -16,6 +16,46 @@ var TestRunner = (function () {
     _acceptance.push({ suite: 'Aceptación', id: id, name: name, fn: fn, kind: 'acceptance' });
   }
 
+  /**
+   * Archivos que registran casos. Se invocan AQUÍ, no en tiempo de carga.
+   *
+   * Apps Script concatena los .gs en un orden que no controlamos: si un archivo
+   * de pruebas llamaba a `TestRunner` mientras se cargaba y caía antes que este
+   * archivo, `TestRunner` valía `undefined` y el error de carga tumbaba el
+   * proyecto ENTERO — incluidas funciones sin relación alguna con los tests.
+   * Una declaración `function` sí se hoistea globalmente, así que invocarlas
+   * desde aquí es seguro sea cual sea el orden de los archivos.
+   */
+  var REGISTRARS = [
+    'registerUnitContextResolver',
+    'registerUnitRouter',
+    'registerUnitAuthorityPolicy',
+    'registerUnitPlanValidator',
+    'registerUnitLedger',
+    'registerUnitHandoffBuilder',
+    'registerUnitSimulatedWrite',
+    'registerAcceptanceCases'
+  ];
+
+  var _registered = false;
+
+  /** Idempotente: registrar dos veces duplicaría cada caso. */
+  function _ensureRegistered() {
+    if (_registered) { return; }
+    _registered = true;
+    for (var i = 0; i < REGISTRARS.length; i++) {
+      var name = REGISTRARS[i];
+      var fn = globalThis[name];
+      if (typeof fn !== 'function') {
+        // Falla ruidosamente: un registrador ausente daría 0 casos y un PASS
+        // vacío, que es peor que un error.
+        throw new Error('Falta el registrador de pruebas ' + name +
+          ': el archivo que lo define no está en el proyecto.');
+      }
+      fn();
+    }
+  }
+
   function _ctx() {
     var checks = [];
     function record(ok, msg) {
@@ -95,10 +135,17 @@ var TestRunner = (function () {
     };
   }
 
-  function runUnitTests() { return _report('Tests unitarios (spec §17)', _unit); }
-  function runAcceptance() { return _report('Casos de aceptación (spec §16)', _acceptance); }
+  function runUnitTests() {
+    _ensureRegistered();
+    return _report('Tests unitarios (spec §17)', _unit);
+  }
+  function runAcceptance() {
+    _ensureRegistered();
+    return _report('Casos de aceptación (spec §16)', _acceptance);
+  }
 
   function runAll() {
+    _ensureRegistered();
     var unitReport = _report('Tests unitarios (spec §17)', _unit);
     var accReport = _report('Casos de aceptación (spec §16)', _acceptance);
     return {

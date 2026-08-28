@@ -5,7 +5,16 @@
  * reproducibles: reloj fijo, ids deterministas, proveedores scriptados.
  * Ninguno toca la red ni ninguna fuente real.
  */
-(function () {
+/**
+ * Registro DIFERIDO: los diez casos de aceptación.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerAcceptanceCases() {
 
   function read(tool, args) { return { id: 'call-' + tool, name: tool, arguments: args }; }
 
@@ -417,4 +426,4 @@
     t.equals(result.ledger.length, 0, 'sin acciones materiales');
   });
 
-})();
+}

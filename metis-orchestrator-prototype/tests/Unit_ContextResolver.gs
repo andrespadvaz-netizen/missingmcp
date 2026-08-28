@@ -6,7 +6,16 @@
  * decisiones viven al final de este archivo — ambas responden a la misma
  * pregunta: qué puede ver una corrida de un contexto, y qué puede afirmar.
  */
-(function () {
+/**
+ * Registro DIFERIDO: las pruebas de ContextResolver.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerUnitContextResolver() {
 
   TestRunner.unit('ContextResolver', 'identifica contexto único', function (t) {
     var verdict = ContextResolver.resolve('¿Cuál es el estado del gate de Ciclo 1 a Ciclo 2 en Metis?');
@@ -298,4 +307,4 @@
     t.equals(typeof AsanaReadAdapter.MAX_PAGES, 'number', 'hay un tope defensivo declarado');
   });
 
-})();
+}

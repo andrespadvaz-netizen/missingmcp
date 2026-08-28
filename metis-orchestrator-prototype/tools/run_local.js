@@ -26,42 +26,28 @@ const crypto = require('crypto');
 
 const ROOT = path.resolve(__dirname, '..');
 
-const SRC_ORDER = [
-  'Errors.gs',
-  'Config.gs',
-  'Schemas.gs',
-  'Ledger.gs',
-  'ContextResolver.gs',
-  'RetrievalPolicy.gs',
-  'AuthorityPolicy.gs',
-  'Router.gs',
-  'HandoffBuilder.gs',
-  'PlanValidator.gs',
-  'ProviderAdapter.gs',
-  'OpenAIAdapter.gs',
-  'AnthropicAdapter.gs',
-  'NotionReadAdapter.gs',
-  'AsanaReadAdapter.gs',
-  'DriveReadAdapter.gs',
-  'CalendarReadAdapter.gs',
-  'SimulatedWriteAdapter.gs',
-  'ToolBroker.gs',
-  'Orchestrator.gs',
-  'Main.gs'
-];
-
-const TEST_ORDER = [
-  'Fixtures.gs',
-  'TestRunner.gs',
-  'Unit_ContextResolver.gs',
-  'Unit_Router.gs',
-  'Unit_AuthorityPolicy.gs',
-  'Unit_PlanValidator.gs',
-  'Unit_Ledger.gs',
-  'Unit_HandoffBuilder.gs',
-  'Unit_SimulatedWrite.gs',
-  'AcceptanceCases.gs'
-];
+/**
+ * Los archivos se cargan en ORDEN ALFABÉTICO DE RUTA, que es el mismo criterio
+ * con el que Apps Script concatena y evalúa el proyecto.
+ *
+ * Antes había aquí dos listas ordenadas a mano (`SRC_ORDER` / `TEST_ORDER`) que
+ * ponían `TestRunner.gs` antes que `AcceptanceCases.gs`. Ese orden artificial
+ * ocultó un error real: en Apps Script, `AcceptanceCases.gs` se evalúa primero y
+ * llamaba a `TestRunner` cuando aún valía `undefined`, tumbando el proyecto
+ * entero al cargar. La suite daba 76/76 en verde mientras el proyecto real ni
+ * arrancaba. Un arnés que impone su propio orden no prueba el runtime de
+ * destino: prueba el arnés.
+ */
+function orderedFiles() {
+  const dirs = ['src', 'tests'];
+  const out = [];
+  for (const dir of dirs) {
+    const abs = path.join(ROOT, dir);
+    const names = fs.readdirSync(abs).filter((f) => f.endsWith('.gs')).sort();
+    for (const name of names) { out.push(path.join(abs, name)); }
+  }
+  return out;
+}
 
 // --------------------------------------------------------- globals emulados
 let uuidCounter = 0;
@@ -144,8 +130,7 @@ sandbox.globalThis = sandbox;
 const context = vm.createContext(sandbox);
 
 function loadAll() {
-  const files = SRC_ORDER.map((f) => path.join(ROOT, 'src', f))
-    .concat(TEST_ORDER.map((f) => path.join(ROOT, 'tests', f)));
+  const files = orderedFiles();
   for (const file of files) {
     if (!fs.existsSync(file)) {
       throw new Error('Falta el archivo esperado: ' + file);

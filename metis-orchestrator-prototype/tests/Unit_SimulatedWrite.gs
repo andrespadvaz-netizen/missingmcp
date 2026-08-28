@@ -6,7 +6,16 @@
  * (que también demuestran "ninguna superficie de escritura real") viven aquí,
  * al final del archivo, en lugar de en un archivo nuevo.
  */
-(function () {
+/**
+ * Registro DIFERIDO: las pruebas de escritura simulada.
+ *
+ * NO es un IIFE. Apps Script concatena los .gs en un orden que no
+ * controlamos, así que llamar a `TestRunner` en tiempo de carga rompe el
+ * proyecto entero cuando este archivo se evalúa antes que TestRunner.gs
+ * (una declaración `function` sí se hoistea; `var TestRunner = (...)()` no).
+ * `TestRunner` invoca esta función desde los runners, ya con todo cargado.
+ */
+function registerUnitSimulatedWrite() {
 
   var EXECUTION = { execution_id: 'exec-sim' };
 
@@ -398,4 +407,4 @@
       'min_results 0 permite declarar explícitamente que se acepta vacío');
   });
 
-})();
+}
