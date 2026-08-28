@@ -3,6 +3,11 @@
 Cubre los nueve puntos de la spec §21. El código está en `src/` y `tests/`; la
 instalación y la configuración, en `README.md`.
 
+> **Ronda 4 — primer ensayo real de Nivel 1 (2026-08-28).** EJECUTADO. El
+> smoke test corrió contra Notion y Asana reales desde Google Apps Script y dio
+> `status: PASS`. Resultados, los dos defectos que salieron y el hallazgo sobre
+> el registro, en §9 (reescrita) y §13.
+>
 > **Ronda 3 — endurecimiento posterior.** Cinco correcciones puntuales sobre la
 > ronda 2, resumidas en §12. Ninguna amplía arquitectura ni cambia runtime.
 >
@@ -572,36 +577,51 @@ esquemas de §4.
 
 ---
 
-## 9. Punto 6 del informe: smoke test Nivel 1 — NO EJECUTADO
+## 9. Smoke test Nivel 1 — EJECUTADO (2026-08-28)
 
-**No lo ejecuté. No puedo.** Lo digo aquí y no en una nota al pie porque es la
-única parte del informe que no está hecha.
+Esta sección decía «NO EJECUTADO. No puedo». Ya no. El operador creó el
+proyecto de Apps Script, concedió la autorización y cargó las credenciales; el
+smoke corrió contra Notion y Asana reales.
 
-Ejecutar una lectura real de Nivel 1 exige, en este orden: un proyecto de Apps
-Script creado, la pantalla de autorización de Google aceptada por la cuenta
-dueña de Drive y Calendar, y las cuatro Script Properties cargadas con
-credenciales. No tengo ninguna de las tres cosas, y las tres son acciones del
-operador. Crear el proyecto y autorizarlo yo, aunque pudiera, sería activación,
-que es exactamente lo que la spec §20 prohíbe.
+**Segunda corrida, 2026-08-28T05:14:52Z — 2.3 s — `status: PASS`, `ok: true`:**
 
-Lo que sí dejé listo es la herramienta para que se ejecute en un clic:
-`smokeTestLevel1()` en `Main.gs`.
+| Check | Resultado |
+|---|---|
+| `METIS/notion.search` | PASS — canario `3c7df4e9-…` presente |
+| `METIS/notion.decisions` | PASS — admitidos: 164 |
+| `METIS/asana.search` | PASS — canario `1216646666201920` presente |
+| `METIS/drive.search` | OMITIDA — sin partición declarada |
+| `METIS/calendar.read` | OMITIDA — sin partición declarada |
+| `METIS/sin_contaminacion` | INFO — ningún resultado ajeno |
+| `METIS/vigencia` | INFO — decisiones 165, vigentes 154, `Estado` vacío 95, contradictorias 0 |
+| `models_invoked` | **0** |
+| `writes_attempted` | **0** |
 
-- **Qué hace:** comprueba el nivel, la presencia de credenciales y las
-  particiones declaradas; después hace **una** lectura acotada por cada
-  (contexto, fuente) con partición: `notion.search`, `notion.decisions`,
-  `asana.search`, `drive.search`. Sobre las decisiones informa cuántas hay,
-  cuántas vigentes, cuántas con `Estado` vacío y cuántas contradictorias.
-- **Qué NO hace:** no invoca ningún modelo (`models_invoked: 0`), no construye
-  plan, no simula ninguna acción y no escribe nada (`writes_attempted: 0`).
-- **Qué devuelve:** conteos y errores redactados. Nunca contenido recuperado.
-- **Requisito:** cambiar `Config.RUN_LEVEL` a `LEVEL_1` a mano. Si no, la
-  función se detiene y lo dice, sin tocar la red.
+Configuración: `RUN_LEVEL = LEVEL_1`, tres Script Properties
+(`METIS_NOTION_API_KEY`, `METIS_ASANA_API_KEY`, `METIS_SOURCE_PARTITIONS`),
+cero claves de proveedor, cero techos de gasto, cero activadores, y sólo los
+tres scopes de lectura del manifiesto. Terminado el ensayo, `RUN_LEVEL` volvió
+a `LEVEL_0`.
 
-Lo más probable que rompa en esa primera corrida, por orden de apuesta: el
-scope `drive.readonly` frente a `DriveApp` (L3), la versión `2025-09-03` de la
-API de Notion frente a la integración existente, y los ids de partición mal
-declarados (L14). Los tres fallan de forma visible y ninguno escribe.
+### Las tres apuestas de fallo: fallaron todas
+
+Esta sección apostaba a qué rompería: el scope `drive.readonly` frente a
+`DriveApp`, la versión `2025-09-03` de la API de Notion, y los ids de partición
+mal declarados. **Ninguna de las tres.** Notion `2025-09-03` respondió bien a la
+primera, los ids eran correctos, y Drive ni se tocó porque no tenía partición.
+Lo que sí rompió fueron dos defectos que no estaban en la lista — §13.
+
+### Lo que queda demostrado contra fuentes reales
+
+- **L1 cerrada.** La lectura real funciona: 164 decisiones y dos canarios
+  recuperados de Notion y Asana.
+- **L2 cerrada.** La estructura de vigencia se reprodujo desde la base real,
+  no desde fixtures: 165 decisiones, 154 vigentes, 0 contradictorias.
+- **La partición corta de verdad.** 316 filas en la base, 164 admitidas: el
+  filtro por `Proyecto` acotó a METIS y `sin_contaminacion` no detectó ni un
+  resultado ajeno.
+- **Fail-closed verificado.** Drive y Calendar quedaron OMITIDA por no tener
+  partición declarada, con la razón impresa. El silencio habría sido peor.
 
 ---
 
@@ -706,13 +726,113 @@ cuenta, el test del punto 1 no probaría el código que se envía.
 
 ---
 
+## 13. Ronda 4 — el primer ensayo real (2026-08-28)
+
+Dos defectos propios, ninguno visible desde el arnés local. Los dos habrían
+seguido ocultos indefinidamente sin ejecutar contra Apps Script.
+
+### Defecto 1 — dependencia de orden de carga (el grave)
+
+Antes de ejecutar **ninguna** función, el proyecto moría:
+
+```
+TypeError: Cannot read properties of undefined (reading 'acceptance')
+tests/AcceptanceCases.gs:13
+```
+
+Los archivos de tests registraban sus casos dentro de un IIFE de nivel
+superior, es decir en tiempo de carga. Apps Script concatena los `.gs` en un
+orden que no controlamos y `AcceptanceCases.gs` se evalúa antes que
+`TestRunner.gs`, donde `var TestRunner = (function(){…})()` aún vale
+`undefined` — un `var` no se hoistea con valor, una declaración `function` sí.
+El error de carga tumbaba el proyecto entero: `checkConfiguration` y el propio
+smoke incluidos, pese a no tener relación alguna con los tests.
+
+**Arreglo:** registro diferido. Cada archivo expone `function registerX()` y
+`TestRunner` las invoca desde los runners vía `_ensureRegistered()`, idempotente
+y ruidoso si falta un registrador (0 casos con PASS vacío sería peor que un
+error).
+
+**Y la razón de fondo, que pesa más que el bug:** `tools/run_local.js` cargaba
+con dos listas ordenadas a mano que ponían `TestRunner.gs` antes que
+`AcceptanceCases.gs`. **El arnés imponía un orden que el runtime de destino no
+garantiza**, y daba 76/76 en verde sobre código que en Apps Script ni arrancaba.
+Ahora carga en orden alfabético de ruta, el mismo criterio que Apps Script.
+Verificado en negativo: el arnés nuevo contra el código anterior reproduce el
+fallo exacto (`Error cargando AcceptanceCases.gs: TestRunner is not defined`).
+
+Esto agrava **D1**: el arnés no sólo no es Apps Script — llegó a ocultar un
+fallo que Apps Script sí veía.
+
+### Defecto 2 — `page_size` significaba lo contrario de lo que parecía
+
+Primera corrida, `status: FAIL`:
+
+```
+METIS/notion.decisions  FAIL
+Lectura fallida en NOTION: la consulta excede 20 páginas;
+el resultado estaría truncado
+```
+
+El smoke pasaba `page_size: 5` a `notion.decisions` creyendo «sonda pequeña,
+lee poco». Pero `decisions()` es exhaustivo por diseño —recorre todas las
+páginas o falla, porque la cadena de vigencia puede cruzarlas— así que
+`page_size` no limita cuánto se lee, sólo **cuántas páginas hacen falta**. Con
+las 164 filas reales de METIS: 33 páginas contra un tope defensivo de 20.
+
+**Arreglo:** la sonda no pasa `page_size` (default 100 ⇒ 2 páginas). **No** se
+subió `MAX_PAGES`: ese tope acababa de hacer su trabajo, negándose a devolver
+100 de 164 decisiones como si fueran todas — un truncamiento silencioso habría
+producido una respuesta de vigencia incorrecta con apariencia de correcta.
+
+Dos detalles que lo hacen instructivo:
+
+- A `page_size: 5`, el segundo contexto más grande (`.Final_Final`, 57 filas)
+  habría dado 12 páginas y **habría pasado**. El defecto estaba escondido tras
+  el tamaño de los datos.
+- **Lo encontró el canario.** Sin exigir resultados reales admitidos,
+  `notion.decisions` habría devuelto cero y pasado como PASS. Los canarios
+  positivos de la ronda 3 evitaron un falso verde.
+
+### Hallazgo sobre el registro real, no sobre el código
+
+Desglose de METIS en «Decisiones Tomadas» (164 filas, consultado 2026-08-28):
+
+| `Estado` | Filas | Rango | Con `Sustituida por` |
+|---|---|---|---|
+| (vacío) | 96 | 2026-05-13 → 08-22 | 1 |
+| vigente | 58 | 2026-07-17 → 08-25 | 0 |
+| modificada | 8 | 2026-06-16 → 08-22 | 8 |
+| derogada | 2 | 2026-07-15 → 08-22 | 2 |
+
+**Las 96 en blanco no son deuda.** La descripción de la propiedad `Estado` en la
+propia base dice: *«Por defecto vigente. Se cambia únicamente cuando otra
+decisión posterior la modifica o la deroga.»* El orquestador implementa esa
+convención; rellenarlas a mano sería escribir lo que el esquema ya declara.
+
+**El registro es internamente consistente:** 8/8 `modificada` y 2/2 `derogada`
+tienen su relación puesta; 0/58 `vigente` la tienen. De ahí `contradictorias: 0`.
+
+**La regla «manda la relación» se disparó en datos reales:** 1 fila sin `Estado`
+con `Sustituida por` — resuelta correctamente, sacada de vigentes y no contada
+como default aplicado (por eso el smoke reporta 95 y no 96).
+
+Único matiz anotado: 51 de las 96 blancas son anteriores al 2026-07-17, fecha
+del primer `vigente` declarado. Están en blanco *por construcción* —la propiedad
+no existía— no por decisión. No se propone acción; queda registrado como el
+único conjunto cuya vigencia nunca fue afirmada por nadie.
+
+---
+
 ## 11. Gate posterior
 
 Completar este prototipo **no autoriza Nivel 3 ni producción**. El resultado
 vuelve a auditoría cruzada. Tras la ronda 2, lo que más merece ser atacado es:
 
-- **L1 / §9** — nada de lo que toca fuentes reales se ha ejecutado todavía. Es
-  el siguiente paso y depende del operador.
+- **~~L1 / §9~~ — CERRADA.** Ejecutada contra fuentes reales el 2026-08-28
+  (§9). Lo que queda es que un ensayo con partición de un solo contexto no
+  prueba el aislamiento *entre* contextos: eso exige declarar dos y comprobar
+  que ninguno ve al otro.
 - **L14** — la partición es tan buena como su declaración; un id mal puesto
   produce contaminación silenciosa y el código no puede detectarlo por sí solo.
   El smoke test de Nivel 1 ahora **falla** si alguna fuente devuelve algo de otro
@@ -727,4 +847,7 @@ vuelve a auditoría cruzada. Tras la ronda 2, lo que más merece ser atacado es:
   modelo real.
 
 Y, fuera del prototipo: **la fila de "Decisiones Tomadas" marcada `vigente` con
-`Sustituida por` no vacío** es una inconsistencia real del registro, hoy.
+`Sustituida por` no vacío** es una inconsistencia real del registro, hoy. El
+ensayo del 2026-08-28 la acotó: está en Arquitecto Interior y no tiene gemela en
+METIS, donde las diez filas con estado declarado distinto de `vigente` llevan su
+relación puesta sin excepción (§13).
