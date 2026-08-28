@@ -33,7 +33,7 @@ var Config = (function () {
    * adaptadores de lectura real están bloqueados por código (`LEVEL_VIOLATION`)
    * aunque haya credenciales cargadas, que es el estado seguro por defecto.
    */
-  var RUN_LEVEL = LEVELS.LEVEL_1;
+  var RUN_LEVEL = LEVELS.LEVEL_0;
 
   /**
    * Nombres de Script Properties. VALORES NUNCA AQUÍ.
