@@ -135,15 +135,70 @@ var SMOKE_STATUS = {
  * "la credencial no ve nada": los tres devuelven cero y ninguno es un PASS.
  *
  * `canary` admite:
- *   { query, min_results, expect_id, expect_title_contains }
+ *   { query, min_results, expect_id, expect_title_contains,
+ *     forbid_id, forbid_title_contains, expect_exactly }
  * Todos opcionales; `min_results` vale 1 por defecto, así que incluso sin
  * canario declarado hace falta AL MENOS UN resultado real para validar.
+ *
+ * CANARIO NEGATIVO (`forbid_id`, `forbid_title_contains`): un objeto que el
+ * operador sabe que existe en OTRO contexto y que esta corrida NO debe ver
+ * nunca. Hace falta porque el contador de descartes no cubre todos los casos:
+ * sólo detecta objetos ajenos que la fuente devolvió Y que el ToolBroker supo
+ * clasificar como ajenos. Un objeto ajeno que llegue con contexto nulo o mal
+ * derivado se ADMITE sin descarte, y entonces "descartes = 0" se lee como
+ * aislamiento correcto cuando es exactamente lo contrario. El canario negativo
+ * comprueba la ausencia directamente, sobre los admitidos, sin depender de que
+ * la capa que falló se autodenuncie.
+ *
+ * `expect_exactly` fija el número exacto de admitidos cuando el operador conoce
+ * la cardinalidad real de la partición para esa consulta. Un conteo de más es
+ * fuga; uno de menos es sobre-filtrado. Ambos son fallos y ninguno se ve con
+ * `min_results`, que sólo pone un piso.
  *
  * @return {{status:string, detail:string}}
  */
 function smokeEvaluateCanary(canary, admitted) {
   var c = canary || {};
   var min = (typeof c.min_results === 'number') ? c.min_results : 1;
+
+  // Los canarios negativos se evalúan PRIMERO y sobre el conjunto completo de
+  // admitidos: una fuga es un fallo aunque el resto de la sonda no demuestre
+  // nada. Nunca puede quedar tapada por un NO_DEMOSTRADO.
+  if (c.forbid_id) {
+    var prohibidos = admitted.filter(function (d) { return d.id === c.forbid_id; });
+    if (prohibidos.length) {
+      return {
+        status: SMOKE_STATUS.FAIL,
+        detail: 'FUGA DE CONTEXTO: el objeto `' + c.forbid_id +
+                '` pertenece a otro contexto y fue ADMITIDO en esta sesión.'
+      };
+    }
+  }
+
+  if (c.forbid_title_contains) {
+    var vetado = ContextResolver.normalize(c.forbid_title_contains);
+    var coincidencias = admitted.filter(function (d) {
+      return ContextResolver.normalize(d.title || '').indexOf(vetado) !== -1;
+    });
+    if (coincidencias.length) {
+      return {
+        status: SMOKE_STATUS.FAIL,
+        detail: 'FUGA DE CONTEXTO: ' + coincidencias.length + ' admitido(s) contienen "' +
+                c.forbid_title_contains + '", que sólo existe en otro contexto.'
+      };
+    }
+  }
+
+  if (typeof c.expect_exactly === 'number' && admitted.length !== c.expect_exactly) {
+    return {
+      status: SMOKE_STATUS.FAIL,
+      detail: 'cardinalidad incorrecta: admitidos ' + admitted.length +
+              ', esperados exactamente ' + c.expect_exactly +
+              (admitted.length > c.expect_exactly
+                ? '. De más: la partición deja pasar objetos ajenos.'
+                : '. De menos: la partición filtra objetos propios.')
+    };
+  }
 
   if (admitted.length < min) {
     return {
@@ -180,8 +235,11 @@ function smokeEvaluateCanary(canary, admitted) {
   return {
     status: SMOKE_STATUS.PASS,
     detail: 'admitidos: ' + admitted.length +
-            (c.expect_id ? ', canario `' + c.expect_id + '` presente' : '') +
-            (c.expect_title_contains ? ', título esperado presente' : '')
+            (typeof c.expect_exactly === 'number' ? ' (cardinalidad exacta esperada)' : '') +
+            (c.expect_id ? ', canario positivo `' + c.expect_id + '` presente' : '') +
+            (c.expect_title_contains ? ', título esperado presente' : '') +
+            (c.forbid_id ? ', canario negativo `' + c.forbid_id + '` ausente' : '') +
+            (c.forbid_title_contains ? ', título vetado ausente' : '')
   };
 }
 
@@ -431,4 +489,97 @@ function purgeLedger() {
   var removed = Ledger.purge();
   Logger.log('Entradas de ledger podadas: ' + removed);
   return removed;
+}
+
+/**
+ * ENSAYO DE AISLAMIENTO MULTICONTEXTO — Metis y Shokko, Nivel 1.
+ *
+ * Ejecútala a mano desde el editor, con RUN_LEVEL en LEVEL_1, y devuelve el
+ * nivel a LEVEL_0 al terminar, en la misma sesión.
+ *
+ * QUÉ PRUEBA Y POR QUÉ ASÍ
+ *
+ * El registro de decisiones no está partido por contenedor: las 316 filas de
+ * los siete proyectos viven en UN solo data source, y la única frontera entre
+ * contextos es el valor de la propiedad `Proyecto`. Eso convierte a esta base
+ * en el peor caso disponible, que es justo el que hay que probar: si el
+ * aislamiento aguanta aquí, aguanta donde los contenedores sí están separados.
+ *
+ * La consulta de Notion es LA MISMA en los dos contextos y no contiene ninguna
+ * señal de contexto. "Barrido agosto" devuelve filas de cinco proyectos
+ * distintos si nadie filtra. Verificado el 2026-08-29: dos filas en Metis, una
+ * en Shokko, dos en Andrea, seis en .Final_Final, dos en Venture Quest. Si el
+ * filtro por `Proyecto` no acota en origen, la sonda devuelve trece filas y el
+ * conteo exacto lo delata; si la clasificación por contexto también falla, el
+ * canario negativo de Andrea lo delata por separado.
+ *
+ * Andrea entra SÓLO como canario negativo: un identificador y un fragmento de
+ * título que deben estar AUSENTES. No se lee sustancia de Andrea, no se declara
+ * partición de Andrea y ninguna corrida se resuelve a ese contexto. La
+ * separación de contexto del CANON §3.3 se mantiene intacta.
+ *
+ * LIMITACIÓN DECLARADA — no la tapes al leer el resultado
+ *
+ * El canario negativo de Asana es más débil que el de Notion. Las consultas de
+ * Asana difieren entre contextos, así que ese canario sólo detecta el fallo en
+ * que el adaptador ignore el filtro de proyectos y vuelque el espacio de
+ * trabajo completo (el defecto del typeahead, ya corregido). NO detecta un
+ * identificador de proyecto mal declarado en la partición. Eso se cubre
+ * revisando la partición a mano, no con esta sonda.
+ *
+ * Cero modelos, cero escrituras, cero triggers.
+ */
+function smokeAislamientoMetisShokko() {
+  // Identificadores verificados en vivo contra Notion y Asana el 2026-08-29.
+  var CONSULTA_COMUN = 'Barrido agosto';
+  var ANDREA_ID_VETADO = '3c4df4e9-5ef0-8171-9f9c-f09cb9c10ff2';
+  var ANDREA_TITULO_VETADO = 'Andrea Plan Comercial';
+
+  return smokeTestLevel1({
+    contexts: ['METIS', 'SHOKKO'],
+    canaries: {
+      METIS: {
+        'notion.search': {
+          query: CONSULTA_COMUN,
+          expect_id: '3c4df4e9-5ef0-81c0-870e-d8f1627a797f',
+          // Dos filas de Metis casan con esta consulta. Un tercer resultado es
+          // fuga; uno solo es sobre-filtrado. Ambos son FAIL.
+          expect_exactly: 2,
+          forbid_id: ANDREA_ID_VETADO,
+          forbid_title_contains: ANDREA_TITULO_VETADO
+        },
+        'notion.decisions': {
+          min_results: 1,
+          forbid_id: ANDREA_ID_VETADO,
+          forbid_title_contains: ANDREA_TITULO_VETADO
+        },
+        'asana.search': {
+          query: 'Diseñar orquestación inter-modelo',
+          expect_id: '1216646666201920',
+          min_results: 1,
+          forbid_id: '1217748648074744'
+        }
+      },
+      SHOKKO: {
+        'notion.search': {
+          query: CONSULTA_COMUN,
+          expect_id: '3c4df4e9-5ef0-8147-ac7a-e30fb92e6e92',
+          expect_exactly: 1,
+          forbid_id: ANDREA_ID_VETADO,
+          forbid_title_contains: ANDREA_TITULO_VETADO
+        },
+        'notion.decisions': {
+          min_results: 1,
+          forbid_id: ANDREA_ID_VETADO,
+          forbid_title_contains: ANDREA_TITULO_VETADO
+        },
+        'asana.search': {
+          query: 'nueva home Shopify',
+          expect_id: '1217748648074744',
+          min_results: 1,
+          forbid_id: '1216646666201920'
+        }
+      }
+    }
+  });
 }

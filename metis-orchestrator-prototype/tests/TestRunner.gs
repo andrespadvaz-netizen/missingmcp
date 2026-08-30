@@ -34,6 +34,7 @@ var TestRunner = (function () {
     'registerUnitLedger',
     'registerUnitHandoffBuilder',
     'registerUnitSimulatedWrite',
+    'registerUnitAislamientoMulticontexto',
     'registerAcceptanceCases'
   ];
 

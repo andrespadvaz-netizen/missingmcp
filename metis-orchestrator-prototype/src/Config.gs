@@ -23,15 +23,23 @@ var Config = (function () {
   /**
    * Nivel efectivo de la corrida.
    *
-   * >>> FIJADO EN LEVEL_1 PARA EL PRIMER ENSAYO REAL DE SÓLO LECTURA. <<<
+   * >>> ESTADO ACTUAL: LEVEL_0 — RUNTIME INERTE. <<<
    *
-   * LEVEL_1 habilita la lectura real contra las fuentes declaradas en la
-   * partición. NO habilita escritura: la escritura no existe en este prototipo,
-   * y LEVEL_2 sólo añade construcción y validación de planes simulados.
+   * Este comentario describe el valor de la línea que le sigue y sólo eso. La
+   * versión anterior decía "fijado en LEVEL_1" mientras el código asignaba
+   * LEVEL_0: quien verificaba el estado leyendo la documentación del archivo
+   * obtenía la respuesta contraria a la verdad. Si cambias `RUN_LEVEL`, cambia
+   * también esta línea en el mismo commit.
    *
-   * Devuélvelo a LEVEL_0 en cuanto termine el ensayo: en LEVEL_0 los cuatro
-   * adaptadores de lectura real están bloqueados por código (`LEVEL_VIOLATION`)
-   * aunque haya credenciales cargadas, que es el estado seguro por defecto.
+   * En LEVEL_0 los cuatro adaptadores de lectura real están bloqueados por
+   * código (`Errors.levelViolation`) aunque haya credenciales cargadas: es el
+   * estado seguro por defecto y el único en el que debe quedar el proyecto
+   * fuera de un ensayo autorizado.
+   *
+   * Para un ensayo real de sólo lectura se sube a LEVEL_1 y se devuelve a
+   * LEVEL_0 al terminar, en la misma sesión. LEVEL_1 no habilita escritura: la
+   * escritura no existe en este prototipo, y LEVEL_2 sólo añade construcción y
+   * validación de planes simulados.
    */
   var RUN_LEVEL = LEVELS.LEVEL_0;
 

@@ -203,6 +203,38 @@ var NotionReadAdapter = (function () {
     };
   }
 
+  /**
+   * Clave de partición de una página: debe COINCIDIR con el proyecto declarado
+   * para el contexto. Fail closed en los dos casos ambiguos.
+   *
+   * Defecto que esto cierra: la versión anterior era
+   *   `if (partition.project && project && project !== partition.project) throw`
+   * y una fila con la propiedad `Proyecto` VACÍA salía por el `&& project` sin
+   * lanzar. Esa fila quedaba legible desde cualquier contexto. El filtro
+   * anticontaminación del ToolBroker tampoco la atrapaba, porque su condición
+   * es `doc.context && doc.context !== resuelto` y con contexto nulo no
+   * descarta. Dos capas de defensa que se abren ante el mismo valor nulo no
+   * son dos capas.
+   *
+   * Un proyecto presente pero que no mapea a ningún contexto declarado también
+   * lanza: es deriva de esquema, y admitirlo con contexto nulo reabre la misma
+   * puerta por otra vía.
+   */
+  function _assertPageProject(page, partition, context) {
+    if (!partition || !partition.project) { return true; }
+    var project = _selectOf(page, DECISION_PROPS.PROJECT);
+    if (!project) {
+      throw Errors.partitionViolation(page.id, context);
+    }
+    if (project !== partition.project) {
+      throw Errors.partitionViolation(page.id, context);
+    }
+    if (!_contextForProject(project)) {
+      throw Errors.partitionViolation(page.id, context);
+    }
+    return true;
+  }
+
   /** Un objeto pedido por id debe pertenecer al contenedor del contexto. */
   function _assertInPartition(page, partition, options) {
     var parent = page.parent || {};
@@ -213,10 +245,7 @@ var NotionReadAdapter = (function () {
         (!partition.decision_data_sources || partition.decision_data_sources.indexOf(parentId) === -1)) {
       throw Errors.partitionViolation(page.id, context);
     }
-    var project = _selectOf(page, DECISION_PROPS.PROJECT);
-    if (partition.project && project && project !== partition.project) {
-      throw Errors.partitionViolation(page.id, context);
-    }
+    _assertPageProject(page, partition, context);
     return true;
   }
 
@@ -331,6 +360,10 @@ var NotionReadAdapter = (function () {
   }
 
   function _normalizePage(page, snippet, partition) {
+    // Segunda capa real: si el filtro por `Proyecto` en origen fallara o la API
+    // lo ignorara, esto lanza en vez de devolver un documento con contexto nulo
+    // que el ToolBroker admitiría sin descartar.
+    _assertPageProject(page, partition, null);
     var title = _titleOf(page);
     var project = _selectOf(page, DECISION_PROPS.PROJECT);
     var typeProp = _selectOf(page, 'Tipo');
