@@ -220,6 +220,53 @@ var NotionReadAdapter = (function () {
    * lanza: es deriva de esquema, y admitirlo con contexto nulo reabre la misma
    * puerta por otra vía.
    */
+  /**
+   * Propiedades estructurales de las que depende la lectura del registro. Si
+   * alguna desaparece o se renombra en Notion, esta lectura deja de significar
+   * lo que dice significar.
+   */
+  var REQUIRED_PROPS = [
+    DECISION_PROPS.TITLE,
+    DECISION_PROPS.PROJECT,
+    DECISION_PROPS.STATE,
+    DECISION_PROPS.SUPERSEDED_BY,
+    DECISION_PROPS.SUPERSEDES
+  ];
+
+  /**
+   * Deriva de esquema: FALLO VISIBLE, nunca degradación silenciosa.
+   *
+   * Sin esta comprobación, renombrar o borrar una propiedad en Notion produce
+   * el peor resultado posible: la lectura sigue devolviendo filas y el
+   * prototipo sigue dando PASS, pero afirmando de menos. `_selectOf` sobre una
+   * propiedad inexistente devuelve null, y null en `Estado` se interpreta como
+   * "vacío" y cae en la regla de vigencia por defecto. Es decir: borrar la
+   * columna `Estado` convertiría TODAS las decisiones en vigentes por defecto
+   * sin un solo error. Lo mismo con las dos relaciones de sustitución: sin
+   * ellas la cadena de vigencia no se puede cerrar, y el prototipo creería
+   * haberla cerrado porque no encuentra eslabones.
+   *
+   * La comprobación es por PRESENCIA DE LA CLAVE, no por valor. Una fila con
+   * `Estado` vacío es un dato legítimo; una fila sin la propiedad `Estado` es
+   * un esquema distinto del que este adaptador sabe leer.
+   */
+  function _assertSchema(page, context) {
+    var props = page.properties || {};
+    var missing = [];
+    for (var i = 0; i < REQUIRED_PROPS.length; i++) {
+      if (!Object.prototype.hasOwnProperty.call(props, REQUIRED_PROPS[i])) {
+        missing.push(REQUIRED_PROPS[i]);
+      }
+    }
+    if (missing.length) {
+      throw Errors.schemaError(
+        'Deriva de esquema en el registro de decisiones de Notion: faltan ' +
+        missing.length + ' propiedad(es) estructural(es)',
+        { missing: missing, object_id: page.id || null, context: context || null });
+    }
+    return true;
+  }
+
   function _assertPageProject(page, partition, context) {
     if (!partition || !partition.project) { return true; }
     var project = _selectOf(page, DECISION_PROPS.PROJECT);
@@ -245,6 +292,7 @@ var NotionReadAdapter = (function () {
         (!partition.decision_data_sources || partition.decision_data_sources.indexOf(parentId) === -1)) {
       throw Errors.partitionViolation(page.id, context);
     }
+    _assertSchema(page, context);
     _assertPageProject(page, partition, context);
     return true;
   }
@@ -360,6 +408,10 @@ var NotionReadAdapter = (function () {
   }
 
   function _normalizePage(page, snippet, partition) {
+    // El esquema PRIMERO: sin las propiedades estructurales, la comprobación de
+    // partición que viene después no significa nada, porque `Proyecto` sería
+    // null por ausencia de la columna y no por falta de valor.
+    _assertSchema(page, null);
     // Segunda capa real: si el filtro por `Proyecto` en origen fallara o la API
     // lo ignorara, esto lanza en vez de devolver un documento con contexto nulo
     // que el ToolBroker admitiría sin descartar.
@@ -398,6 +450,8 @@ var NotionReadAdapter = (function () {
 
   return {
     DECISION_PROPS: DECISION_PROPS,
+    REQUIRED_PROPS: REQUIRED_PROPS,
+    assertSchema: function (page, context) { return _assertSchema(page, context); },
     DECISION_STATES: DECISION_STATES,
     MAX_PAGES: MAX_PAGES,
     collectPages: collectPages,

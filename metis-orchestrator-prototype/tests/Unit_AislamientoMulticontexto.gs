@@ -18,11 +18,18 @@
  */
 function registerUnitAislamientoMulticontexto() {
 
-  /** Fila mínima del registro de decisiones, con el `Proyecto` que se le pida. */
+  /**
+   * Fila del registro de decisiones con TODAS las propiedades estructurales
+   * presentes y el `Proyecto` que se le pida. Debe estar completa: una fila a
+   * la que le falte una propiedad ya no prueba partición, prueba deriva de
+   * esquema, que es otra cosa y se prueba aparte.
+   */
   function filaConProyecto(proyecto) {
     var props = {
       'Decision': { type: 'title', title: [{ plain_text: 'Barrido agosto — fila de prueba' }] },
-      'Estado': { type: 'select', select: { name: 'vigente' } }
+      'Estado': { type: 'select', select: { name: 'vigente' } },
+      'Sustituida por': { type: 'relation', relation: [] },
+      'Sustituye a': { type: 'relation', relation: [] }
     };
     props['Proyecto'] = (proyecto === null)
       ? { type: 'select', select: null }
@@ -33,6 +40,13 @@ function registerUnitAislamientoMulticontexto() {
       parent: { data_source_id: '1436a1fc-159a-4e99-a6d6-0313f5932560' },
       properties: props
     };
+  }
+
+  /** La misma fila, pero sin la propiedad que se le indique. */
+  function filaSinPropiedad(nombre) {
+    var fila = filaConProyecto('Metis');
+    delete fila.properties[nombre];
+    return fila;
   }
 
   var PARTICION_METIS = {
@@ -127,6 +141,105 @@ function registerUnitAislamientoMulticontexto() {
     }, admitidos);
     t.equals(v.status, SMOKE_STATUS.PASS, 'presencia, cardinalidad y ausencia se cumplen a la vez');
     t.includes(v.detail, 'canario negativo', 'el detalle deja constancia de la ausencia comprobada');
+  });
+
+  // ---------------------------------------------------- deriva de esquema
+
+  TestRunner.unit('Deriva de esquema', 'borrar Estado no degrada en silencio', function (t) {
+    // El caso más peligroso: sin la columna `Estado`, todas las filas caerían
+    // en la regla de vigencia por defecto y el prototipo afirmaría vigencia
+    // sobre decisiones que nadie declaró vigentes, sin un solo error.
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(filaSinPropiedad('Estado'), null, PARTICION_METIS);
+    }, 'la ausencia de la columna Estado lanza en vez de leerse como valor vacío');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'borrar una relación de sustitución falla', function (t) {
+    // Sin las relaciones, la cadena de vigencia no se puede cerrar, y el
+    // prototipo creería haberla cerrado porque no encuentra eslabones.
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(filaSinPropiedad('Sustituida por'), null, PARTICION_METIS);
+    }, 'sin `Sustituida por` la lectura falla');
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(filaSinPropiedad('Sustituye a'), null, PARTICION_METIS);
+    }, 'sin `Sustituye a` también');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'renombrar Proyecto no se confunde con valor vacío', function (t) {
+    // Distinción que da sentido a toda la guarda: una fila SIN la propiedad es
+    // un esquema distinto; una fila CON la propiedad vacía es un dato. Los dos
+    // se rechazan, pero por motivos distintos y con códigos distintos.
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(filaSinPropiedad('Proyecto'), null, PARTICION_METIS);
+    }, 'la columna ausente es deriva de esquema');
+    t.throwsCode(Errors.CODES.PARTITION_VIOLATION, function () {
+      NotionReadAdapter.normalizePage(filaConProyecto(null), null, PARTICION_METIS);
+    }, 'la columna presente y vacía es violación de partición');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'la comprobación es por clave, no por valor', function (t) {
+    var fila = filaConProyecto('Metis');
+    fila.properties['Estado'] = { type: 'select', select: null };
+    var doc = NotionReadAdapter.normalizePage(fila, null, PARTICION_METIS);
+    t.equals(doc.decision.estado, null, 'un Estado vacío es dato legítimo y se conserva como null');
+    t.equals(doc.context, 'METIS', 'la fila se admite con su contexto');
+  });
+
+  // -------------------------------------------- pertenencia ajena en Asana
+
+  /** Tarea de Asana con la lista de proyectos que se le indique. */
+  function tareaEnProyectos(gids) {
+    var projects = [];
+    for (var i = 0; i < gids.length; i++) { projects.push({ gid: gids[i], name: 'p' + i }); }
+    return { gid: '999', name: 'tarea de prueba', projects: projects };
+  }
+
+  TestRunner.unit('Aislamiento', 'los proyectos ajenos se calculan desde las particiones declaradas', function (t) {
+    Config._setPartitions({
+      METIS:  { asana: { project_gids: ['100'] } },
+      SHOKKO: { asana: { project_gids: ['200', '201'] } }
+    });
+    try {
+      var ajenos = AsanaReadAdapter.foreignProjectGids('METIS');
+      t.equals(ajenos['200'], 'SHOKKO', 'un proyecto de Shokko es ajeno para Metis');
+      t.equals(ajenos['201'], 'SHOKKO', 'y el segundo también');
+      t.notOk(ajenos['100'], 'el propio no figura como ajeno');
+    } finally {
+      // Restaurar las particiones del entorno de test, no dejarlas en null:
+      // null significa "leer de Script Properties" y contaminaría a cualquier
+      // prueba posterior que dependa del corpus de fixtures.
+      Config._setPartitions(Fixtures.PARTITIONS);
+    }
+  });
+
+  TestRunner.unit('Aislamiento', 'una tarea en proyectos de contextos incompatibles se rechaza', function (t) {
+    Config._setPartitions({
+      METIS:  { asana: { project_gids: ['100'] } },
+      SHOKKO: { asana: { project_gids: ['200'] } }
+    });
+    try {
+      // Caso adversarial: la tarea SÍ está en un proyecto permitido de Metis.
+      // La versión anterior se daba por satisfecha con eso y la etiquetaba
+      // METIS. Ahora la pertenencia simultánea a un proyecto de Shokko la
+      // descalifica: no se resuelve a favor del contexto de la corrida.
+      t.throwsCode(Errors.CODES.PARTITION_VIOLATION, function () {
+        AsanaReadAdapter.assertNoForeignMembership(
+          tareaEnProyectos(['100', '200']), { context: 'METIS' });
+      }, 'la tarea puente se rechaza aunque uno de sus proyectos sea propio');
+
+      t.ok(AsanaReadAdapter.assertNoForeignMembership(
+        tareaEnProyectos(['100']), { context: 'METIS' }),
+        'una tarea sólo en proyectos propios sí pasa');
+
+      t.ok(AsanaReadAdapter.assertNoForeignMembership(
+        tareaEnProyectos(['100', '300']), { context: 'METIS' }),
+        'un proyecto no declarado en ninguna partición no la descalifica');
+    } finally {
+      // Restaurar las particiones del entorno de test, no dejarlas en null:
+      // null significa "leer de Script Properties" y contaminaría a cualquier
+      // prueba posterior que dependa del corpus de fixtures.
+      Config._setPartitions(Fixtures.PARTITIONS);
+    }
   });
 
   TestRunner.unit('Aislamiento', 'el ensayo declarado usa dos contextos y veta a Andrea', function (t) {

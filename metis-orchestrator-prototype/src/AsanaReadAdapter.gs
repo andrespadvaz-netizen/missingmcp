@@ -109,6 +109,8 @@ var AsanaReadAdapter = (function () {
           for (var i = 0; i < data.length && out.length < limit; i++) {
             var task = _normalizeTask(data[i], null, options ? options.context : null);
             if (!needle || ContextResolver.normalize(task.title || '').indexOf(needle) !== -1) {
+              // Sólo sobre lo que va a admitirse. Ver `_assertNoForeignMembership`.
+              _assertNoForeignMembership(data[i], options);
               out.push(task);
             }
           }
@@ -131,10 +133,62 @@ var AsanaReadAdapter = (function () {
   function _assertInPartition(task, partition, options) {
     var projects = task.projects || [];
     for (var i = 0; i < projects.length; i++) {
-      if (partition.project_gids.indexOf(String(projects[i].gid)) !== -1) { return true; }
+      if (partition.project_gids.indexOf(String(projects[i].gid)) !== -1) {
+        return _assertNoForeignMembership(task, options);
+      }
     }
     throw Errors.partitionViolation(task.gid ? String(task.gid) : 'desconocido',
       (options && options.context) ? options.context : null);
+  }
+
+  /**
+   * Proyectos declarados para CUALQUIER contexto distinto del resuelto.
+   *
+   * Existe porque en Asana una tarea puede pertenecer a varios proyectos a la
+   * vez. `_assertInPartition` se daba por satisfecha al encontrar UN proyecto
+   * permitido, así que una tarea que estuviera a la vez en un proyecto de este
+   * contexto y en uno de otro pasaba el filtro. Y en el camino de búsqueda el
+   * contexto no se deriva del objeto sino que se estampa desde la sesión, de
+   * modo que esa tarea salía etiquetada con el contexto de la corrida sin que
+   * ninguna capa la cuestionara.
+   */
+  function _foreignProjectGids(context) {
+    var out = {};
+    var names = Config.contextNames();
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] === context) { continue; }
+      var foreign = Config.partitionFor(names[i], 'ASANA');
+      if (!foreign || !foreign.project_gids) { continue; }
+      for (var j = 0; j < foreign.project_gids.length; j++) {
+        out[String(foreign.project_gids[j])] = names[i];
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Pertenencia simultánea a proyectos de contextos incompatibles: se RECHAZA,
+   * no se resuelve a favor del contexto de la corrida.
+   *
+   * La regla se aplica sobre las tareas que van a ADMITIRSE, no sobre todas las
+   * del proyecto. Una tarea puente que no casa con la consulta no se devuelve,
+   * así que no hay fuga que impedir; y abortar la sonda entera por su presencia
+   * confundiría dos problemas distintos: que la partición contenga un puente, y
+   * que esta lectura lo haya dejado pasar. Esta capa responde del segundo.
+   */
+  function _assertNoForeignMembership(task, options) {
+    var context = (options && options.context) ? options.context : null;
+    if (!context) { return true; }
+    var foreign = _foreignProjectGids(context);
+    var projects = task.projects || [];
+    for (var i = 0; i < projects.length; i++) {
+      var gid = String(projects[i].gid);
+      if (foreign[gid]) {
+        throw Errors.partitionViolation(
+          task.gid ? String(task.gid) : 'desconocido', context);
+      }
+    }
+    return true;
   }
 
   /**
@@ -176,6 +230,11 @@ var AsanaReadAdapter = (function () {
     // Expuesta para que el backend de Nivel 0 use la MISMA normalización que la
     // real: si el fixture normalizara por su cuenta, el test no probaría nada.
     normalizeTask: _normalizeTask,
+    // Expuestas por el mismo motivo que `normalizeTask`: los tests inyectan un
+    // backend de fixtures que reemplaza el backend real entero, así que una
+    // guarda que sólo viva dentro del backend real no quedaría cubierta.
+    foreignProjectGids: _foreignProjectGids,
+    assertNoForeignMembership: _assertNoForeignMembership,
     search: search,
     get: get
   };

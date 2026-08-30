@@ -518,14 +518,35 @@ function purgeLedger() {
  * partición de Andrea y ninguna corrida se resuelve a ese contexto. La
  * separación de contexto del CANON §3.3 se mantiene intacta.
  *
- * LIMITACIÓN DECLARADA — no la tapes al leer el resultado
+ * DRIVE. Las carpetas declaradas son `07_Templates` para Metis, donde viven el
+ * CANON y el CANON-Core, e `Indicadores` dentro de la carpeta de Shokko en la
+ * unidad compartida de Venture Quest. Ambas existían antes de esta prueba y
+ * ambas se usan operativamente: ninguna se creó para poner el ensayo en verde.
+ * El adaptador NO es recursivo, así que `Indicadores` vale como superficie
+ * acotada y observable de Shokko, no como definición de "todo el Drive de
+ * Shokko".
  *
- * El canario negativo de Asana es más débil que el de Notion. Las consultas de
- * Asana difieren entre contextos, así que ese canario sólo detecta el fallo en
- * que el adaptador ignore el filtro de proyectos y vuelque el espacio de
- * trabajo completo (el defecto del typeahead, ya corregido). NO detecta un
- * identificador de proyecto mal declarado en la partición. Eso se cubre
- * revisando la partición a mano, no con esta sonda.
+ * CALENDAR queda deliberadamente fuera. Sólo existen el calendario primario y
+ * dos de feriados; no hay calendario por contexto. El primario está declarado
+ * superficie prohibida, y reutilizarlo para los dos contextos convertiría la
+ * partición en ficticia. Sale OMITIDA y la fuente queda como deuda explícita.
+ * Crear dos calendarios vacíos para satisfacer a la prueba sería exactamente
+ * la sobre-gobernanza decorativa que este sistema intenta evitar.
+ *
+ * LIMITACIONES DECLARADAS — no las tapes al leer el resultado
+ *
+ * 1. Los canarios negativos de Asana y Drive son más débiles que los de Notion.
+ *    En Notion la consulta es idéntica en ambos contextos, así que sólo la
+ *    partición puede separar los resultados. En Asana y Drive las consultas
+ *    difieren, de modo que el canario negativo detecta que el adaptador ignore
+ *    el filtro y vuelque el contenedor entero, pero NO detecta un identificador
+ *    de proyecto o de carpeta mal declarado en la partición. Eso se revisa a
+ *    mano.
+ * 2. Por el mismo motivo, Asana y Drive no llevan comprobación de cardinalidad
+ *    exacta. En Drive además el emparejamiento por título depende de cómo
+ *    tokeniza Google, comportamiento que no se puede predecir sin ejecutarlo:
+ *    una cardinalidad fijada a ciegas produciría un fallo falso que no
+ *    enseñaría nada.
  *
  * Cero modelos, cero escrituras, cero triggers.
  */
@@ -558,6 +579,13 @@ function smokeAislamientoMetisShokko() {
           expect_id: '1216646666201920',
           min_results: 1,
           forbid_id: '1217748648074744'
+        },
+        'drive.search': {
+          query: 'CANON-Core',
+          expect_id: '1mCacaShHv9XiQ9ecvMVlcO6L9o_2c__S',
+          min_results: 1,
+          forbid_id: '10b1toOo-hCKO8E2x4CTQf58osDtTtpt3',
+          forbid_title_contains: 'Tablero Shokko'
         }
       },
       SHOKKO: {
@@ -578,6 +606,13 @@ function smokeAislamientoMetisShokko() {
           expect_id: '1217748648074744',
           min_results: 1,
           forbid_id: '1216646666201920'
+        },
+        'drive.search': {
+          query: 'Tablero',
+          expect_id: '10b1toOo-hCKO8E2x4CTQf58osDtTtpt3',
+          min_results: 1,
+          forbid_id: '1mCacaShHv9XiQ9ecvMVlcO6L9o_2c__S',
+          forbid_title_contains: 'CANON'
         }
       }
     }
