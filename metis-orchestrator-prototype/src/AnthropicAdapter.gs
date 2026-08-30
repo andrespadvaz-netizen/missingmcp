@@ -113,6 +113,7 @@ var AnthropicAdapter = (function () {
         text: text,
         tool_requests: toolRequests,
         usage: usage,
+        provider_model: (raw && raw.model) ? raw.model : null,
         stop_reason: (raw && raw.stop_reason) ? raw.stop_reason : null,
         provider_request_id: (raw && raw.id) ? raw.id : null
       };

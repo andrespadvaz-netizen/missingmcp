@@ -120,6 +120,7 @@ var OpenAIAdapter = (function () {
         text: text,
         tool_requests: toolRequests,
         usage: usage,
+        provider_model: (raw && raw.model) ? raw.model : null,
         stop_reason: (raw && raw.status) ? raw.status : null,
         provider_request_id: (raw && raw.id) ? raw.id : null
       };

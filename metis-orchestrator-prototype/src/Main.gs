@@ -722,15 +722,25 @@ function smokeProveedoresReales() {
   // lance, aunque lancen las dos, y aunque falle algo que no habíamos previsto.
   Config._setRunLevel(Config.LEVELS.LEVEL_2);
   try {
+  // Acumulador de la corrida. Es el mismo objeto que usa el orquestador, para
+  // que el tope por corrida se aplique aquí igual que allí.
+  var runtime = { cost_usd: 0, cost_known: true };
+
   for (var i = 0; i < proveedores.length; i++) {
     var p = proveedores[i];
     var etiqueta = p.nombre + '/complete';
     try {
-      var normalized = p.adapter.complete({
+      // MISMA puerta que el orquestador. Antes se llamaba al adaptador
+      // directamente y eso saltaba la contabilidad entera: los techos estaban
+      // declarados y ninguno se comprobaba.
+      var normalized = ProviderAdapter.callBudgeted(p.adapter, {
         system: 'Responde en una sola palabra.',
         prompt: 'Di la palabra: aislamiento',
         max_output_tokens: 16
-      });
+      }, null, runtime);
+
+      reporte.observed_model_ids[p.nombre] =
+        normalized.provider_model ? normalized.provider_model : '(no informado)';
 
       if (!normalized.usage) {
         anota(etiqueta, SMOKE_STATUS.FAIL,
@@ -741,27 +751,38 @@ function smokeProveedoresReales() {
       var costo = normalized.usage.estimated_cost_usd;
       var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
 
-      if (typeof costo !== 'number') {
-        // El caso que hay que observar, no evitar. El identificador exacto va
-        // en el reporte para que se declare en METIS_PRICING tal cual.
-        reporte.cost_known = false;
-        anota(etiqueta, SMOKE_STATUS.FAIL,
-          'COSTO DESCONOCIDO: no hay precio declarado para el identificador que ' +
-          'devolvió el proveedor. Tokens entrada ' + normalized.usage.input_tokens +
-          ', salida ' + normalized.usage.output_tokens +
-          '. Declara ese identificador EXACTO en METIS_PRICING y repite.');
-        continue;
-      }
+      // Recálculo independiente, aquí y no a mano: el costo informado debe ser
+      // aritmética reproducible desde los tokens y el precio declarado.
+      var precio = Config.priceFor(p.nombre, normalized.provider_model);
+      var recalculado = precio
+        ? (normalized.usage.input_tokens / 1000) * precio.input_per_1k +
+          (normalized.usage.output_tokens / 1000) * precio.output_per_1k
+        : null;
+      var coincide = (recalculado !== null) && Math.abs(recalculado - costo) < 1e-9;
 
-      reporte.total_cost_usd += costo;
-      anota(etiqueta, SMOKE_STATUS.PASS,
+      anota(etiqueta, coincide ? SMOKE_STATUS.PASS : SMOKE_STATUS.FAIL,
+        'modelo devuelto `' + reporte.observed_model_ids[p.nombre] + '`; ' +
         'respondió "' + texto + '"; tokens entrada ' + normalized.usage.input_tokens +
         ', salida ' + normalized.usage.output_tokens +
-        '; costo informado ' + costo);
+        '; costo informado ' + costo +
+        (coincide
+          ? '; recálculo independiente coincide'
+          : '; RECÁLCULO NO COINCIDE, esperado ' + recalculado));
 
     } catch (e) {
-      anota(etiqueta, SMOKE_STATUS.FAIL,
-        (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+      if (Errors.is(e, Errors.CODES.PRICE_UNKNOWN)) {
+        // El caso que hay que OBSERVAR, no evitar. La sonda ya se pagó; lo que
+        // el sistema se niega a hacer es contabilizarla con un precio inventado.
+        reporte.cost_known = false;
+        anota(etiqueta, SMOKE_STATUS.FAIL,
+          'COSTO DESCONOCIDO: se gastó una sonda mínima y el sistema se negó a ' +
+          'contabilizarla falsamente. ' + Errors.redactText(e.message) +
+          ' Declara ESE identificador exacto en METIS_PRICING, verifica su tarifa, ' +
+          'y repite sólo este proveedor.');
+      } else {
+        anota(etiqueta, SMOKE_STATUS.FAIL,
+          (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+      }
     }
   }
 
@@ -778,6 +799,10 @@ function smokeProveedoresReales() {
     ruteo.push(nombres[c] + '→' + Config.primaryFor(nombres[c]));
   }
   anota('primario_por_contexto', 'INFO', ruteo.join(', '));
+
+  reporte.total_cost_usd = runtime.cost_usd;
+  anota('gasto_contabilizado', 'INFO',
+    'corrida ' + runtime.cost_usd + ' USD, registrado en el ledger agregado');
 
   var fallos = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.FAIL; });
   reporte.status = fallos.length ? SMOKE_STATUS.FAIL : SMOKE_STATUS.PASS;

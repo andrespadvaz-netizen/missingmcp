@@ -74,33 +74,16 @@ var Orchestrator = (function () {
     if (runtime.model_interventions >= limits.MAX_MODEL_INTERVENTIONS) {
       throw Errors.limitExceeded('MAX_MODEL_INTERVENTIONS', runtime.model_interventions);
     }
-    Ledger.assertAggregateBudget();
-
     var provider = _providerFor(options, model);
-    var normalized = toolContract
-      ? provider.completeWithTools(request, toolContract)
-      : provider.complete(request);
-    ProviderAdapter.assertNormalizedShape(normalized);
+
+    // Toda llamada pagada del prototipo atraviesa la MISMA puerta, incluida la
+    // del ensayo aislado de proveedores. El orquestador no lleva su propia
+    // contabilidad: si hubiera dos caminos de gasto podrían divergir en
+    // política, y uno de los dos terminaría sin enforcement real.
+    var normalized = ProviderAdapter.callBudgeted(provider, request, toolContract, runtime);
 
     runtime.model_interventions++;
     runtime.models.push({ model: model, role: role });
-
-    if (normalized.usage) {
-      var cost = normalized.usage.estimated_cost_usd;
-      if (typeof cost === 'number') {
-        runtime.cost_usd += cost;
-        Ledger.addSpend(cost);
-        if (typeof limits.MAX_RUN_BUDGET_USD === 'number' &&
-            runtime.cost_usd > limits.MAX_RUN_BUDGET_USD) {
-          throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
-        }
-      } else {
-        // Sin precio configurado no se puede vigilar el techo de la corrida.
-        // Fail closed: no se sigue gastando contra un contador ciego.
-        runtime.cost_known = false;
-        throw Errors.priceUnknown(model, request.model ? request.model : 'modelo por defecto');
-      }
-    }
     return normalized;
   }
 

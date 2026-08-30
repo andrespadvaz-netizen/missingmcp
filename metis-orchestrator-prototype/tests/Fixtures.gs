@@ -312,6 +312,9 @@ var Fixtures = (function () {
           tool_requests: raw.tool_requests ? raw.tool_requests : [],
           usage: usage,
           stop_reason: raw.stop_reason ? raw.stop_reason : 'end_turn',
+          // El fixture declara el identificador de modelo igual que un
+          // proveedor real: forma parte del contrato normalizado.
+          provider_model: raw.model ? raw.model : name.toLowerCase() + '-fixture',
           provider_request_id: name.toLowerCase() + '-req-' + index
         };
         ProviderAdapter.assertNormalizedShape(normalized);

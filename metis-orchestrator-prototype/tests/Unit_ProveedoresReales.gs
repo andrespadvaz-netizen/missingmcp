@@ -116,6 +116,134 @@ function registerUnitProveedoresReales() {
       'lo mismo para el otro proveedor');
   });
 
+  // ------------------------------------------- la única puerta de gasto
+
+  /** Proveedor simulado que informa uso y el identificador que se le indique. */
+  function proveedorFalso(nombre, modeloDevuelto, costo) {
+    var llamadas = { n: 0 };
+    return {
+      llamadas: llamadas,
+      name: nombre,
+      complete: function () {
+        llamadas.n++;
+        return {
+          text: 'ok',
+          tool_requests: [],
+          usage: { input_tokens: 100, output_tokens: 50, estimated_cost_usd: costo },
+          provider_model: modeloDevuelto,
+          stop_reason: 'end_turn',
+          provider_request_id: 'req-' + llamadas.n
+        };
+      },
+      completeWithTools: function (r) { return this.complete(r); },
+      normalizeResponse: function (raw) { return raw; },
+      redactProviderError: function (e) { return e; }
+    };
+  }
+
+  TestRunner.unit('Puerta de gasto', 'un presupuesto agotado impide la red ANTES de llamar', function (t) {
+    // El defecto que esto cierra: el ensayo llamaba al adaptador directamente,
+    // y el adaptador sólo comprueba que los techos ESTÉN DECLARADOS, no que no
+    // se hayan excedido. El control real vivía en el orquestador, así que había
+    // dos caminos de gasto con política distinta.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.001);
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      Ledger.addSpend(5.0); // agota el techo diario
+      t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null,
+          { cost_usd: 0, cost_known: true });
+      }, 'el techo diario agotado detiene la llamada');
+      t.equals(p.llamadas.n, 0,
+        'y el proveedor NO llegó a invocarse: el preflight ocurre antes de la red');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'un costo conocido se contabiliza en el ledger', function (t) {
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.25);
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      var antes = Ledger.spend('DAILY');
+      var runtime = { cost_usd: 0, cost_known: true };
+      ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      t.equals(runtime.cost_usd, 0.25, 'el acumulador de la corrida sube');
+      t.ok(Math.abs((Ledger.spend('DAILY') - antes) - 0.25) < 1e-9,
+        'y el gasto queda registrado en el contador agregado, no sólo en memoria');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'el tope por corrida detiene la SIGUIENTE llamada', function (t) {
+    // Limitación inherente y declarada: el costo sólo se conoce después de la
+    // respuesta, así que el tope no puede impedir que UNA llamada lo rebase.
+    // Lo que sí debe hacer es impedir que haya una segunda.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.9);
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 50, MAX_MONTHLY_BUDGET_USD: 100
+    });
+    try {
+      var runtime = { cost_usd: 0, cost_known: true };
+      ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      t.equals(p.llamadas.n, 1, 'la primera llamada pasa: 0.9 no rebasa el tope de 1');
+      t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      }, 'la segunda rebasa 1.8 y se detiene');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'el identificador devuelto viaja en el error de precio', function (t) {
+    // Sin esto, el fallo por costo desconocido no puede decir qué declarar
+    // para resolverlo, y el ensayo habría gastado la sonda para nada.
+    var p = proveedorFalso('FALSO', 'gpt-5-2026-01-01', null);
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      var capturado = null;
+      try {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null,
+          { cost_usd: 0, cost_known: true });
+      } catch (e) { capturado = e; }
+      t.ok(capturado && capturado.code === Errors.CODES.PRICE_UNKNOWN,
+        'un costo nulo lanza precio desconocido');
+      t.includes(String(capturado.message), 'gpt-5-2026-01-01',
+        'y el mensaje nombra el identificador EXACTO que hay que declarar');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'el contrato normalizado incluye el modelo devuelto', function (t) {
+    var campos = ProviderAdapter.normalizedFields();
+    t.ok(campos.indexOf('provider_model') !== -1,
+      'provider_model forma parte del contrato, no se pierde por el camino');
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      ProviderAdapter.assertNormalizedShape({
+        text: '', tool_requests: [], usage: null,
+        stop_reason: null, provider_request_id: null
+      });
+    }, 'una respuesta sin él queda fuera de contrato');
+  });
+
+  TestRunner.unit('Puerta de gasto', 'orquestador y ensayo usan la MISMA puerta', function (t) {
+    // Si alguien reintroduce un segundo camino de gasto, las políticas pueden
+    // divergir y uno de los dos acabará sin enforcement. Fue exactamente lo
+    // que pasó con la primera versión del ensayo.
+    t.includes(String(smokeProveedoresReales), 'ProviderAdapter.callBudgeted',
+      'el ensayo pasa por la puerta común');
+    t.notOk(/adapter\.complete\(/.test(String(smokeProveedoresReales)),
+      'y no llama al adaptador directamente');
+  });
+
   TestRunner.unit('Proveedores', 'el ensayo eleva en memoria y restituye con finally', function (t) {
     // Guarda contra una regresión silenciosa del propio ensayo. Si alguien le
     // quita el `finally`, o le quita la exigencia de partir de LEVEL_0, el
