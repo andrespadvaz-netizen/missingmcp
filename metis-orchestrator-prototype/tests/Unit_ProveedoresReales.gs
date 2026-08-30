@@ -362,27 +362,99 @@ function registerUnitProveedoresReales() {
  */
 function registerUnitInformeTroceado() {
 
-  TestRunner.unit('Informe', 'ningún trozo del informe rebasa el límite de registro', function (t) {
+  /**
+   * Informe sintético con el tamaño que se le pida. NO ejecuta la suite.
+   *
+   * La primera versión de esta prueba llamaba a `TestRunner.runAll()` dentro de
+   * una prueba que forma parte de esa misma suite: la suite se ejecutaba a sí
+   * misma, y cada nivel volvía a lanzarlo todo. Medido: 12,8 segundos con esa
+   * prueba frente a 71 milisegundos sin ella, un factor de 180. En el arnés
+   * local pasaba por "tarda un poco"; en Apps Script, con seis minutos de tope,
+   * llevaba la corrida al corte por tiempo.
+   *
+   * La lección va más allá del arreglo: una prueba que mide una propiedad del
+   * sistema NO necesita ejecutar el sistema. Necesita una entrada con esa
+   * propiedad. Construirla es más barato, más determinista, y no puede
+   * realimentarse.
+   */
+  function informeDe(numeroDeCasos, largoDelNombre) {
+    function suite(titulo, n) {
+      var results = [];
+      for (var i = 0; i < n; i++) {
+        results.push({
+          name: new Array(largoDelNombre + 1).join('x') + '-' + i,
+          suite: titulo + ' — bloque', id: null, ok: true, error: null,
+          checks: [{ ok: true, msg: 'a' }, { ok: true, msg: 'b' }, { ok: true, msg: 'c' }]
+        });
+      }
+      return {
+        title: titulo, total: n, passed: n, failed: 0,
+        assertions: n * 3, results: results, level: Config.LEVELS.LEVEL_0
+      };
+    }
+    var unit = suite('Tests unitarios (spec §17)', numeroDeCasos);
+    var acc = suite('Casos de aceptación (spec §16)', 10);
+    return {
+      reports: [unit, acc],
+      total: unit.total + acc.total,
+      passed: unit.passed + acc.passed,
+      failed: 0,
+      assertions: unit.assertions + acc.assertions
+    };
+  }
+
+  var LIMITE = 8192;
+
+  TestRunner.unit('Informe', 'el veredicto va en un trozo propio y corto', function (t) {
     // Google Cloud Logging corta cada entrada en 8.192 caracteres. La suite ya
     // lo rebasaba y el informe se truncaba a mitad del último caso de
     // aceptación, justo antes de los totales: la corrida terminaba bien y el
-    // veredicto no se podía leer. Esta prueba impide que vuelva a pasar según
-    // crezcan las suites.
-    var LIMITE = 8192;
-    var report = TestRunner.runAll();
-    var chunks = TestRunner.renderChunks(report);
-
+    // veredicto no se podía leer.
+    var chunks = TestRunner.renderChunks(informeDe(120, 40));
     t.ok(chunks.length >= 2, 'el informe se emite en varios trozos, no en uno solo');
+    var ultimo = chunks[chunks.length - 1];
+    t.includes(ultimo, 'VEREDICTO GLOBAL', 'el veredicto es el último trozo');
+    t.ok(ultimo.length < 200,
+      'y es corto de verdad, ' + ultimo.length + ' caracteres: no puede quedar cortado');
+  });
+
+  TestRunner.unit('Informe', 'trocear por suite mantiene cada entrada bajo el límite', function (t) {
+    // 120 casos con nombres de 40 caracteres son bastante más de lo que hay
+    // hoy: la prueba mira hacia adelante, no al tamaño actual.
+    var chunks = TestRunner.renderChunks(informeDe(120, 40));
     for (var i = 0; i < chunks.length; i++) {
       t.ok(chunks[i].length < LIMITE,
-        'trozo ' + (i + 1) + ' de ' + chunks.length + ': ' + chunks[i].length +
-        ' caracteres, por debajo del límite');
+        'trozo ' + (i + 1) + ' de ' + chunks.length + ': ' + chunks[i].length + ' caracteres');
     }
+  });
 
-    var ultimo = chunks[chunks.length - 1];
-    t.includes(ultimo, 'VEREDICTO GLOBAL',
-      'el veredicto va en su propio trozo, el más corto, para que nunca quede cortado');
-    t.ok(ultimo.length < 200, 'y ese trozo es corto de verdad: ' + ultimo.length + ' caracteres');
+  TestRunner.unit('Informe', 'una sola cadena SÍ rebasaría el límite con ese tamaño', function (t) {
+    // Comprobación en negativo: sin esto, la prueba anterior pasaría también
+    // con un informe pequeño y no demostraría que el troceado sirve de algo.
+    var completo = TestRunner.render(informeDe(120, 40));
+    t.ok(completo.length > LIMITE,
+      'el informe sin trocear mide ' + completo.length + ' caracteres, por encima del límite');
+  });
+
+  TestRunner.unit('Informe', 'medir el informe no ejecuta la suite', function (t) {
+    // Guarda contra la reintroducción del defecto: si alguien vuelve a llamar a
+    // runAll desde aquí, la suite se ejecuta a sí misma y la corrida se
+    // multiplica por dos órdenes de magnitud.
+    // Se miran los COMENTARIOS APARTE del código. El comentario de arriba
+    // menciona el ejecutor a propósito, porque explica el defecto que se
+    // cerró; si la prueba mirara el texto entero, ese comentario la haría
+    // fallar y la única salida sería borrar la explicación. Pasó en el primer
+    // intento, junto con otro caso de auto-referencia: las cadenas buscadas se
+    // arman por partes porque, escritas literales, la prueba se encontraría a
+    // sí misma.
+    var codigo = String(registerUnitInformeTroceado)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    var prohibidos = ['run' + 'All(', 'run' + 'UnitTests(', 'run' + 'Acceptance('];
+    for (var i = 0; i < prohibidos.length; i++) {
+      t.ok(codigo.indexOf(prohibidos[i]) === -1,
+        'el código de esta suite no relanza las pruebas con ' + prohibidos[i]);
+    }
   });
 
 }
