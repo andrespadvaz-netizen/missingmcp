@@ -268,13 +268,21 @@ var Config = (function () {
    * Se declaran en `METIS_PRICING`:
    *
    *   { "OPENAI": { "gpt-5": { "input_per_1k": 0.0, "output_per_1k": 0.0 } },
-   *     "ANTHROPIC": { "claude-opus-4-5": { ... } } }
+   *     "ANTHROPIC": { "claude-opus-5": { ... } } }
+   *
+   * La clave del modelo debe ser EXACTAMENTE la que el proveedor devuelve en
+   * su respuesta, que no siempre coincide con la que se pidió: algunos
+   * proveedores responden con una instantánea fechada. No hay coincidencia por
+   * prefijo a propósito. Si mañana existe un identificador parecido con tarifa
+   * distinta, el sistema debe fallar en vez de suponer que "se parece".
    *
    * Sin precio para el modelo usado, el costo queda DESCONOCIDO y el
    * orquestador falla cerrado en vez de estimar.
    */
+  var _pricingOverride = null;
+
   function priceFor(provider, model) {
-    var pricing = _readJson('PRICING');
+    var pricing = _pricingOverride !== null ? _pricingOverride : _readJson('PRICING');
     if (!pricing || !pricing[provider] || !pricing[provider][model]) { return null; }
     var entry = pricing[provider][model];
     if (typeof entry.input_per_1k !== 'number' || typeof entry.output_per_1k !== 'number') { return null; }
@@ -285,6 +293,25 @@ var Config = (function () {
   function levelAllowsRealReads(level) {
     var l = level || RUN_LEVEL;
     return l === LEVELS.LEVEL_1 || l === LEVELS.LEVEL_2;
+  }
+
+  /**
+   * ¿Este nivel permite invocar modelos reales? Sólo LEVEL_2.
+   *
+   * Existe porque faltaba: los cuatro adaptadores de lectura lanzan violación
+   * de nivel en LEVEL_0, pero los de proveedor no comprobaban el nivel en
+   * absoluto. Con las credenciales cargadas, eso significaba que el runtime
+   * "inerte" no leía nada y aun así podía gastar dinero. `LEVEL_0` debe
+   * significar que no ocurre NINGUNA llamada externa, no sólo que no se lee.
+   *
+   * La separación entre niveles queda así: LEVEL_1 lee fuentes reales y no
+   * gasta; LEVEL_2 añade la invocación de modelos, que es la única operación
+   * de este prototipo con coste monetario. Subir a LEVEL_2 es por tanto una
+   * decisión del operador con consecuencia económica, distinta de leer.
+   */
+  function levelAllowsModelCalls(level) {
+    var l = level || RUN_LEVEL;
+    return l === LEVELS.LEVEL_2;
   }
 
   function levelAllowsPlanConstruction(level) {
@@ -356,6 +383,8 @@ var Config = (function () {
   }
   function _setPartitions(map) { _partitionsOverride = map; }
   function _setLimits(map) { _limitsOverride = map; }
+  /** Sólo para tests: sustituye la tabla de precios sin tocar Script Properties. */
+  function _setPricing(map) { _pricingOverride = map; }
 
   function runLevel() { return RUN_LEVEL; }
 
@@ -365,6 +394,7 @@ var Config = (function () {
     _setRunLevel: _setRunLevel,
     _setPartitions: _setPartitions,
     _setLimits: _setLimits,
+    _setPricing: _setPricing,
     SECRET_PROPERTY_NAMES: SECRET_PROPERTY_NAMES,
     SETTING_PROPERTY_NAMES: SETTING_PROPERTY_NAMES,
     CAPABILITIES: CAPABILITIES,
@@ -386,6 +416,7 @@ var Config = (function () {
     declaredPartitionContexts: declaredPartitionContexts,
     priceFor: priceFor,
     levelAllowsRealReads: levelAllowsRealReads,
+    levelAllowsModelCalls: levelAllowsModelCalls,
     levelAllowsPlanConstruction: levelAllowsPlanConstruction,
     contextNames: contextNames,
     primaryFor: primaryFor,

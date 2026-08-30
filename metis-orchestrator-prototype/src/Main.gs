@@ -618,3 +618,171 @@ function smokeAislamientoMetisShokko() {
     }
   });
 }
+
+/**
+ * ENSAYO DE PROVEEDORES REALES — OpenAI y Anthropic aislados, Nivel 2.
+ *
+ * Ejecútala a mano desde el editor con RUN_LEVEL en LEVEL_0, y DÉJALO ahí. A
+ * diferencia de los ensayos de lectura, esta función NO te pide subir el nivel
+ * en el archivo: lo eleva ella misma en memoria, sólo durante las dos
+ * llamadas, y lo restituye en un `finally` que se ejecuta pase lo que pase.
+ *
+ * POR QUÉ AL REVÉS QUE LOS OTROS ENSAYOS
+ *
+ * El modo de fallo que importa aquí no es que alguien ejecute esto sin querer:
+ * hay que seleccionar esta función y pulsar Ejecutar, que es tan deliberado
+ * como editar una línea. El modo de fallo que importa es que una llamada falle,
+ * el operador se distraiga, y el proyecto quede GUARDADO en LEVEL_2, con
+ * credenciales cargadas y capacidad de gastar, hasta que alguien se acuerde.
+ * Un nivel elevado que vive en un archivo dura hasta que se corrige; uno que
+ * vive en memoria dura lo que dura la ejecución.
+ *
+ * Por eso la función EXIGE que el archivo esté en LEVEL_0 y se niega a correr
+ * si no lo está: un LEVEL_2 persistido es precisamente el estado peligroso.
+ *
+ * ESTA FUNCIÓN GASTA DINERO. Es la primera del prototipo que lo hace. Dos
+ * llamadas, una por proveedor, con un prompt mínimo y un techo de salida
+ * pequeño. El coste esperado está muy por debajo de un centavo, pero el punto
+ * no es el importe: es que a partir de aquí el nivel del runtime tiene
+ * consecuencia económica y no sólo de lectura.
+ *
+ * QUÉ PRUEBA
+ *
+ * 1. Que cada proveedor responde y su respuesta cumple el contrato interno.
+ * 2. Qué identificador de modelo devuelve REALMENTE cada uno. Es el dato que
+ *    más falta hace: el precio se busca por el modelo de la respuesta, no por
+ *    el pedido, y algunos proveedores responden con una instantánea fechada.
+ *    Si no hay precio declarado para ese identificador exacto, el costo queda
+ *    desconocido y la corrida falla cerrada. Eso es correcto y deliberado: no
+ *    hay coincidencia por prefijo, porque un identificador parecido puede
+ *    tener tarifa distinta.
+ * 3. Que el costo informado se puede recalcular a mano desde los tokens y el
+ *    precio declarado, y coincide salvo redondeo. La función hace ese
+ *    recálculo ella misma y lo reporta, para no depender de que alguien lo
+ *    haga con una calculadora a las dos de la mañana.
+ * 4. Que el enrutador manda cada contexto a su proveedor primario.
+ *
+ * QUÉ NO PRUEBA
+ *
+ * La corrida dual completa a través del orquestador. Eso es el paso siguiente
+ * y necesita el orquestador cableado con proveedores reales, que es otra
+ * superficie. No lo mezclo aquí para que un fallo sea diagnosticable.
+ *
+ * Cero herramientas, cero escrituras, cero lecturas de fuentes.
+ */
+function smokeProveedoresReales() {
+  var reporte = {
+    level: Config.runLevel(),
+    started_at: new Date().toISOString(),
+    checks: [],
+    observed_model_ids: {},
+    total_cost_usd: 0,
+    cost_known: true
+  };
+
+  function anota(check, status, detail) {
+    reporte.checks.push({ check: check, status: status, detail: detail });
+  }
+
+  if (Config.runLevel() !== Config.LEVELS.LEVEL_0) {
+    anota('nivel', SMOKE_STATUS.FAIL,
+      'RUN_LEVEL persistido es ' + Config.runLevel() + ' y debe ser LEVEL_0. ' +
+      'Esta función eleva el nivel ella misma y lo restituye al terminar; un ' +
+      'LEVEL_2 guardado en el archivo es el estado que hay que evitar.');
+    reporte.status = SMOKE_STATUS.FAIL;
+    reporte.finished_at = new Date().toISOString();
+    Logger.log(JSON.stringify(reporte, null, 2));
+    return reporte;
+  }
+  anota('nivel_persistido', 'INFO', 'LEVEL_0 — correcto; la elevación será temporal');
+
+  // Techos y precios ANTES de gastar: si faltan, el fallo debe verse aquí y no
+  // a mitad de una corrida ya pagada.
+  try {
+    Config.assertBudgetsConfigured();
+    var l = Config.limits();
+    anota('techos', 'INFO',
+      'corrida ' + l.MAX_RUN_BUDGET_USD + ', día ' + l.MAX_DAILY_BUDGET_USD +
+      ', mes ' + l.MAX_MONTHLY_BUDGET_USD);
+  } catch (e) {
+    anota('techos', SMOKE_STATUS.FAIL, Errors.redactText(e.message));
+    reporte.status = SMOKE_STATUS.FAIL;
+    reporte.finished_at = new Date().toISOString();
+    Logger.log(JSON.stringify(reporte, null, 2));
+    return reporte;
+  }
+
+  var proveedores = [
+    { nombre: 'OPENAI', adapter: OpenAIAdapter.create(), pedido: Config.PROVIDERS.OPENAI.model },
+    { nombre: 'ANTHROPIC', adapter: AnthropicAdapter.create(), pedido: Config.PROVIDERS.ANTHROPIC.model }
+  ];
+
+  // Ventana de gasto. Todo lo que puede costar dinero vive dentro de este try,
+  // y el `finally` devuelve el runtime a estado inerte aunque una llamada
+  // lance, aunque lancen las dos, y aunque falle algo que no habíamos previsto.
+  Config._setRunLevel(Config.LEVELS.LEVEL_2);
+  try {
+  for (var i = 0; i < proveedores.length; i++) {
+    var p = proveedores[i];
+    var etiqueta = p.nombre + '/complete';
+    try {
+      var normalized = p.adapter.complete({
+        system: 'Responde en una sola palabra.',
+        prompt: 'Di la palabra: aislamiento',
+        max_output_tokens: 16
+      });
+
+      if (!normalized.usage) {
+        anota(etiqueta, SMOKE_STATUS.FAIL,
+          'el proveedor respondió sin bloque de uso: no hay tokens que contar');
+        continue;
+      }
+
+      var costo = normalized.usage.estimated_cost_usd;
+      var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
+
+      if (typeof costo !== 'number') {
+        // El caso que hay que observar, no evitar. El identificador exacto va
+        // en el reporte para que se declare en METIS_PRICING tal cual.
+        reporte.cost_known = false;
+        anota(etiqueta, SMOKE_STATUS.FAIL,
+          'COSTO DESCONOCIDO: no hay precio declarado para el identificador que ' +
+          'devolvió el proveedor. Tokens entrada ' + normalized.usage.input_tokens +
+          ', salida ' + normalized.usage.output_tokens +
+          '. Declara ese identificador EXACTO en METIS_PRICING y repite.');
+        continue;
+      }
+
+      reporte.total_cost_usd += costo;
+      anota(etiqueta, SMOKE_STATUS.PASS,
+        'respondió "' + texto + '"; tokens entrada ' + normalized.usage.input_tokens +
+        ', salida ' + normalized.usage.output_tokens +
+        '; costo informado ' + costo);
+
+    } catch (e) {
+      anota(etiqueta, SMOKE_STATUS.FAIL,
+        (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+    }
+  }
+
+  } finally {
+    Config._setRunLevel(Config.LEVELS.LEVEL_0);
+    anota('nivel_al_terminar', 'INFO',
+      Config.runLevel() + ' — runtime devuelto a estado inerte');
+  }
+
+  // Enrutamiento: el modelo primario de cada contexto declarado, sin invocar.
+  var nombres = Config.contextNames();
+  var ruteo = [];
+  for (var c = 0; c < nombres.length; c++) {
+    ruteo.push(nombres[c] + '→' + Config.primaryFor(nombres[c]));
+  }
+  anota('primario_por_contexto', 'INFO', ruteo.join(', '));
+
+  var fallos = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.FAIL; });
+  reporte.status = fallos.length ? SMOKE_STATUS.FAIL : SMOKE_STATUS.PASS;
+  reporte.ok = !fallos.length;
+  reporte.finished_at = new Date().toISOString();
+  Logger.log(JSON.stringify(reporte, null, 2));
+  return reporte;
+}

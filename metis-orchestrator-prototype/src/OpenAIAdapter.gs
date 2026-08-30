@@ -48,7 +48,17 @@ var OpenAIAdapter = (function () {
     }
 
     completeWithTools(request, toolContract) {
-      // Antes de gastar: los techos deben existir. Vale para toda llamada real.
+      // Antes que nada: el nivel. Una llamada a un modelo es la única operación
+      // de este prototipo que cuesta dinero, así que no puede ocurrir con el
+      // runtime en estado inerte aunque la credencial esté cargada. Los
+      // adaptadores de lectura ya fallaban así; éste no lo hacía, y eso
+      // convertía LEVEL_0 en "no lee" en vez de "no hace nada externo".
+      if (!Config.levelAllowsModelCalls()) {
+        throw Errors.levelViolation(
+          'Invocación real de OpenAI bloqueada en ' + Config.runLevel() +
+          '. Los modelos sólo se llaman en LEVEL_2.');
+      }
+      // Después: los techos deben existir. Vale para toda llamada real.
       Config.assertBudgetsConfigured();
       var body = this.buildRequest(request, toolContract);
       // La credencial se resuelve FUERA del try: una credencial ausente es un
