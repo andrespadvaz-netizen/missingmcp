@@ -221,50 +221,101 @@ var NotionReadAdapter = (function () {
    * puerta por otra vía.
    */
   /**
-   * Propiedades estructurales de las que depende la lectura del registro. Si
-   * alguna desaparece o se renombra en Notion, esta lectura deja de significar
-   * lo que dice significar.
+   * Propiedades estructurales de las que depende la lectura del registro, con
+   * el TIPO que cada una debe tener. Si alguna desaparece, se renombra o
+   * cambia de tipo en Notion, esta lectura deja de significar lo que dice
+   * significar.
    */
   var REQUIRED_PROPS = [
-    DECISION_PROPS.TITLE,
-    DECISION_PROPS.PROJECT,
-    DECISION_PROPS.STATE,
-    DECISION_PROPS.SUPERSEDED_BY,
-    DECISION_PROPS.SUPERSEDES
+    { name: DECISION_PROPS.TITLE, type: 'title' },
+    { name: DECISION_PROPS.PROJECT, type: 'select' },
+    { name: DECISION_PROPS.STATE, type: 'select' },
+    { name: DECISION_PROPS.SUPERSEDED_BY, type: 'relation' },
+    { name: DECISION_PROPS.SUPERSEDES, type: 'relation' }
   ];
 
   /**
-   * Deriva de esquema: FALLO VISIBLE, nunca degradación silenciosa.
+   * Deriva de esquema y de dominio: FALLO VISIBLE, nunca degradación
+   * silenciosa.
    *
-   * Sin esta comprobación, renombrar o borrar una propiedad en Notion produce
-   * el peor resultado posible: la lectura sigue devolviendo filas y el
-   * prototipo sigue dando PASS, pero afirmando de menos. `_selectOf` sobre una
-   * propiedad inexistente devuelve null, y null en `Estado` se interpreta como
-   * "vacío" y cae en la regla de vigencia por defecto. Es decir: borrar la
-   * columna `Estado` convertiría TODAS las decisiones en vigentes por defecto
-   * sin un solo error. Lo mismo con las dos relaciones de sustitución: sin
-   * ellas la cadena de vigencia no se puede cerrar, y el prototipo creería
-   * haberla cerrado porque no encuentra eslabones.
+   * Comprueba tres cosas distintas, y las tres hacen falta:
    *
-   * La comprobación es por PRESENCIA DE LA CLAVE, no por valor. Una fila con
-   * `Estado` vacío es un dato legítimo; una fila sin la propiedad `Estado` es
-   * un esquema distinto del que este adaptador sabe leer.
+   * 1. PRESENCIA de la clave. Sin la columna `Estado`, todas las decisiones
+   *    caerían en la regla de vigencia por defecto sin un solo error.
+   *
+   * 2. TIPO de la propiedad. Esta comprobación faltaba en la primera versión y
+   *    la reintroducía el mismo fallo por otra puerta: `_selectOf` devuelve
+   *    null cuando el tipo no es `select`, y `_relationIds` devuelve lista
+   *    vacía cuando no es `relation`. Así que cambiar `Estado` de select a
+   *    texto lo convertía en "vacío legítimo", y cambiar una relación de
+   *    sustitución a texto hacía desaparecer una cadena real de sustitución
+   *    del modelo. Lo segundo puede producir una decisión vigente falsa.
+   *
+   * 3. DOMINIO del valor de `Estado`. Un valor nuevo en el select —pongamos
+   *    "supersedida"— no es deriva de esquema sino de dominio, pero produce la
+   *    misma falsedad: `toDecision` lo mapea a null y entra en la regla por
+   *    defecto. Aquí lanza.
+   *
+   * Un `Estado` VACÍO sigue siendo dato legítimo y se admite: es el estado real
+   * de la mayoría de las filas. Lo que no se admite es un valor fuera del
+   * dominio declarado.
+   *
+   * ALCANCE DELIBERADO: la comprobación se aplica a toda página que llegue de
+   * la partición, no sólo a las que parezcan del registro. Gatearla por forma
+   * reabriría el agujero, porque renombrar a la vez `Estado` y las relaciones
+   * haría que la página dejara de "parecer" del registro y se saltara la
+   * comprobación. Coste asumido: si algún día se declara en la partición un
+   * data source que no sea el registro de decisiones, esta guarda lo rechazará
+   * en bloque. Es fail closed y obliga a una decisión explícita en vez de a
+   * mezclar formas en silencio.
    */
   function _assertSchema(page, context) {
     var props = page.properties || {};
-    var missing = [];
+    var problemas = [];
+
     for (var i = 0; i < REQUIRED_PROPS.length; i++) {
-      if (!Object.prototype.hasOwnProperty.call(props, REQUIRED_PROPS[i])) {
-        missing.push(REQUIRED_PROPS[i]);
+      var spec = REQUIRED_PROPS[i];
+      if (!Object.prototype.hasOwnProperty.call(props, spec.name)) {
+        problemas.push({ prop: spec.name, falla: 'AUSENTE', esperado: spec.type });
+        continue;
+      }
+      var prop = props[spec.name] || {};
+      if (prop.type !== spec.type) {
+        problemas.push({
+          prop: spec.name, falla: 'TIPO_CAMBIADO',
+          esperado: spec.type, encontrado: prop.type === undefined ? null : prop.type
+        });
+        continue;
+      }
+      if (spec.type === 'relation' && !_esArray(prop.relation)) {
+        problemas.push({ prop: spec.name, falla: 'RELACION_NO_ES_LISTA' });
       }
     }
-    if (missing.length) {
+
+    // Dominio de `Estado`: sólo se evalúa si el tipo ya pasó, porque si no el
+    // problema es el tipo y reportar los dos confunde el diagnóstico.
+    var estadoProp = props[DECISION_PROPS.STATE];
+    if (estadoProp && estadoProp.type === 'select' && estadoProp.select) {
+      var valor = estadoProp.select.name;
+      if (DECISION_STATES.indexOf(valor) === -1) {
+        problemas.push({
+          prop: DECISION_PROPS.STATE, falla: 'VALOR_FUERA_DE_DOMINIO',
+          encontrado: valor, esperado: DECISION_STATES.join(', ')
+        });
+      }
+    }
+
+    if (problemas.length) {
       throw Errors.schemaError(
-        'Deriva de esquema en el registro de decisiones de Notion: faltan ' +
-        missing.length + ' propiedad(es) estructural(es)',
-        { missing: missing, object_id: page.id || null, context: context || null });
+        'Deriva de esquema o de dominio en el registro de decisiones de Notion: ' +
+        problemas.length + ' problema(s) estructural(es)',
+        { problemas: problemas, object_id: page.id || null, context: context || null });
     }
     return true;
+  }
+
+  function _esArray(v) {
+    return Object.prototype.toString.call(v) === '[object Array]';
   }
 
   function _assertPageProject(page, partition, context) {

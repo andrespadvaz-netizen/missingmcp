@@ -177,6 +177,61 @@ function registerUnitAislamientoMulticontexto() {
     }, 'la columna presente y vacía es violación de partición');
   });
 
+  TestRunner.unit('Deriva de esquema', 'cambiar Estado de select a texto falla', function (t) {
+    // El caso que la primera versión de la guarda dejaba pasar: la clave sigue
+    // existiendo, así que la comprobación de presencia daba PASS, y luego
+    // `_selectOf` devolvía null por no ser select. Resultado: todas las filas
+    // con el tipo cambiado se leían como "Estado vacío legítimo" y caían en la
+    // regla de vigencia por defecto, sin un solo error.
+    var fila = filaConProyecto('Metis');
+    fila.properties['Estado'] = {
+      type: 'rich_text', rich_text: [{ plain_text: 'vigente' }]
+    };
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(fila, null, PARTICION_METIS);
+    }, 'un cambio de tipo en Estado lanza en vez de leerse como vacío');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'cambiar una relación de sustitución a texto falla', function (t) {
+    // Más grave que el anterior: `_relationIds` devuelve lista vacía cuando el
+    // tipo no es relation, así que una cadena real de sustitución desaparece
+    // del modelo y puede producir una decisión vigente FALSA.
+    var fila = filaConProyecto('Metis');
+    fila.properties['Sustituida por'] = {
+      type: 'rich_text', rich_text: [{ plain_text: 'alguna-pagina' }]
+    };
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(fila, null, PARTICION_METIS);
+    }, 'una relación convertida en texto lanza en vez de leerse como cadena vacía');
+
+    var otra = filaConProyecto('Metis');
+    otra.properties['Sustituye a'] = { type: 'relation', relation: null };
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(otra, null, PARTICION_METIS);
+    }, 'una relación que no es lista tampoco pasa');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'un valor de Estado fuera del dominio falla', function (t) {
+    // Deriva de DOMINIO, no de esquema: la columna existe y es del tipo
+    // correcto, pero el valor es nuevo. `toDecision` lo mapea a null y produce
+    // la misma falsedad que un Estado ausente.
+    var fila = filaConProyecto('Metis');
+    fila.properties['Estado'] = { type: 'select', select: { name: 'supersedida' } };
+    t.throwsCode(Errors.CODES.SCHEMA, function () {
+      NotionReadAdapter.normalizePage(fila, null, PARTICION_METIS);
+    }, 'un valor nuevo en el select lanza en vez de convertirse en null');
+  });
+
+  TestRunner.unit('Deriva de esquema', 'los tres valores del dominio sí pasan', function (t) {
+    var estados = ['vigente', 'modificada', 'derogada'];
+    for (var i = 0; i < estados.length; i++) {
+      var fila = filaConProyecto('Metis');
+      fila.properties['Estado'] = { type: 'select', select: { name: estados[i] } };
+      var doc = NotionReadAdapter.normalizePage(fila, null, PARTICION_METIS);
+      t.equals(doc.decision.estado, estados[i], estados[i] + ' es un valor válido');
+    }
+  });
+
   TestRunner.unit('Deriva de esquema', 'la comprobación es por clave, no por valor', function (t) {
     var fila = filaConProyecto('Metis');
     fila.properties['Estado'] = { type: 'select', select: null };
