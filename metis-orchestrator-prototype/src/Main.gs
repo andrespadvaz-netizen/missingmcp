@@ -837,11 +837,22 @@ function smokeProveedoresReales(soloProveedor) {
         anota('corte', 'INFO', 'ventana de gasto cerrada por techo alcanzado');
         break;
       }
-      // Un fallo propio de un proveedor —credencial ausente, error de red— no
-      // impide probar el otro: es información útil y no compromete la
-      // contabilidad. Sólo los errores de dinero cortan la corrida entera.
+      // Un fallo inequívocamente previo al despacho —credencial ausente, nivel,
+      // presupuesto— no impide probar el otro proveedor: sabemos que no hubo
+      // llamada y la contabilidad sigue intacta.
+      //
+      // Pero si la puerta dejó el contador ciego, la corrida se acabó. Es el
+      // caso del error posterior al intento de red: la inferencia pudo
+      // ejecutarse y cobrarse aunque la respuesta se perdiera.
       anota(etiqueta, SMOKE_STATUS.FAIL,
         (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+      if (runtime.cost_known === false) {
+        reporte.cost_known = false;
+        anota('corte', 'INFO',
+          'ventana de gasto cerrada: el fallo ocurrió tras el intento de red y ' +
+          'el costo de esa llamada es indeterminable');
+        break;
+      }
     }
   }
 

@@ -250,6 +250,55 @@ function registerUnitProveedoresReales() {
       'el ensayo pasa por la puerta común');
     t.notOk(/adapter\.complete\(/.test(String(smokeProveedoresReales)),
       'y no llama al adaptador directamente');
+    t.includes(String(smokeProveedoresReales), 'runtime.cost_known === false',
+      'y corta la corrida cuando la puerta deja el contador ciego');
+  });
+
+  TestRunner.unit('Puerta de gasto', 'un fallo tras el intento de red ciega el contador', function (t) {
+    // El caso clásico de resultado ambiguo tras el despacho: la petición pudo
+    // llegar al proveedor, la inferencia ejecutarse y cobrarse, y la respuesta
+    // perderse por timeout. No recibir el uso NO significa que el gasto no
+    // existiera. Antes esto se trataba como 'fallo propio del proveedor' y la
+    // corrida seguía con el siguiente.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.001);
+    p.complete = function () { throw Errors.providerError('FALSO', 'timeout'); };
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      var runtime = { cost_usd: 0, cost_known: true };
+      var lanzo = false;
+      try {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      } catch (e) { lanzo = true; }
+      t.ok(lanzo, 'el error se propaga, no se traga');
+      t.equals(runtime.cost_known, false,
+        'y el contador queda ciego: el costo de esa llamada es indeterminable');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'un fallo previo al despacho NO ciega el contador', function (t) {
+    // La contrapartida, y es igual de importante: una credencial ausente o un
+    // nivel insuficiente ocurren antes de tocar la red. Sabemos con certeza que
+    // no hubo gasto, así que cegar el contador ahí sería detener la corrida sin
+    // motivo y convertir un problema de configuración en uno de contabilidad.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.001);
+    p.complete = function () { throw Errors.configError('credencial ausente'); };
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      var runtime = { cost_usd: 0, cost_known: true };
+      try {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      } catch (e) { /* esperado */ }
+      t.equals(runtime.cost_known, true,
+        'el contador sigue siendo fiable y el otro proveedor puede probarse');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
   });
 
   TestRunner.unit('Puerta de gasto', 'una respuesta sin uso deja el contador ciego y corta', function (t) {

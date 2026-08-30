@@ -122,10 +122,37 @@ var ProviderAdapter = (function () {
       throw Errors.priceUnknown('CORRIDA', 'el costo acumulado dejó de ser conocido');
     }
 
-    var normalized = toolContract
-      ? provider.completeWithTools(request, toolContract)
-      : provider.complete(request);
-    assertNormalizedShape(normalized);
+    // Códigos que sólo pueden ocurrir ANTES de tocar la red. Un fallo de estos
+    // no ciega el contador: sabemos con certeza que no hubo llamada y por tanto
+    // no hubo gasto.
+    var PRE_DISPATCH = [
+      Errors.CODES.LEVEL_VIOLATION,
+      Errors.CODES.LIMIT_EXCEEDED,
+      Errors.CODES.BUDGET_UNCONFIGURED,
+      Errors.CODES.CONFIG
+    ];
+
+    var normalized;
+    try {
+      normalized = toolContract
+        ? provider.completeWithTools(request, toolContract)
+        : provider.complete(request);
+      assertNormalizedShape(normalized);
+    } catch (e) {
+      // Resultado ambiguo tras el intento de red. La petición pudo llegar al
+      // proveedor, la inferencia pudo ejecutarse y cobrarse, y la respuesta
+      // perderse por timeout o corte. No recibir el uso NO significa que el
+      // gasto no existiera, exactamente igual que un bloque de uso ausente.
+      //
+      // Política conservadora deliberada para esta fase: cualquier error que no
+      // sea inequívocamente previo al despacho deja el contador ciego y detiene
+      // la corrida. Distinguir un 401 de un timeout es sofisticación que hoy no
+      // hace falta y que, mal hecha, reabre el agujero.
+      if (PRE_DISPATCH.indexOf(e.code) === -1) {
+        runtime.cost_known = false;
+      }
+      throw e;
+    }
 
     // Una respuesta sin bloque de uso deja el contador ciego igual que un
     // precio desconocido: no se puede distinguir "costó cero" de "costó algo
