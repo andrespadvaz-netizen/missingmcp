@@ -75,8 +75,13 @@ var ProviderAdapter = (function () {
    * no permite decir que la puerta presupuestaria funciona.
    *
    * Secuencia, y el orden importa:
-   *   techos declarados → presupuesto agregado → proveedor →
-   *   precio conocido → contabilizar → tope de la corrida.
+   *   techos declarados → presupuesto agregado → tope de la corrida sobre lo
+   *   ya acumulado → proveedor → precio conocido → contabilizar → tope otra vez.
+   *
+   * El tope aparece dos veces a propósito. Antes de llamar comprueba lo ya
+   * gastado, y después comprueba el total con la llamada incluida. El primero
+   * es lo que convierte el techo en parada dura; el segundo es lo que lo hace
+   * exacto.
    *
    * EL NIVEL NO SE COMPRUEBA AQUÍ, a propósito. Vive en los dos adaptadores
    * reales, que son los únicos que tocan la red y por tanto los únicos que
@@ -96,6 +101,22 @@ var ProviderAdapter = (function () {
   function callBudgeted(provider, request, toolContract, runtime) {
     Config.assertBudgetsConfigured();
     Ledger.assertAggregateBudget();
+
+    // Preflight del tope de la corrida sobre lo YA acumulado. No puede predecir
+    // el costo de la llamada que viene —eso sólo se sabe al recibirla— pero sí
+    // puede negarse cuando el techo ya está rebasado. Sin esto, una corrida que
+    // ya lo hubiera superado seguía pagando una llamada más por cada intento
+    // antes de detenerse, que es lo contrario de una parada dura.
+    var limitesPrevios = Config.limits();
+    if (typeof limitesPrevios.MAX_RUN_BUDGET_USD === 'number' &&
+        runtime.cost_usd > limitesPrevios.MAX_RUN_BUDGET_USD) {
+      throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
+    }
+    if (runtime.cost_known === false) {
+      // Contador ciego: no se sigue gastando. Vale también si el llamador
+      // ignoró el error anterior y volvió a intentarlo.
+      throw Errors.priceUnknown('CORRIDA', 'el costo acumulado dejó de ser conocido');
+    }
 
     var normalized = toolContract
       ? provider.completeWithTools(request, toolContract)

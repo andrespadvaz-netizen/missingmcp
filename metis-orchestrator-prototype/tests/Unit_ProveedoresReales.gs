@@ -180,10 +180,12 @@ function registerUnitProveedoresReales() {
     }
   });
 
-  TestRunner.unit('Puerta de gasto', 'el tope por corrida detiene la SIGUIENTE llamada', function (t) {
-    // Limitación inherente y declarada: el costo sólo se conoce después de la
-    // respuesta, así que el tope no puede impedir que UNA llamada lo rebase.
-    // Lo que sí debe hacer es impedir que haya una segunda.
+  TestRunner.unit('Puerta de gasto', 'una llamada que rebasa el techo detiene la corrida antes de cualquier llamada posterior', function (t) {
+    // El nombre importa: no es un preflight capaz de predecir el costo. El
+    // costo sólo se conoce DESPUÉS de recibir la respuesta, así que la llamada
+    // que rebasa el techo sí ocurre y sí se paga. Lo que el techo garantiza es
+    // que no haya ninguna posterior. Es una parada dura tras la llamada, no
+    // una predicción.
     var p = proveedorFalso('FALSO', 'modelo-x', 0.9);
     Config._setLimits({
       MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 50, MAX_MONTHLY_BUDGET_USD: 100
@@ -194,7 +196,13 @@ function registerUnitProveedoresReales() {
       t.equals(p.llamadas.n, 1, 'la primera llamada pasa: 0.9 no rebasa el tope de 1');
       t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
         ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
-      }, 'la segunda rebasa 1.8 y se detiene');
+      }, 'la segunda se paga, el acumulado llega a 1.8 y ahí se detiene');
+      t.equals(p.llamadas.n, 2,
+        'la segunda llamada SÍ ocurrió: el techo no la predijo, la contabilizó');
+      t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      }, 'y la tercera ya no llega al proveedor');
+      t.equals(p.llamadas.n, 2, 'el contador de llamadas no sube: eso es la parada dura');
     } finally {
       Config._setLimits(Fixtures.TEST_BUDGETS);
     }
@@ -242,6 +250,29 @@ function registerUnitProveedoresReales() {
       'el ensayo pasa por la puerta común');
     t.notOk(/adapter\.complete\(/.test(String(smokeProveedoresReales)),
       'y no llama al adaptador directamente');
+  });
+
+  TestRunner.unit('Puerta de gasto', 'un costo desconocido corta la ventana de gasto', function (t) {
+    // El defecto que esto cierra: el ensayo registraba el precio desconocido y
+    // seguía con el proveedor siguiente. Perder el conocimiento del costo es
+    // perder el contador contra el que se vigilan los techos; seguir gastando
+    // sabiendo eso contradice el fail closed que la puerta promete.
+    var texto = String(smokeProveedoresReales);
+    t.includes(texto, 'PRICE_UNKNOWN', 'el ensayo distingue el costo desconocido');
+    t.includes(texto, 'ventana de gasto cerrada tras el costo desconocido',
+      'y anota explícitamente que corta');
+    t.ok(/PRICE_UNKNOWN[\s\S]{0,1400}?break;/.test(texto),
+      'el camino del costo desconocido termina en un corte, no en un continue');
+    t.ok(/LIMIT_EXCEEDED[\s\S]{0,400}?break;/.test(texto),
+      'un techo alcanzado también corta: vale para la corrida, no para un proveedor');
+  });
+
+  TestRunner.unit('Puerta de gasto', 'el ensayo admite repetir sólo un proveedor', function (t) {
+    // Tras declarar un identificador nuevo hay que repetir SÓLO el proveedor
+    // afectado: repetir el otro sería pagar otra vez una llamada que funcionó.
+    var texto = String(smokeProveedoresReales);
+    t.includes(texto, 'soloProveedor', 'la función acepta el filtro');
+    t.includes(texto, 'proveedores.filter', 'y lo aplica sobre la lista');
   });
 
   TestRunner.unit('Proveedores', 'el ensayo eleva en memoria y restituye con finally', function (t) {

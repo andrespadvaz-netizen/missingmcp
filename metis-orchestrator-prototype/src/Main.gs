@@ -662,6 +662,22 @@ function smokeAislamientoMetisShokko() {
  *    haga con una calculadora a las dos de la mañana.
  * 4. Que el enrutador manda cada contexto a su proveedor primario.
  *
+ * REPETICIÓN SELECTIVA
+ *
+ *   smokeProveedoresReales()             prueba los dos
+ *   smokeProveedoresReales('OPENAI')     prueba sólo OpenAI
+ *   smokeProveedoresReales('ANTHROPIC')  prueba sólo Anthropic
+ *
+ * Hace falta porque el desenlace esperable de la primera corrida es que un
+ * proveedor devuelva un identificador de modelo sin precio declarado. En ese
+ * caso se declara ese identificador y se repite SÓLO ese proveedor: repetir el
+ * otro sería pagar otra vez una llamada que ya funcionó.
+ *
+ * Y porque un costo desconocido CORTA la ventana de gasto: no se llama a
+ * ningún proveedor posterior. Perder el conocimiento del costo es perder el
+ * contador contra el que se vigilan los techos, y seguir gastando sabiendo eso
+ * contradice el fail closed que la puerta de gasto promete.
+ *
  * QUÉ NO PRUEBA
  *
  * La corrida dual completa a través del orquestador. Eso es el paso siguiente
@@ -670,7 +686,7 @@ function smokeAislamientoMetisShokko() {
  *
  * Cero herramientas, cero escrituras, cero lecturas de fuentes.
  */
-function smokeProveedoresReales() {
+function smokeProveedoresReales(soloProveedor) {
   var reporte = {
     level: Config.runLevel(),
     started_at: new Date().toISOString(),
@@ -716,6 +732,24 @@ function smokeProveedoresReales() {
     { nombre: 'OPENAI', adapter: OpenAIAdapter.create(), pedido: Config.PROVIDERS.OPENAI.model },
     { nombre: 'ANTHROPIC', adapter: AnthropicAdapter.create(), pedido: Config.PROVIDERS.ANTHROPIC.model }
   ];
+
+  // Repetición selectiva. Cuando un proveedor devuelve un identificador sin
+  // precio declarado hay que añadirlo y volver a probar SÓLO ese: repetir el
+  // otro sería pagar otra vez una llamada que ya funcionó.
+  if (soloProveedor) {
+    var filtro = String(soloProveedor).toUpperCase();
+    proveedores = proveedores.filter(function (x) { return x.nombre === filtro; });
+    if (!proveedores.length) {
+      anota('proveedor_pedido', SMOKE_STATUS.FAIL,
+        'No existe un proveedor llamado ' + filtro + '. Usa OPENAI o ANTHROPIC, ' +
+        'o llama sin argumento para probar los dos.');
+      reporte.status = SMOKE_STATUS.FAIL;
+      reporte.finished_at = new Date().toISOString();
+      Logger.log(JSON.stringify(reporte, null, 2));
+      return reporte;
+    }
+    anota('proveedor_pedido', 'INFO', 'sólo ' + filtro);
+  }
 
   // Ventana de gasto. Todo lo que puede costar dinero vive dentro de este try,
   // y el `finally` devuelve el runtime a estado inerte aunque una llamada
@@ -773,16 +807,35 @@ function smokeProveedoresReales() {
       if (Errors.is(e, Errors.CODES.PRICE_UNKNOWN)) {
         // El caso que hay que OBSERVAR, no evitar. La sonda ya se pagó; lo que
         // el sistema se niega a hacer es contabilizarla con un precio inventado.
+        //
+        // Y AQUÍ SE CORTA. Perder el conocimiento del costo es perder el
+        // contador contra el que se vigilan los techos: seguir con el
+        // proveedor siguiente sería pagar otra llamada sabiendo que ya no se
+        // puede saber cuánto va gastado. El comentario de la puerta dice que
+        // no se sigue gastando contra un contador ciego; esto lo cumple.
         reporte.cost_known = false;
         anota(etiqueta, SMOKE_STATUS.FAIL,
           'COSTO DESCONOCIDO: se gastó una sonda mínima y el sistema se negó a ' +
           'contabilizarla falsamente. ' + Errors.redactText(e.message) +
           ' Declara ESE identificador exacto en METIS_PRICING, verifica su tarifa, ' +
-          'y repite sólo este proveedor.');
-      } else {
-        anota(etiqueta, SMOKE_STATUS.FAIL,
-          (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+          'y repite SÓLO este proveedor con smokeProveedoresReales(\'' + p.nombre + '\').');
+        anota('corte', 'INFO',
+          'ventana de gasto cerrada tras el costo desconocido: no se llama a ' +
+          'ningún proveedor posterior');
+        break;
       }
+      if (Errors.is(e, Errors.CODES.LIMIT_EXCEEDED)) {
+        // Un techo alcanzado vale para toda la corrida, no para un proveedor.
+        anota(etiqueta, SMOKE_STATUS.FAIL,
+          'TECHO ALCANZADO: ' + Errors.redactText(e.message));
+        anota('corte', 'INFO', 'ventana de gasto cerrada por techo alcanzado');
+        break;
+      }
+      // Un fallo propio de un proveedor —credencial ausente, error de red— no
+      // impide probar el otro: es información útil y no compromete la
+      // contabilidad. Sólo los errores de dinero cortan la corrida entera.
+      anota(etiqueta, SMOKE_STATUS.FAIL,
+        (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
     }
   }
 
