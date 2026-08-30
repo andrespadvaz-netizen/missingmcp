@@ -252,6 +252,49 @@ function registerUnitProveedoresReales() {
       'y no llama al adaptador directamente');
   });
 
+  TestRunner.unit('Puerta de gasto', 'una respuesta sin uso deja el contador ciego y corta', function (t) {
+    // No se puede distinguir "costó cero" de "costó algo que no supe medir".
+    // Antes esto sólo lo detectaba el ensayo, así que el orquestador no
+    // heredaba la protección: la corrección vive en la puerta común.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.001);
+    p.complete = function () {
+      return {
+        text: 'ok', tool_requests: [], usage: null,
+        provider_model: 'modelo-x', stop_reason: 'end_turn', provider_request_id: 'r1'
+      };
+    };
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 5, MAX_MONTHLY_BUDGET_USD: 25
+    });
+    try {
+      var runtime = { cost_usd: 0, cost_known: true };
+      t.throwsCode(Errors.CODES.PRICE_UNKNOWN, function () {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null, runtime);
+      }, 'una respuesta sin bloque de uso lanza en vez de devolverse como si fuera gratis');
+      t.equals(runtime.cost_known, false, 'y el contador queda marcado como ciego');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
+  TestRunner.unit('Puerta de gasto', 'alcanzar exactamente el techo impide otra llamada', function (t) {
+    // El preflight usaba `>`, así que una corrida parada justo en el tope
+    // permitía una llamada más. Los techos diario y mensual ya usaban `>=`.
+    var p = proveedorFalso('FALSO', 'modelo-x', 0.1);
+    Config._setLimits({
+      MAX_RUN_BUDGET_USD: 1, MAX_DAILY_BUDGET_USD: 50, MAX_MONTHLY_BUDGET_USD: 100
+    });
+    try {
+      t.throwsCode(Errors.CODES.LIMIT_EXCEEDED, function () {
+        ProviderAdapter.callBudgeted(p, { system: 's', prompt: 'p' }, null,
+          { cost_usd: 1.0, cost_known: true });
+      }, 'exactamente en el techo, la llamada no sale');
+      t.equals(p.llamadas.n, 0, 'y el proveedor no llegó a invocarse');
+    } finally {
+      Config._setLimits(Fixtures.TEST_BUDGETS);
+    }
+  });
+
   TestRunner.unit('Puerta de gasto', 'un costo desconocido corta la ventana de gasto', function (t) {
     // El defecto que esto cierra: el ensayo registraba el precio desconocido y
     // seguía con el proveedor siguiente. Perder el conocimiento del costo es
@@ -309,6 +352,37 @@ function registerUnitProveedoresReales() {
       Config._setLimits(Fixtures.TEST_BUDGETS);
       Config._setRunLevel(Config.LEVELS.LEVEL_0);
     }
+  });
+
+}
+
+/**
+ * Registro del informe troceado. Va aparte de las suites de contenido porque
+ * comprueba el mecanismo que las imprime, no lo que prueban.
+ */
+function registerUnitInformeTroceado() {
+
+  TestRunner.unit('Informe', 'ningún trozo del informe rebasa el límite de registro', function (t) {
+    // Google Cloud Logging corta cada entrada en 8.192 caracteres. La suite ya
+    // lo rebasaba y el informe se truncaba a mitad del último caso de
+    // aceptación, justo antes de los totales: la corrida terminaba bien y el
+    // veredicto no se podía leer. Esta prueba impide que vuelva a pasar según
+    // crezcan las suites.
+    var LIMITE = 8192;
+    var report = TestRunner.runAll();
+    var chunks = TestRunner.renderChunks(report);
+
+    t.ok(chunks.length >= 2, 'el informe se emite en varios trozos, no en uno solo');
+    for (var i = 0; i < chunks.length; i++) {
+      t.ok(chunks[i].length < LIMITE,
+        'trozo ' + (i + 1) + ' de ' + chunks.length + ': ' + chunks[i].length +
+        ' caracteres, por debajo del límite');
+    }
+
+    var ultimo = chunks[chunks.length - 1];
+    t.includes(ultimo, 'VEREDICTO GLOBAL',
+      'el veredicto va en su propio trozo, el más corto, para que nunca quede cortado');
+    t.ok(ultimo.length < 200, 'y ese trozo es corto de verdad: ' + ultimo.length + ' caracteres');
   });
 
 }

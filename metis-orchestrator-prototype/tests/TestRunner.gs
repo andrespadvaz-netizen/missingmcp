@@ -36,6 +36,7 @@ var TestRunner = (function () {
     'registerUnitSimulatedWrite',
     'registerUnitAislamientoMulticontexto',
     'registerUnitProveedoresReales',
+    'registerUnitInformeTroceado',
     'registerAcceptanceCases'
   ];
 
@@ -189,6 +190,33 @@ var TestRunner = (function () {
     return lines.join('\n');
   }
 
+  /**
+   * Igual que `render`, pero devuelve una LISTA de trozos en vez de una sola
+   * cadena. Existe porque Google Cloud Logging corta cada entrada de registro
+   * en 8.192 caracteres, y la suite ya la rebasaba: el registro se truncaba a
+   * mitad del último caso de aceptación, justo antes de imprimir los totales.
+   * El resultado era una corrida que terminaba bien y un informe que no se
+   * podía leer, que en un sistema cuya disciplina es "no afirmar sin
+   * verificar" equivale a no tener informe.
+   *
+   * Trocear por suite además escala: cada prueba nueva alarga su bloque, no el
+   * conjunto, y el veredicto global va siempre en su propio trozo corto para
+   * que nunca pueda quedar cortado.
+   */
+  function renderChunks(report, verbose) {
+    if (!report.reports) { return [_renderOne(report, verbose)]; }
+    var chunks = [];
+    for (var i = 0; i < report.reports.length; i++) {
+      chunks.push(_renderOne(report.reports[i], verbose));
+    }
+    chunks.push(
+      '===== VEREDICTO GLOBAL =====\n' +
+      'Total: ' + report.total + ' | PASS: ' + report.passed +
+      ' | FAIL: ' + report.failed + ' | asserts: ' + report.assertions + '\n' +
+      (report.failed === 0 ? 'RESULTADO: PASS' : 'RESULTADO: FAIL'));
+    return chunks;
+  }
+
   function render(report, verbose) {
     if (report.reports) {
       var out = [];
@@ -211,6 +239,7 @@ var TestRunner = (function () {
     runUnitTests: runUnitTests,
     runAcceptance: runAcceptance,
     runAll: runAll,
-    render: render
+    render: render,
+    renderChunks: renderChunks
   };
 })();

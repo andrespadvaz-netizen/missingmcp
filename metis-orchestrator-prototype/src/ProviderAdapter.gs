@@ -108,8 +108,12 @@ var ProviderAdapter = (function () {
     // ya lo hubiera superado seguía pagando una llamada más por cada intento
     // antes de detenerse, que es lo contrario de una parada dura.
     var limitesPrevios = Config.limits();
+    // `>=`, no `>`. Alcanzar exactamente el techo es haberlo alcanzado: con `>`
+    // una corrida parada justo en el tope permitía una llamada más. Los techos
+    // diario y mensual ya usaban `>=`, así que el de corrida era además
+    // inconsistente con sus propios hermanos.
     if (typeof limitesPrevios.MAX_RUN_BUDGET_USD === 'number' &&
-        runtime.cost_usd > limitesPrevios.MAX_RUN_BUDGET_USD) {
+        runtime.cost_usd >= limitesPrevios.MAX_RUN_BUDGET_USD) {
       throw Errors.limitExceeded('MAX_RUN_BUDGET_USD', runtime.cost_usd);
     }
     if (runtime.cost_known === false) {
@@ -122,6 +126,18 @@ var ProviderAdapter = (function () {
       ? provider.completeWithTools(request, toolContract)
       : provider.complete(request);
     assertNormalizedShape(normalized);
+
+    // Una respuesta sin bloque de uso deja el contador ciego igual que un
+    // precio desconocido: no se puede distinguir "costó cero" de "costó algo
+    // que no supe medir". Si esto sólo se tratara en el ensayo, el orquestador
+    // no heredaría la protección, así que va aquí.
+    if (!normalized.usage) {
+      runtime.cost_known = false;
+      throw Errors.priceUnknown(
+        provider.name ? provider.name : 'PROVEEDOR',
+        'el proveedor respondió SIN bloque de uso: no hay tokens que contar y ' +
+        'el costo de esta llamada es indeterminable');
+    }
 
     if (normalized.usage) {
       var cost = normalized.usage.estimated_cost_usd;

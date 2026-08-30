@@ -58,10 +58,22 @@ function runAcceptanceCases() {
   return report;
 }
 
-/** Ejecuta todo y devuelve el veredicto de PASS/FAIL (spec §18). */
+/**
+ * Ejecuta todo y devuelve el veredicto de PASS/FAIL (spec §18).
+ *
+ * El informe se imprime TROCEADO, una entrada de registro por suite más una
+ * para el veredicto. Google Cloud Logging corta cada entrada en 8.192
+ * caracteres y la suite ya lo rebasaba: el registro se truncaba a mitad del
+ * último caso de aceptación, justo antes de los totales. La corrida terminaba
+ * bien y el informe no se podía leer, que en un sistema cuya disciplina es no
+ * afirmar sin verificar equivale a no tener informe.
+ */
 function runAllTests() {
   var report = TestRunner.runAll();
-  Logger.log(TestRunner.render(report));
+  var chunks = TestRunner.renderChunks(report);
+  for (var i = 0; i < chunks.length; i++) {
+    Logger.log(chunks[i]);
+  }
   return report;
 }
 
@@ -775,12 +787,6 @@ function smokeProveedoresReales(soloProveedor) {
 
       reporte.observed_model_ids[p.nombre] =
         normalized.provider_model ? normalized.provider_model : '(no informado)';
-
-      if (!normalized.usage) {
-        anota(etiqueta, SMOKE_STATUS.FAIL,
-          'el proveedor respondió sin bloque de uso: no hay tokens que contar');
-        continue;
-      }
 
       var costo = normalized.usage.estimated_cost_usd;
       var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
