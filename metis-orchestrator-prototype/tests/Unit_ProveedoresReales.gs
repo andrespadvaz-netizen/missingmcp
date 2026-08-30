@@ -47,7 +47,7 @@ function registerUnitProveedoresReales() {
     // creería que el problema es configurar dinero, cuando el problema es que
     // no debería estar llamando a nada.
     Config._setRunLevel(Config.LEVELS.LEVEL_0);
-    Config._setLimits(null);
+    Config._setLimits({});
     try {
       t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () {
         OpenAIAdapter.create().complete({ system: 's', prompt: 'p' });
@@ -109,11 +109,15 @@ function registerUnitProveedoresReales() {
   });
 
   TestRunner.unit('Proveedores', 'sin precios declarados nada tiene costo', function (t) {
-    Config._setPricing(null);
-    t.equals(OpenAIAdapter.estimateCost(usoDe('gpt-5', 1000, 1000), 'gpt-5'), null,
-      'sin la propiedad de precios el costo es desconocido, no cero');
-    t.equals(AnthropicAdapter.estimateCost(usoDe('claude-opus-5', 1000, 1000), 'claude-opus-5'), null,
-      'lo mismo para el otro proveedor');
+    Config._setPricing({});
+    try {
+      t.equals(OpenAIAdapter.estimateCost(usoDe('gpt-5', 1000, 1000), 'gpt-5'), null,
+        'sin la propiedad de precios el costo es desconocido, no cero');
+      t.equals(AnthropicAdapter.estimateCost(usoDe('claude-opus-5', 1000, 1000), 'claude-opus-5'), null,
+        'lo mismo para el otro proveedor');
+    } finally {
+      Config._setPricing(null);
+    }
   });
 
   // ------------------------------------------- la única puerta de gasto
@@ -162,6 +166,125 @@ function registerUnitProveedoresReales() {
       Config._setLimits(Fixtures.TEST_BUDGETS);
     }
   });
+
+  TestRunner.unit(
+    'Puerta de gasto',
+    'una credencial ausente es pre-dispatch: no ciega el contador ni bloquea al proveedor siguiente',
+    function (t) {
+      var intentosRed = { n: 0 };
+
+      // Simula exactamente el punto de fallo de los adapters reales:
+      // Config.secret(...) ocurre ANTES de UrlFetchApp.fetch(...).
+      var sinCredencial = {
+        name: 'OPENAI',
+        complete: function () {
+          throw Errors.missingCredential('OPENAI_API_KEY');
+        },
+        completeWithTools: function () {
+          return this.complete();
+        },
+        normalizeResponse: function (raw) {
+          return raw;
+        },
+        redactProviderError: function (e) {
+          return e;
+        }
+      };
+
+      // Segundo proveedor sano: debe poder ejecutarse con el MISMO runtime
+      // después del MISSING_CREDENTIAL del primero.
+      var siguiente = {
+        name: 'ANTHROPIC',
+        complete: function () {
+          intentosRed.n++;
+          return {
+            text: 'ok',
+            tool_requests: [],
+            usage: {
+              input_tokens: 100,
+              output_tokens: 50,
+              estimated_cost_usd: 0.25
+            },
+            provider_model: 'claude-opus-5',
+            stop_reason: 'end_turn',
+            provider_request_id: 'req-1'
+          };
+        },
+        completeWithTools: function () {
+          return this.complete();
+        },
+        normalizeResponse: function (raw) {
+          return raw;
+        },
+        redactProviderError: function (e) {
+          return e;
+        }
+      };
+
+      Config._setLimits({
+        MAX_RUN_BUDGET_USD: 1,
+        MAX_DAILY_BUDGET_USD: 5,
+        MAX_MONTHLY_BUDGET_USD: 25
+      });
+
+      try {
+        var runtime = { cost_usd: 0, cost_known: true };
+        var gastoAntes = Ledger.spend('DAILY');
+
+        t.throwsCode(Errors.CODES.MISSING_CREDENTIAL, function () {
+          ProviderAdapter.callBudgeted(
+            sinCredencial,
+            { system: 's', prompt: 'p' },
+            null,
+            runtime
+          );
+        }, 'la credencial ausente conserva su código tipado');
+
+        t.equals(
+          runtime.cost_known,
+          true,
+          'MISSING_CREDENTIAL es inequívocamente pre-dispatch y no ciega el contador'
+        );
+
+        t.equals(
+          runtime.cost_usd,
+          0,
+          'el fallo previo al despacho no añade costo a la corrida'
+        );
+
+        t.ok(
+          Math.abs(Ledger.spend('DAILY') - gastoAntes) < 1e-9,
+          'el fallo previo al despacho tampoco registra gasto agregado'
+        );
+
+        ProviderAdapter.callBudgeted(
+          siguiente,
+          { system: 's', prompt: 'p' },
+          null,
+          runtime
+        );
+
+        t.equals(
+          intentosRed.n,
+          1,
+          'el proveedor siguiente sí puede ejecutarse: la ventana no quedó falsamente cerrada'
+        );
+
+        t.equals(
+          runtime.cost_usd,
+          0.25,
+          'el costo del proveedor siguiente se contabiliza normalmente'
+        );
+
+        t.ok(
+          Math.abs((Ledger.spend('DAILY') - gastoAntes) - 0.25) < 1e-9,
+          'el ledger sólo contiene el gasto real del proveedor que sí respondió'
+        );
+      } finally {
+        Config._setLimits(Fixtures.TEST_BUDGETS);
+      }
+    }
+  );
 
   TestRunner.unit('Puerta de gasto', 'un costo conocido se contabiliza en el ledger', function (t) {
     var p = proveedorFalso('FALSO', 'modelo-x', 0.25);
@@ -388,8 +511,8 @@ function registerUnitProveedoresReales() {
     // que sale debe seguir siendo el de nivel. Si saliera cualquier otro,
     // significaría que algo se consultó antes de comprobar si se podía llamar.
     Config._setRunLevel(Config.LEVELS.LEVEL_0);
-    Config._setLimits(null);
-    Config._setPricing(null);
+    Config._setLimits({});
+    Config._setPricing({});
     try {
       t.throwsCode(Errors.CODES.LEVEL_VIOLATION, function () {
         OpenAIAdapter.create().complete({ system: 's', prompt: 'p' });

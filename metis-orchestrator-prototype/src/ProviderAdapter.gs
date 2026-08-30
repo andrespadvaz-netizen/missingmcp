@@ -129,7 +129,8 @@ var ProviderAdapter = (function () {
       Errors.CODES.LEVEL_VIOLATION,
       Errors.CODES.LIMIT_EXCEEDED,
       Errors.CODES.BUDGET_UNCONFIGURED,
-      Errors.CODES.CONFIG
+      Errors.CODES.CONFIG,
+      Errors.CODES.MISSING_CREDENTIAL
     ];
 
     var normalized;

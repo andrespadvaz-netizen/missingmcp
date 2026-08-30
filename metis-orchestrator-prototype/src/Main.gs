@@ -881,3 +881,11 @@ function smokeProveedoresReales(soloProveedor) {
   Logger.log(JSON.stringify(reporte, null, 2));
   return reporte;
 }
+
+function smokeProveedorAnthropic() {
+  return smokeProveedoresReales('ANTHROPIC');
+}
+
+function smokeProveedorOpenAI() {
+  return smokeProveedoresReales('OPENAI');
+}

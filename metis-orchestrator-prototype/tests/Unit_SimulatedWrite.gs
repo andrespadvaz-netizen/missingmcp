@@ -211,15 +211,20 @@ function registerUnitSimulatedWrite() {
 
   // --------------------------------------------------- presupuesto y precios
   TestRunner.unit('Presupuesto', 'sin precio configurado el costo es desconocido, no cero', function (t) {
-    var openai = OpenAIAdapter.create();
-    t.equals(Config.priceFor('OPENAI', 'gpt-5'), null, 'no hay tabla de precios en el código');
-    t.equals(openai.normalizeResponse({
-      id: 'r', status: 'completed', output: [], model: 'gpt-5',
-      usage: { input_tokens: 1000, output_tokens: 500 }
-    }).usage.estimated_cost_usd, null, 'el costo sale null, no un número inventado');
+    Config._setPricing({});
+    try {
+      var openai = OpenAIAdapter.create();
+      t.equals(Config.priceFor('OPENAI', 'gpt-5'), null, 'no hay tabla de precios en el código');
+      t.equals(openai.normalizeResponse({
+        id: 'r', status: 'completed', output: [], model: 'gpt-5',
+        usage: { input_tokens: 1000, output_tokens: 500 }
+      }).usage.estimated_cost_usd, null, 'el costo sale null, no un número inventado');
 
-    t.equals(AnthropicAdapter.estimateCost({ input_tokens: 1000, output_tokens: 500 }, 'claude-opus-5'), null,
-      'lo mismo del lado de Anthropic');
+      t.equals(AnthropicAdapter.estimateCost({ input_tokens: 1000, output_tokens: 500 }, 'claude-opus-5'), null,
+        'lo mismo del lado de Anthropic');
+    } finally {
+      Config._setPricing(null);
+    }
   });
 
   TestRunner.unit('Presupuesto', 'un costo desconocido detiene la corrida', function (t) {
@@ -244,7 +249,7 @@ function registerUnitSimulatedWrite() {
   });
 
   TestRunner.unit('Presupuesto', 'los techos monetarios no tienen default en el código', function (t) {
-    Config._setLimits(null);
+    Config._setLimits({});
     var sinTechos = Config.limits();
     Config.REQUIRED_BUDGET_KEYS.forEach(function (k) {
       t.equals(sinTechos[k], null, k + ' no tiene default: es del entorno');
@@ -260,7 +265,7 @@ function registerUnitSimulatedWrite() {
   });
 
   TestRunner.unit('Presupuesto', 'ningún proveedor real acepta llamada sin techos declarados', function (t) {
-    Config._setLimits(null);
+    Config._setLimits({});
     Config._setRunLevel(Config.LEVELS.LEVEL_2);
     var peticion = { system: 'x', prompt: 'y' };
 
@@ -282,7 +287,7 @@ function registerUnitSimulatedWrite() {
   });
 
   TestRunner.unit('Presupuesto', 'un techo sin declarar no se compara contra el gasto', function (t) {
-    Config._setLimits(null);
+    Config._setLimits({});
     Ledger.addSpend(9999);
     t.ok(Ledger.assertAggregateBudget(), 'sin techo no hay comparación posible');
     Config._setLimits(Fixtures.TEST_BUDGETS);
