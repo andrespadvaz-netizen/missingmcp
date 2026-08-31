@@ -526,6 +526,42 @@ function registerUnitProveedoresReales() {
     }
   });
 
+  TestRunner.unit(
+    'Smoke proveedores reales',
+    'texto vacío no demuestra respuesta funcional',
+    function (t) {
+      var estado = smokeClasificaRespuestaProveedor({
+        text: '   ',
+        usage: { input_tokens: 30, output_tokens: 16, estimated_cost_usd: 0.00055 },
+        provider_model: 'claude-opus-5'
+      }, true);
+
+      t.equals(
+        estado,
+        SMOKE_STATUS.NO_DEMOSTRADO,
+        'whitespace-only no cuenta como output funcional'
+      );
+    }
+  );
+
+  TestRunner.unit(
+    'Smoke proveedores reales',
+    'texto no vacío sí demuestra respuesta funcional',
+    function (t) {
+      var estado = smokeClasificaRespuestaProveedor({
+        text: 'aislamiento',
+        usage: { input_tokens: 30, output_tokens: 16, estimated_cost_usd: 0.00055 },
+        provider_model: 'claude-opus-5'
+      }, true);
+
+      t.equals(
+        estado,
+        SMOKE_STATUS.PASS,
+        'una respuesta textual utilizable sí cierra el subgate funcional'
+      );
+    }
+  );
+
 }
 
 /**

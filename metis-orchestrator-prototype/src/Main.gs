@@ -782,7 +782,7 @@ function smokeProveedoresReales(soloProveedor) {
       var normalized = ProviderAdapter.callBudgeted(p.adapter, {
         system: 'Responde en una sola palabra.',
         prompt: 'Di la palabra: aislamiento',
-        max_output_tokens: 16
+        max_output_tokens: 256
       }, null, runtime);
 
       reporte.observed_model_ids[p.nombre] =
@@ -799,8 +799,9 @@ function smokeProveedoresReales(soloProveedor) {
           (normalized.usage.output_tokens / 1000) * precio.output_per_1k
         : null;
       var coincide = (recalculado !== null) && Math.abs(recalculado - costo) < 1e-9;
+      var estado = smokeClasificaRespuestaProveedor(normalized, coincide);
 
-      anota(etiqueta, coincide ? SMOKE_STATUS.PASS : SMOKE_STATUS.FAIL,
+      anota(etiqueta, estado,
         'modelo devuelto `' + reporte.observed_model_ids[p.nombre] + '`; ' +
         'respondió "' + texto + '"; tokens entrada ' + normalized.usage.input_tokens +
         ', salida ' + normalized.usage.output_tokens +
@@ -874,12 +875,37 @@ function smokeProveedoresReales(soloProveedor) {
   anota('gasto_contabilizado', 'INFO',
     'corrida ' + runtime.cost_usd + ' USD, registrado en el ledger agregado');
 
-  var fallos = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.FAIL; });
-  reporte.status = fallos.length ? SMOKE_STATUS.FAIL : SMOKE_STATUS.PASS;
-  reporte.ok = !fallos.length;
+  var fallos = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.FAIL; }).length;
+  var noDemostrados = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.NO_DEMOSTRADO; }).length;
+  if (fallos > 0) {
+    reporte.status = SMOKE_STATUS.FAIL;
+  } else if (noDemostrados > 0) {
+    reporte.status = SMOKE_STATUS.NO_DEMOSTRADO;
+  } else {
+    reporte.status = SMOKE_STATUS.PASS;
+  }
+  reporte.ok = (reporte.status === SMOKE_STATUS.PASS);
   reporte.finished_at = new Date().toISOString();
   Logger.log(JSON.stringify(reporte, null, 2));
   return reporte;
+}
+
+function smokeClasificaRespuestaProveedor(normalized, coincide) {
+  var hayUsage = !!(normalized && normalized.usage);
+  var modeloExacto = !!(normalized && normalized.provider_model);
+  var textoNoVacio =
+    !!(normalized && normalized.text &&
+       String(normalized.text).trim().length > 0);
+
+  if (hayUsage && coincide && modeloExacto && textoNoVacio) {
+    return SMOKE_STATUS.PASS;
+  }
+
+  if (hayUsage && coincide && modeloExacto && !textoNoVacio) {
+    return SMOKE_STATUS.NO_DEMOSTRADO;
+  }
+
+  return SMOKE_STATUS.FAIL;
 }
 
 function smokeProveedorAnthropic() {
