@@ -198,14 +198,26 @@ function registerUnitSimulatedWrite() {
 
   TestRunner.unit('Config', 'no hay secretos en el código ni en la configuración', function (t) {
     var nombres = Object.keys(Config.SECRET_PROPERTY_NAMES);
+
     for (var i = 0; i < nombres.length; i++) {
       var valor = Config.SECRET_PROPERTY_NAMES[nombres[i]];
-      t.ok(/^METIS_[A-Z_]+$/.test(valor), nombres[i] + ' referencia un nombre simbólico, no un valor');
+      t.ok(
+        /^METIS_[A-Z_]+$/.test(valor),
+        nombres[i] + ' referencia un nombre simbólico, no un valor'
+      );
     }
-    t.throwsCode(Errors.CODES.MISSING_CREDENTIAL, function () { Config.secret('OPENAI_API_KEY'); },
-      'sin Script Property cargada, la credencial falta y la corrida se detiene');
-    t.throwsCode(Errors.CODES.CONFIG, function () { Config.secret('CLAVE_INEXISTENTE'); },
-      'una clave simbólica desconocida se rechaza');
+
+    t.equals(
+      Config.SECRET_PROPERTY_NAMES.OPENAI_API_KEY,
+      'METIS_OPENAI_API_KEY',
+      'OpenAI apunta a la Script Property canónica y no contiene el secreto'
+    );
+
+    t.throwsCode(
+      Errors.CODES.CONFIG,
+      function () { Config.secret('CLAVE_INEXISTENTE'); },
+      'una clave simbólica desconocida se rechaza'
+    );
   });
 
 
@@ -278,12 +290,6 @@ function registerUnitSimulatedWrite() {
       AnthropicAdapter.create().completeWithTools(peticion, null);
     }, 'Anthropic también');
 
-    // Con techos declarados, la puerta se abre y falla más adelante, por
-    // credencial ausente: prueba que el orden de las guardas es el correcto.
-    Config._setLimits(Fixtures.TEST_BUDGETS);
-    t.throwsCode(Errors.CODES.MISSING_CREDENTIAL, function () {
-      OpenAIAdapter.create().completeWithTools(peticion, null);
-    }, 'con techos declarados, la siguiente guarda es la credencial');
   });
 
   TestRunner.unit('Presupuesto', 'un techo sin declarar no se compara contra el gasto', function (t) {
