@@ -76,11 +76,17 @@ var AnthropicAdapter = (function () {
         var redacted = this.redactProviderError(e);
         throw Errors.providerError('ANTHROPIC', null, redacted.message);
       }
-      var code = response.getResponseCode();
-      if (code < 200 || code >= 300) {
-        throw Errors.providerError('ANTHROPIC', code, 'respuesta no exitosa');
+      try {
+        var code = response.getResponseCode();
+        if (code < 200 || code >= 300) {
+          throw Errors.providerError('ANTHROPIC', code, 'respuesta no exitosa');
+        }
+        return this.normalizeResponse(JSON.parse(response.getContentText()));
+      } catch (e) {
+        // Incluye CONFIG al resolver tarifas: la petición ya se despachó.
+        e.dispatchAttempted = true;
+        throw e;
       }
-      return this.normalizeResponse(JSON.parse(response.getContentText()));
     }
 
     normalizeResponse(raw) {

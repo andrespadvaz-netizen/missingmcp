@@ -122,9 +122,9 @@ var ProviderAdapter = (function () {
       throw Errors.priceUnknown('CORRIDA', 'el costo acumulado dejó de ser conocido');
     }
 
-    // Códigos que sólo pueden ocurrir ANTES de tocar la red. Un fallo de estos
-    // no ciega el contador: sabemos con certeza que no hubo llamada y por tanto
-    // no hubo gasto.
+    // Guardas previas de los adaptadores. El código solo NO demuestra la fase:
+    // CONFIG también puede surgir al leer precios después de recibir respuesta.
+    // La evidencia de despacho de los adaptadores reales prevalece sobre esta lista.
     var PRE_DISPATCH = [
       Errors.CODES.LEVEL_VIOLATION,
       Errors.CODES.LIMIT_EXCEEDED,
@@ -149,7 +149,7 @@ var ProviderAdapter = (function () {
       // sea inequívocamente previo al despacho deja el contador ciego y detiene
       // la corrida. Distinguir un 401 de un timeout es sofisticación que hoy no
       // hace falta y que, mal hecha, reabre el agujero.
-      if (PRE_DISPATCH.indexOf(e.code) === -1) {
+      if (e.dispatchAttempted === true || PRE_DISPATCH.indexOf(e.code) === -1) {
         runtime.cost_known = false;
       }
       throw e;

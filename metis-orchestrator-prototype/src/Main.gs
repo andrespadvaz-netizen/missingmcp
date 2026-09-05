@@ -788,27 +788,34 @@ function smokeProveedoresReales(soloProveedor) {
       reporte.observed_model_ids[p.nombre] =
         normalized.provider_model ? normalized.provider_model : '(no informado)';
 
-      var costo = normalized.usage.estimated_cost_usd;
+      var costo = normalized.usage ? normalized.usage.estimated_cost_usd : null;
       var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
 
       // Recálculo independiente, aquí y no a mano: el costo informado debe ser
       // aritmética reproducible desde los tokens y el precio declarado.
-      var precio = Config.priceFor(p.nombre, normalized.provider_model);
-      var recalculado = precio
+      var precio = normalized.usage ? Config.priceFor(p.nombre, normalized.provider_model) : null;
+      var recalculado = (precio && normalized.usage)
         ? (normalized.usage.input_tokens / 1000) * precio.input_per_1k +
           (normalized.usage.output_tokens / 1000) * precio.output_per_1k
         : null;
       var coincide = (recalculado !== null) && Math.abs(recalculado - costo) < 1e-9;
+
+      // Criterio de PASS endurecido: la contabilidad correcta ya no basta.
+      // La clasificación vive en smokeClasificaRespuestaProveedor() —
+      // función pura— para poder probarla sin pagar una llamada real.
+      var hayUsage = !!normalized.usage;
+      var textoNoVacio = !!(normalized.text && String(normalized.text).trim().length > 0);
       var estado = smokeClasificaRespuestaProveedor(normalized, coincide);
 
       anota(etiqueta, estado,
         'modelo devuelto `' + reporte.observed_model_ids[p.nombre] + '`; ' +
-        'respondió "' + texto + '"; tokens entrada ' + normalized.usage.input_tokens +
-        ', salida ' + normalized.usage.output_tokens +
+        'respondió "' + texto + '"; tokens entrada ' + (hayUsage ? normalized.usage.input_tokens : '(sin usage)') +
+        ', salida ' + (hayUsage ? normalized.usage.output_tokens : '(sin usage)') +
         '; costo informado ' + costo +
         (coincide
           ? '; recálculo independiente coincide'
-          : '; RECÁLCULO NO COINCIDE, esperado ' + recalculado));
+          : '; RECÁLCULO NO COINCIDE, esperado ' + recalculado) +
+        (textoNoVacio ? '' : '; SIN TEXTO: la sonda no demostró una respuesta real'));
 
     } catch (e) {
       if (Errors.is(e, Errors.CODES.PRICE_UNKNOWN)) {

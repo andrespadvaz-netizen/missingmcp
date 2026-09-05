@@ -10,6 +10,49 @@
  */
 function registerUnitProveedoresReales() {
 
+  [OpenAIAdapter, AnthropicAdapter].forEach(function (factory) {
+    TestRunner.unit('Puerta de gasto', factory.create().name + ': CONFIG tras respuesta bloquea el siguiente intento', function (t) {
+      var savedFetch = UrlFetchApp;
+      var savedProperties = PropertiesService;
+      var calls = 0;
+      var provider = factory.create();
+      var runtime = { cost_usd: 0, cost_known: true };
+      Config._setRunLevel(Config.LEVELS.LEVEL_2);
+      Config._setPricing(null);
+      try {
+        // Sustituye servicios completos: ninguna propiedad ni credencial real.
+        PropertiesService = { getScriptProperties: function () {
+          return { getProperty: function (key) {
+            return key === 'METIS_PRICING' ? '{invalid' : 'fixture-only';
+          } };
+        } };
+        UrlFetchApp = { fetch: function () {
+          calls++;
+          return {
+            getResponseCode: function () { return 200; },
+            getContentText: function () { return JSON.stringify({
+              model: 'fixture-model', usage: { input_tokens: 10, output_tokens: 5 }
+            }); }
+          };
+        } };
+        t.throwsCode(Errors.CODES.CONFIG, function () {
+          ProviderAdapter.callBudgeted(provider, { system: 's', prompt: 'p' }, null, runtime);
+        }, 'la tarifa mal formada conserva el diagnóstico de configuración');
+        t.equals(calls, 1, 'la respuesta simulada ya llegó');
+        t.equals(runtime.cost_known, false, 'el costo posterior a la respuesta es desconocido');
+        t.throwsCode(Errors.CODES.PRICE_UNKNOWN, function () {
+          ProviderAdapter.callBudgeted(provider, { system: 's', prompt: 'p' }, null, runtime);
+        }, 'el siguiente intento queda bloqueado');
+        t.equals(calls, 1, 'no se despacha una segunda petición');
+      } finally {
+        UrlFetchApp = savedFetch;
+        PropertiesService = savedProperties;
+        Config._setRunLevel(Config.LEVELS.LEVEL_0);
+        Config._setPricing(null);
+      }
+    });
+  });
+
   /** Respuesta cruda mínima con el identificador de modelo que se le indique. */
   function usoDe(modelo, entrada, salida) {
     return { model: modelo, input_tokens: entrada, output_tokens: salida };
