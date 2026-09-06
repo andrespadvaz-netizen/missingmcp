@@ -15,6 +15,15 @@ function doGet(e) {
       result = validationSuite_();
       result.deployment_url = deploymentUrl;
       result.version_evidence = 'RESOLVE_DEPLOYMENT_AND_COMPARE_VERSION_EXTERNALLY';
+      // A compact independent log survives a blocked ContentService redirect.
+      Logger.log('VALIDATION_SUMMARY ' + JSON.stringify({
+        status: result.status, total: result.total, passed: result.passed,
+        failed: result.failed, assertions: result.assertions, level: result.level,
+        deployment_url: deploymentUrl, reason: result.reason || null
+      }));
+      (result.tests || []).filter(function (test) { return !test.passed; }).forEach(function (test) {
+        Logger.log('VALIDATION_FAILED_TEST ' + JSON.stringify(test));
+      });
     }
   }
   return ContentService.createTextOutput(JSON.stringify(result))
