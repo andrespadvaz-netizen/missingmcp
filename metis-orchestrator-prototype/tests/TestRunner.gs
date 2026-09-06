@@ -27,6 +27,7 @@ var TestRunner = (function () {
    * desde aquí es seguro sea cual sea el orden de los archivos.
    */
   var REGISTRARS = [
+    'registerUnitValidationEndpoint',
     'registerUnitContextResolver',
     'registerUnitRouter',
     'registerUnitAuthorityPolicy',

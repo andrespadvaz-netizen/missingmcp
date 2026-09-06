@@ -145,6 +145,7 @@ function loadAll() {
 }
 
 const ENTRIES = {
+  validation: 'validationSuite_',
   unit: 'TestRunner.runUnitTests',
   acceptance: 'TestRunner.runAcceptance',
   all: 'TestRunner.runAll'
@@ -158,6 +159,11 @@ function main() {
     throw new Error('Entrada desconocida: ' + key + ' (usa unit | acceptance | all)');
   }
   loadAll();
+  if (key === 'validation') {
+    const result = vm.runInContext('validationSuite_()', context);
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+    process.exit(result.status === 'PASS' ? 0 : 1);
+  }
   const report = vm.runInContext(entry + '()', context, { filename: 'entry' });
   const rendered = vm.runInContext('TestRunner.render', context)(report, verbose);
   process.stdout.write(rendered + '\n');

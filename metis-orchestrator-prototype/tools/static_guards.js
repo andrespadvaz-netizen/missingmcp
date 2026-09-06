@@ -95,11 +95,14 @@ const testFiles = srcFiles(TESTS).map((f) => Object.assign({}, f, {
 guard('G1', 'cero triggers', () => {
   const fails = [];
   for (const f of files.concat(testFiles)) {
-    if (/\bScriptApp\b/.test(f.code)) { fails.push(f.name + ': referencia ejecutable a ScriptApp'); }
+    const scriptCode = f.name === 'ValidationEndpoint.gs'
+      ? f.code.replace(/ScriptApp\.getService\(\)\.getUrl\(\)/g, '') : f.code;
+    if (/\bScriptApp\b/.test(scriptCode)) { fails.push(f.name + ': referencia ejecutable a ScriptApp'); }
     if (/\bnewTrigger\b/.test(f.code)) { fails.push(f.name + ': newTrigger'); }
     const triggerFns = /\bfunction\s+(onOpen|onEdit|onInstall|onFormSubmit|onChange|doGet|doPost)\s*\(/g;
     let m;
     while ((m = triggerFns.exec(f.code)) !== null) {
+      if (f.name === 'ValidationEndpoint.gs' && ['doGet', 'doPost'].includes(m[1])) continue;
       fails.push(f.name + ': define la función de trigger/endpoint `' + m[1] + '`');
     }
   }
@@ -180,6 +183,9 @@ guard('G6', 'appsscript.json declara sólo scopes de lectura', () => {
   const fails = [];
   if (JSON.stringify(expected) !== JSON.stringify(actual)) {
     fails.push('scopes inesperados: ' + JSON.stringify(actual));
+  }
+  if (!manifest.webapp || manifest.webapp.access !== 'MYSELF' || manifest.webapp.executeAs !== 'USER_DEPLOYING') {
+    fails.push('validación web debe ser exclusiva del operador que despliega');
   }
   for (const scope of actual) {
     if (/gmail|scriptapp/.test(scope)) { fails.push('scope peligroso: ' + scope); }
