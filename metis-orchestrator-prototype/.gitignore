@@ -1,0 +1,4 @@
+# Config local de clasp: contiene el scriptId del proyecto de Apps Script.
+.clasp.json
+# Credenciales OAuth de clasp. NUNCA debe entrar al repositorio.
+.clasprc.json
