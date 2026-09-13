@@ -97,6 +97,22 @@ var ProviderAdapter = (function () {
    * techo de tokens de salida importa tanto en el primer ensayo.
    *
    * `runtime` es el acumulador del llamador: { cost_usd, cost_known }.
+   *
+   * PROCEDENCIA (auditoría cruzada, 2026-09-12): si `runtime.active_provider_attempt`
+   * existe (lo fija `Orchestrator._modelTurn()` antes de llamar aquí), esta
+   * función es la ÚNICA que escribe `invoked_provider` y `provider_model` en
+   * ese intento — nunca el orquestador, y nunca antes de tener evidencia
+   * positiva de despacho real. Dos puntos de escritura, ambos posteriores a
+   * cruzar la frontera de red del adaptador:
+   *   (a) dentro del catch, sólo si `e.dispatchAttempted === true` — cubre
+   *       fallos posteriores al intento real (timeout, HTTP no exitoso,
+   *       parseo, forma inválida);
+   *   (b) inmediatamente después de que `provider.complete()`/`completeWithTools()`
+   *       RETORNA — antes incluso de `assertNormalizedShape()` — porque el
+   *       proveedor ya respondió en ese punto, sin importar si la forma es
+   *       válida. `provider_model`, en cambio, sólo se confía DESPUÉS de que
+   *       la forma pasa esa validación: antes de eso podría ser el campo de
+   *       un objeto que ni siquiera cumple el contrato normalizado.
    */
   function callBudgeted(provider, request, toolContract, runtime) {
     Config.assertBudgetsConfigured();
@@ -138,7 +154,6 @@ var ProviderAdapter = (function () {
       normalized = toolContract
         ? provider.completeWithTools(request, toolContract)
         : provider.complete(request);
-      assertNormalizedShape(normalized);
     } catch (e) {
       // Resultado ambiguo tras el intento de red. La petición pudo llegar al
       // proveedor, la inferencia pudo ejecutarse y cobrarse, y la respuesta
@@ -152,7 +167,43 @@ var ProviderAdapter = (function () {
       if (e.dispatchAttempted === true || PRE_DISPATCH.indexOf(e.code) === -1) {
         runtime.cost_known = false;
       }
+      // Procedencia: sólo con evidencia POSITIVA de despacho (dispatchAttempted),
+      // nunca por exclusión de PRE_DISPATCH — esa lista es sobre el contador de
+      // costo, no sobre la verdad de si la red se tocó.
+      if (e.dispatchAttempted === true && runtime.active_provider_attempt) {
+        runtime.active_provider_attempt.invoked_provider = provider.name;
+      }
       throw e;
+    }
+
+    // Procedencia (corrección de ChatGPT, 2026-09-12): el proveedor YA
+    // RETORNÓ en este punto — la intervención ocurrió, independientemente de
+    // si la forma que devolvió es válida. Marcarlo AQUÍ, antes de
+    // assertNormalizedShape(), en vez de después, cierra una ventana real: si
+    // un proveedor conforme devuelve una forma inválida, assertNormalizedShape
+    // lanza SCHEMA sin `dispatchAttempted` (nadie se lo pone, es un error
+    // propio de este módulo, no del adaptador), y el catch de abajo nunca
+    // habría marcado `invoked_provider` pese a que el despacho sí ocurrió.
+    if (runtime.active_provider_attempt) {
+      runtime.active_provider_attempt.invoked_provider = provider.name;
+    }
+
+    try {
+      assertNormalizedShape(normalized);
+    } catch (e) {
+      // El error de forma nunca es un código PRE_DISPATCH (no está en esa
+      // lista), así que bajo la misma política de arriba el costo queda
+      // ciego incondicionalmente: el proveedor ya respondió y no podemos
+      // confiar en nada de lo que dijo, incluida su forma de uso.
+      runtime.cost_known = false;
+      throw e;
+    }
+
+    // Sólo AHORA, tras validar la forma, confiamos en provider_model — antes
+    // de este punto podría ser el campo de un objeto que ni siquiera cumple
+    // el contrato normalizado.
+    if (runtime.active_provider_attempt) {
+      runtime.active_provider_attempt.provider_model = normalized.provider_model;
     }
 
     // Una respuesta sin bloque de uso deja el contador ciego igual que un

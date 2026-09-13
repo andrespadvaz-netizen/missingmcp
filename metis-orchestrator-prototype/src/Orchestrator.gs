@@ -40,9 +40,34 @@ var Orchestrator = (function () {
     return 'RECONCILABLE';
   }
 
+  /**
+   * Identidad del modelo de origen: nunca se infiere por default (auditoría
+   * cruzada con ChatGPT, 2026-09-06, criterio reconciliado "Identidad de
+   * origen y routing material"). `current_model` no representa "qué modelo
+   * ejecuta el código" —lo ejecuta Apps Script— sino el origen lógico
+   * declarado de la corrida, y esa identidad debe declararse explícitamente
+   * por el llamador. Antes de esta corrección, la ausencia de
+   * `options.current_model` defaulteaba en silencio a 'OPENAI'; una corrida
+   * real (`runPrototypeLive`, que nunca declara `current_model`) heredaba esa
+   * identidad inventada sin que nadie la hubiera decidido.
+   *
+   * `stage`, `active_provider` y `degradation`: instrumentación mínima para
+   * la salida de degradación estructurada (criterio DoD reconciliado,
+   * 2026-09-06, diseño auditado por ChatGPT). `stage` y `active_provider` son
+   * efímeros —se sobrescriben en cada hito del pipeline—; `degradation` es el
+   * único artefacto estructurado que sobrevive y se expone en `_finalReturn`.
+   * Frontera explícita: un `current_model` no declarado lanza ANTES de que
+   * exista un runtime válido, así que ese fallo nunca produce `degradation`
+   * estructurada — permanece como excepción fail-closed al llamador.
+   */
   function _newRuntime(options) {
+    if (!options.current_model) {
+      throw Errors.configError(
+        'current_model no declarado: la identidad del modelo de origen debe ' +
+        'declararse explícitamente por el llamador; nunca se infiere por default.');
+    }
     return {
-      current_model: options.current_model ? options.current_model : 'OPENAI',
+      current_model: options.current_model,
       model_interventions: 0,
       cost_usd: 0,
       cost_known: true,
@@ -52,7 +77,12 @@ var Orchestrator = (function () {
       blocks: [],
       producer_turns: 0,
       auditor_turns: 0,
-      notes: []
+      notes: [],
+      stage: null,
+      active_provider: null,
+      degradation: null,
+      provider_provenance: [],
+      active_provider_attempt: null
     };
   }
 
@@ -68,14 +98,47 @@ var Orchestrator = (function () {
     return provider;
   }
 
-  /** Una intervención de modelo, con límites y contador de costo. */
+  /**
+   * Una intervención de modelo, con límites y contador de costo.
+   *
+   * Instrumentación de etapa (diseño auditado, 2026-09-06): la guarda de
+   * `MAX_MODEL_INTERVENTIONS` recibe su PROPIA etapa (`MODEL_INTERVENTION_GUARD`),
+   * distinta de `PROVIDER_RESOLUTION` — si el chequeo de límite falla, el
+   * sistema todavía no está resolviendo proveedor, y etiquetarlo como
+   * resolución habría sido la misma inferencia indirecta que este criterio
+   * elimina. `active_provider` se fija ANTES de `_providerFor()`, no después:
+   * si falta el adaptador, la degradación debe poder decir qué proveedor se
+   * intentaba resolver aunque el objeto adaptador nunca haya existido.
+   */
   function _modelTurn(options, runtime, model, role, request, toolContract) {
+    runtime.stage = 'MODEL_INTERVENTION_GUARD';
+
     var limits = Config.limits();
     if (runtime.model_interventions >= limits.MAX_MODEL_INTERVENTIONS) {
       throw Errors.limitExceeded('MAX_MODEL_INTERVENTIONS', runtime.model_interventions);
     }
+
+    runtime.stage = 'PROVIDER_RESOLUTION';
+    runtime.active_provider = model;
+
+    // Procedencia (auditoría cruzada, 2026-09-12): el intento se registra ANTES
+    // de _providerFor(), con invoked_provider y provider_model en null. Si el
+    // adaptador no existe o no conforma, el intento queda registrado tal cual
+    // —proveedor seleccionado, nunca invocado— sin fingir ningún despacho.
+    // Sólo ProviderAdapter.callBudgeted() escribe invoked_provider/provider_model
+    // más adelante, y sólo con evidencia positiva de despacho real.
+    var attempt = {
+      selected_provider: model,
+      invoked_provider: null,
+      provider_model: null,
+      role: role
+    };
+    runtime.provider_provenance.push(attempt);
+    runtime.active_provider_attempt = attempt;
+
     var provider = _providerFor(options, model);
 
+    runtime.stage = 'PROVIDER_DISPATCH';
     // Toda llamada pagada del prototipo atraviesa la MISMA puerta, incluida la
     // del ensayo aislado de proveedores. El orquestador no lleva su propia
     // contabilidad: si hubiera dos caminos de gasto podrían divergir en
@@ -84,14 +147,24 @@ var Orchestrator = (function () {
 
     runtime.model_interventions++;
     runtime.models.push({ model: model, role: role });
+    runtime.active_provider = null;
+    runtime.active_provider_attempt = null;
     return normalized;
   }
 
-  /** Ejecuta las herramientas pedidas por el modelo y devuelve resultados. */
-  function _executeToolRequests(session, toolRequests) {
+  /**
+   * Ejecuta las herramientas pedidas por el modelo y devuelve resultados.
+   * Recibe `runtime` para marcar `stage = 'TOOL_EXECUTION'` antes de cada
+   * invocación: sin esto, un `LIMIT_EXCEEDED` o `CONTEXT_AMBIGUOUS` lanzado
+   * dentro de `ToolBroker.invoke()` heredaría la etapa del ciclo de modelo
+   * que lo rodea (p. ej. `PROVIDER_DISPATCH`), que es exactamente la
+   * clasificación por etapa indirecta que este criterio prohíbe.
+   */
+  function _executeToolRequests(session, toolRequests, runtime) {
     var results = [];
     for (var i = 0; i < toolRequests.length; i++) {
       var req = toolRequests[i];
+      runtime.stage = 'TOOL_EXECUTION';
       try {
         results.push({ name: req.name, ok: true, result: ToolBroker.invoke(session, req.name, req.arguments) });
       } catch (e) {
@@ -120,7 +193,7 @@ var Orchestrator = (function () {
       prompt: spec.readPrompt
     }, ToolBroker.contract(spec.readGrant));
 
-    var toolResults = _executeToolRequests(spec.session, readTurn.tool_requests);
+    var toolResults = _executeToolRequests(spec.session, readTurn.tool_requests, runtime);
     var text = readTurn.text;
     var turns = 1;
 
@@ -133,7 +206,7 @@ var Orchestrator = (function () {
         prompt: spec.producePrompt(_renderEvidence(spec.session))
       }, ToolBroker.contract(grant));
 
-      _executeToolRequests(spec.session, produceTurn.tool_requests);
+      _executeToolRequests(spec.session, produceTurn.tool_requests, runtime);
       if (produceTurn.text) { text = produceTurn.text; }
       turns = 2;
     }
@@ -245,6 +318,7 @@ var Orchestrator = (function () {
 
     try {
       // 1-3. Contexto e intención, sólo desde el turno vivo del operador.
+      runtime.stage = 'CONTEXT_RESOLUTION';
       var verdict = ContextResolver.resolve(operatorRequest, opts);
       execution.candidate_contexts = verdict.candidates;
       execution.resolved_context = verdict.resolved_context;
@@ -252,14 +326,17 @@ var Orchestrator = (function () {
       execution.status = verdict.resolved_context ? 'CONTEXT_RESOLVED' : verdict.status;
 
       // Techo predeclarado + fase de lectura acotada a candidatos.
+      runtime.stage = 'AUTHORITY_EVALUATION';
       var ceiling = AuthorityPolicy.declaredCeiling();
       var readGrant = AuthorityPolicy.preRetrievalGrant(verdict.candidates);
       AuthorityPolicy.assertNarrowing(ceiling, readGrant);
 
+      runtime.stage = 'SESSION_SETUP';
       session = ToolBroker.newSession(execution, verdict.scope, readGrant);
 
       // 4. Contexto no resuelto: se bloquea ANTES de recuperar sustancia cruzada.
       if (!verdict.resolved_context) {
+        runtime.stage = 'ROUTING';
         routing = Router.decide({
           current_model: runtime.current_model,
           context_route: verdict.route,
@@ -273,6 +350,7 @@ var Orchestrator = (function () {
 
       // 5-6. Ciclo del productor: lecturas + producción sobre lo recuperado.
       var mandate = opts.mandate ? opts.mandate : { source: 'FIXED_POLICY', requests_execution: false };
+      runtime.stage = 'AUTHORITY_EVALUATION';
       var actionGrant = AuthorityPolicy.postContextGrant(ceiling, execution.resolved_context, mandate);
 
       var producer = _modelCycle(opts, runtime, {
@@ -306,9 +384,11 @@ var Orchestrator = (function () {
       var producerText = producer.text;
 
       // 7. Vigencia, precedencia, conflicto de autoridad y cobertura.
+      runtime.stage = 'EVIDENCE_ANALYSIS';
       analysis = _analyzeEvidence(session, opts);
 
       // 8. Routing determinista.
+      runtime.stage = 'ROUTING';
       routing = Router.decide({
         current_model: runtime.current_model,
         context_route: null,
@@ -329,8 +409,10 @@ var Orchestrator = (function () {
       // 9. Handoff interno + ciclo COMPLETO del segundo modelo.
       if (routing.route === 'CROSS_AUDIT' || routing.route === 'OPENAI' || routing.route === 'ANTHROPIC') {
         var target = routing.target_model;
+        runtime.stage = 'AUTHORITY_EVALUATION';
         var handoffGrant = AuthorityPolicy.postContextGrant(ceiling, execution.resolved_context, mandate);
 
+        runtime.stage = 'HANDOFF';
         var handoff = HandoffBuilder.build(execution, {
           origin_model: runtime.current_model,
           target_model: target,
@@ -356,6 +438,7 @@ var Orchestrator = (function () {
         HandoffBuilder.consume(handoff);
 
         // Sesión propia: el receptor recupera por sí mismo desde la fuente.
+        runtime.stage = 'SESSION_SETUP';
         var targetSession = ToolBroker.newSession(execution, verdict.scope, handoffGrant);
         var handoffHeader = [
           'Handoff interno recibido (generado por el sistema, no por el operador).',
@@ -429,9 +512,13 @@ var Orchestrator = (function () {
         };
 
         // Cierre de ciclo: el veredicto vuelve al flujo originador y el handoff
-        // queda reconciliado. Un replay posterior se rechaza.
+        // queda reconciliado. Un replay posterior se rechaza. Stage se
+        // restituye a HANDOFF explícitamente: el ciclo del auditor que
+        // acaba de correr dejó stage en PROVIDER_DISPATCH o TOOL_EXECUTION.
+        runtime.stage = 'HANDOFF';
         HandoffBuilder.reconcile(handoff);
 
+        runtime.stage = 'ROUTING';
         var closing = Router.decide({
           current_model: runtime.current_model,
           resolved_context: execution.resolved_context,
@@ -448,7 +535,9 @@ var Orchestrator = (function () {
 
       // 10-12. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.
       if (session.proposed_actions.length) {
+        runtime.stage = 'PLAN_BUILD';
         var plannedActions = buildPlannedActions(execution, session.proposed_actions);
+        runtime.stage = 'PLAN_VALIDATION';
         planResult = PlanValidator.validate(
           execution.execution_id, plannedActions, session.grant,
           execution.resolved_context,
@@ -459,6 +548,7 @@ var Orchestrator = (function () {
           });
         execution.action_plan = planResult.plan;
 
+        runtime.stage = 'SIMULATION';
         if (planResult.violations.length) {
           // Bloqueo del plan COMPLETO: no se simula ninguna acción.
           for (var v = 0; v < plannedActions.length; v++) {
@@ -501,6 +591,7 @@ var Orchestrator = (function () {
       // Retorno único al operador.
       execution.evidence_refs = RetrievalPolicy.minimumSufficient(session.evidence_refs, 8);
       execution.final_answer = _composeAnswer(execution, runtime, analysis, routing, producerText, simulations);
+      runtime.stage = 'OUTPUT_VALIDATION';
       Schemas.assertValid('Execution', execution);
       return _finalReturn(execution, runtime, session, analysis, routing, planResult, simulations);
 
@@ -511,6 +602,24 @@ var Orchestrator = (function () {
       execution.final_answer = 'Corrida detenida (fail closed): ' +
         (e.code ? e.code : 'ERROR') + ' — ' + Errors.redactText(e.message);
       runtime.blocks.push({ code: e.code ? e.code : 'ERROR', detail: Errors.redactText(e.message) });
+
+      // Salida de degradación estructurada (criterio DoD reconciliado,
+      // diseño auditado por ChatGPT, 2026-09-06). Orden del proveedor:
+      // `active_provider` primero —proviene del orquestador que realmente
+      // estaba intentando la intervención en ese momento—, `e.details.provider`
+      // como respaldo —depende de que el error concreto lo haya propagado—.
+      runtime.degradation = {
+        code: e.code ? e.code : 'ERROR',
+        provider: runtime.active_provider ||
+          (e.details && e.details.provider ? e.details.provider : null),
+        stage: runtime.stage,
+        cost_status: runtime.cost_known ? 'KNOWN' : 'UNKNOWN',
+        next_action: {
+          applicable: false,
+          action: null
+        }
+      };
+
       return _finalReturn(execution, runtime, session, analysis, routing, planResult, simulations);
     }
   }
@@ -632,6 +741,8 @@ var Orchestrator = (function () {
       action_plan: execution.action_plan,
       actions: actions,
       blocks: runtime.blocks,
+      degradation: runtime.degradation,
+      provider_provenance: runtime.provider_provenance,
       auditor_tool_calls: runtime.auditor_tool_calls === undefined ? 0 : runtime.auditor_tool_calls,
       auditor_documents: runtime.auditor_documents === undefined ? [] : runtime.auditor_documents,
       final_answer: execution.final_answer,

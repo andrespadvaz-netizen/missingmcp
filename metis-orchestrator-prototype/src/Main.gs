@@ -767,6 +767,8 @@ function smokeProveedoresReales(soloProveedor) {
   // y el `finally` devuelve el runtime a estado inerte aunque una llamada
   // lance, aunque lancen las dos, y aunque falle algo que no habíamos previsto.
   Config._setRunLevel(Config.LEVELS.LEVEL_2);
+  anota('nivel_elevado', 'INFO',
+    Config.runLevel() + ' — elevación temporal para llamada a proveedor');
   try {
   // Acumulador de la corrida. Es el mismo objeto que usa el orquestador, para
   // que el tope por corrida se aplique aquí igual que allí.

@@ -192,23 +192,63 @@ var TestRunner = (function () {
   }
 
   /**
-   * Igual que `render`, pero devuelve una LISTA de trozos en vez de una sola
-   * cadena. Existe porque Google Cloud Logging corta cada entrada de registro
-   * en 8.192 caracteres, y la suite ya la rebasaba: el registro se truncaba a
-   * mitad del último caso de aceptación, justo antes de imprimir los totales.
-   * El resultado era una corrida que terminaba bien y un informe que no se
-   * podía leer, que en un sistema cuya disciplina es "no afirmar sin
-   * verificar" equivale a no tener informe.
+   * Un reporte físico (unitReport o accReport) troceado por SUITE (r.suite),
+   * no como bloque único. Corrección del 2026-09-06: la versión anterior de
+   * `renderChunks` producía un solo chunk por reporte físico —es decir,
+   * TODOS los tests unitarios de TODAS las suites concatenados en una sola
+   * cadena—, lo cual dejó de escalar en cuanto la suite creció: Google Cloud
+   * Logging cortó el registro a mitad de la ejecución real (2:08 PM, ronda
+   * de Cierre de trazabilidad), y las pruebas de la suite "Despacho único
+   * (orquestador)" no sobrevivieron en el log pese a haber pasado.
    *
-   * Trocear por suite además escala: cada prueba nueva alarga su bloque, no el
-   * conjunto, y el veredicto global va siempre en su propio trozo corto para
-   * que nunca pueda quedar cortado.
+   * Cada chunk de suite lleva su propio encabezado; el subtotal del reporte
+   * físico (Total/PASS/FAIL/asserts/nivel) va en un chunk final aparte, no
+   * pegado a la última suite, para que nunca dependa de cuál suite calzó al
+   * final.
+   */
+  function _renderSuiteChunks(report, verbose) {
+    var chunks = [];
+    var currentSuite = null;
+    var lines = null;
+    for (var i = 0; i < report.results.length; i++) {
+      var r = report.results[i];
+      if (r.suite !== currentSuite) {
+        if (lines !== null) { chunks.push(lines.join('\n')); }
+        currentSuite = r.suite;
+        lines = ['=== ' + report.title + ' — ' + currentSuite + ' ==='];
+      }
+      var label = (r.id ? ('[' + r.id + '] ') : '') + r.name;
+      lines.push('  ' + (r.ok ? 'PASS' : 'FAIL') + '  ' + label +
+                 '  (' + r.checks.length + ' asserts)');
+      if (verbose || !r.ok) {
+        for (var c = 0; c < r.checks.length; c++) {
+          lines.push('        ' + (r.checks[c].ok ? 'ok  ' : 'FAIL') + ' ' + r.checks[c].msg);
+        }
+      }
+      if (!r.ok) { lines.push('        ERROR: ' + r.error); }
+    }
+    if (lines !== null) { chunks.push(lines.join('\n')); }
+    chunks.push('-- ' + report.title + ' (subtotal) --\n' +
+      'Total: ' + report.total + ' | PASS: ' + report.passed + ' | FAIL: ' + report.failed +
+      ' | asserts: ' + report.assertions + ' | nivel: ' + report.level);
+    return chunks;
+  }
+
+  /**
+   * Igual que `render`, pero devuelve una LISTA de trozos en vez de una sola
+   * cadena. Existe porque Google Cloud Logging corta cada entrada de
+   * registro en 8.192 caracteres. Trocea por SUITE dentro de cada reporte
+   * físico (`_renderSuiteChunks`), no por reporte físico completo: eso es
+   * lo que hace que escale con el número de pruebas, no solo con el número
+   * de reportes (hoy siempre dos: unitario y aceptación). El veredicto
+   * global va siempre en su propio trozo corto para que nunca pueda quedar
+   * cortado.
    */
   function renderChunks(report, verbose) {
     if (!report.reports) { return [_renderOne(report, verbose)]; }
     var chunks = [];
     for (var i = 0; i < report.reports.length; i++) {
-      chunks.push(_renderOne(report.reports[i], verbose));
+      chunks = chunks.concat(_renderSuiteChunks(report.reports[i], verbose));
     }
     chunks.push(
       '===== VEREDICTO GLOBAL =====\n' +

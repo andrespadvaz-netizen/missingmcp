@@ -99,4 +99,42 @@ function registerUnitRouter() {
     t.equals(ToolBroker.READ_TOOLS['calendar.read'].capability, Config.CAPABILITIES.CALENDAR_READ, 'calendar_read');
   });
 
+  // ------------------- identidad de origen y routing material (tabla)
+  // Criterio reconciliado tras auditoría cruzada con ChatGPT (6-sep-2026):
+  // la tabla de modelo primario por contexto se verifica exhaustivamente
+  // para TODOS los contextos declarados, no solo METIS como ejemplo aislado
+  // (ver "el modelo primario no obliga transferencia", arriba). Esta prueba
+  // vive aquí, separada de Unit_ProveedoresReales.gs, por independencia
+  // probatoria: prueba la TABLA, no el enrutamiento de una corrida.
+
+  TestRunner.unit(
+    'Router',
+    'la tabla de modelo primario cubre exhaustivamente todos los contextos declarados',
+    function (t) {
+      // Verificado contra Config.gs el 2026-09-06. Si CONTEXTS cambia sin
+      // actualizar esta tabla, esta prueba debe fallar de forma deliberada
+      // en vez de dejar pasar un drift silencioso entre el código de
+      // producción y lo que este criterio exige verificar.
+      var esperado = {
+        METIS: 'ANTHROPIC',
+        ANDREA: 'OPENAI',
+        SHOKKO: 'ANTHROPIC',
+        VENTURE_QUEST: 'ANTHROPIC',
+        ARQUITECTO_INTERIOR: 'ANTHROPIC',
+        PERSONAL: 'ANTHROPIC',
+        FINAL_FINAL: 'OPENAI'
+      };
+      var nombres = Config.contextNames();
+      t.deepEquals(nombres.slice().sort(), Object.keys(esperado).sort(),
+        'la lista de contextos declarados coincide exacto con la tabla esperada: ni falta ni sobra ninguno');
+      nombres.forEach(function (contexto) {
+        var primario = Config.primaryFor(contexto);
+        t.ok(primario === 'OPENAI' || primario === 'ANTHROPIC',
+          contexto + ': el primario declarado es un proveedor válido, no vacío ni desconocido');
+        t.equals(primario, esperado[contexto],
+          contexto + ': el primario coincide con la tabla verificada');
+      });
+    }
+  );
+
 }

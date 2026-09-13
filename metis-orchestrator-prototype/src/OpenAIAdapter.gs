@@ -75,8 +75,17 @@ var OpenAIAdapter = (function () {
           payload: JSON.stringify(body)
         });
       } catch (e) {
+        // Criterio de procedencia (auditoría cruzada, 2026-09-12): si
+        // UrlFetchApp.fetch() mismo lanza —timeout, corte de red—, el intento
+        // de despacho externo SÍ ocurrió, aunque nunca hubo respuesta. Antes,
+        // este catch construía un providerError nuevo sin `dispatchAttempted`,
+        // dejando ese caso indistinguible de un fallo previo a tocar la red
+        // (nivel, presupuesto, credencial). Corregido: se marca aquí también,
+        // igual que ya se hacía para los fallos posteriores a la respuesta.
         var redacted = this.redactProviderError(e);
-        throw Errors.providerError('OPENAI', null, redacted.message);
+        var wrapped = Errors.providerError('OPENAI', null, redacted.message);
+        wrapped.dispatchAttempted = true;
+        throw wrapped;
       }
       try {
         var code = response.getResponseCode();

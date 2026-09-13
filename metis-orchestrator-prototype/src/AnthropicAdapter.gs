@@ -73,8 +73,14 @@ var AnthropicAdapter = (function () {
           payload: JSON.stringify(body)
         });
       } catch (e) {
+        // Criterio de procedencia (auditoría cruzada, 2026-09-12): mismo hueco
+        // y misma corrección que OpenAIAdapter — ver ese archivo para el
+        // razonamiento completo. Un fallo del propio UrlFetchApp.fetch() es
+        // despacho intentado, no un fallo previo a tocar la red.
         var redacted = this.redactProviderError(e);
-        throw Errors.providerError('ANTHROPIC', null, redacted.message);
+        var wrapped = Errors.providerError('ANTHROPIC', null, redacted.message);
+        wrapped.dispatchAttempted = true;
+        throw wrapped;
       }
       try {
         var code = response.getResponseCode();
