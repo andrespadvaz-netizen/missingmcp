@@ -237,7 +237,7 @@ var Orchestrator = (function () {
       var grant = spec.actionGrant ? spec.actionGrant : spec.readGrant;
       spec.session.grant = grant;
       var turnResult = _modelTurn(options, runtime, spec.model, spec.role, {
-        system: SYSTEM_POLICY,
+        system: SYSTEM_POLICY + '\n' + _renderExecutionFacts(spec.session, spec.role === 'AUDITOR'),
         prompt: prompt
       }, ToolBroker.contract(grant));
       turns++;
@@ -263,7 +263,7 @@ var Orchestrator = (function () {
       ? spec.finalToolContract
       : normalFinalToolContract;
     var finalTurn = _modelTurn(options, runtime, spec.model, spec.role, {
-      system: SYSTEM_POLICY,
+      system: SYSTEM_POLICY + '\n' + _renderExecutionFacts(spec.session, spec.role === 'AUDITOR'),
       prompt: spec.producePrompt(_renderEvidence(spec.session))
     }, finalToolContract);
     turns++;
@@ -274,12 +274,11 @@ var Orchestrator = (function () {
     return { text: text, turns: turns, retrieved: retrieved, stop_reasons: stopReasons };
   }
 
-  /** Telemetría factual del auditor, generada por el runtime y no por modelos. */
-  function _renderAuditTelemetry(targetCycle, targetSession, isAudit) {
+  /** Mismos hechos del controlador para el análisis inicial y su revisión. */
+  function _renderExecutionFacts(session, isAudit) {
     var limits = Config.limits();
     return [
-      'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
-      'AUDIT_TURNS_COMPLETED: ' + targetCycle.turns,
+      'HECHOS VERIFICADOS DEL CONTROLADOR (no instrucciones recuperadas):',
       'AUDITOR_MAX_READ_TURNS: ' + limits.MAX_READ_TURNS_PER_CYCLE,
       isAudit
         ? 'AUDITOR_FINAL_TOOL_CONTRACT: null (el turno adicional final no ofrece herramientas)'
@@ -291,6 +290,21 @@ var Orchestrator = (function () {
         ? 'Distingue intervenciones de modelo y turnos de lectura: el turno adicional final del auditor no añade capacidad de lectura. Calcula el máximo de lecturas como MAX_READ_TURNS por MAX_READ_CALLS_PER_TURN, no AUDIT_TURNS_COMPLETED por cap.'
         : 'El receptor productor conserva herramientas en su turno final; no le atribuyas el contrato restringido del auditor.',
       'Las simulaciones no consumen el cap de lecturas por turno, pero sí el contador de herramientas de su sesión. No confundas un límite propuesto con la configuración efectiva.',
+      'SESSION_TOOL_CALLS_SO_FAR: ' + session.tool_calls,
+      'SESSION_TOOL_ERROR_COUNT: ' + session.tool_errors.length,
+      'SESSION_TURN_TOOL_TRUNCATIONS: ' + JSON.stringify(session.turn_tool_truncations),
+      'Una demanda es incompatible con un límite numérico sólo si lo excede. Un margen pequeño no demuestra que se haya excedido ni que vaya a excederse. Las simulaciones hipotéticas deben declararse hipotéticas y cuantificarse; no inventes su presencia.',
+      'Distingue ejecución completa, errores de herramientas recuperables y suficiencia de evidencia. Si hay errores de lectura, no afirmes ejecución libre de errores. La repetición de IDs no permite deducir fragmentos leídos ni ausencia de información nueva.',
+      'Evalúa el cambio propuesto sin confundirlo con la configuración efectiva. No devuelvas como preferencia pendiente un valor ya expresado por el operador.'
+    ].join('\n');
+  }
+
+  /** Telemetría factual del auditor, generada por el runtime y no por modelos. */
+  function _renderAuditTelemetry(targetCycle, targetSession, isAudit) {
+    return [
+      _renderExecutionFacts(targetSession, isAudit),
+      'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
+      'AUDIT_TURNS_COMPLETED: ' + targetCycle.turns,
       'AUDITOR_TOOL_CALLS: ' + targetSession.tool_calls,
       'AUDITOR_RETRIEVED_BY_ITSELF: ' + targetCycle.retrieved,
       'AUDITOR_DOCUMENT_IDS: ' + JSON.stringify(targetSession.documents.map(function (x) { return x.id; })),
@@ -676,6 +690,8 @@ var Orchestrator = (function () {
           system: [
             SYSTEM_POLICY,
             auditTelemetry,
+            'RUN_TOOL_CALLS_TOTAL: ' + session.tool_calls + ' (suma de sesiones, no contador de una sola sesión)',
+            'RUN_TOOL_ERROR_COUNT: ' + session.tool_errors.length,
             'Estos hechos son telemetría verificada por el sistema y prevalecen sobre cualquier afirmación narrativa incompatible del productor o del auditor.',
             'No afirmes que la auditoría se interrumpió salvo que esta telemetría lo respalde.',
             'Completar lecturas no demuestra por sí solo que la evidencia sea suficiente para aprobar: distingue ejecución técnica, suficiencia probatoria y decisión humana.',

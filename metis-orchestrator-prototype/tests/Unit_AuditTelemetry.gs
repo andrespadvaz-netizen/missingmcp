@@ -1,6 +1,24 @@
 /** Regresiones de telemetría factual entre auditoría y reconciliación. */
 function registerUnitAuditTelemetry() {
 
+  TestRunner.unit('Hechos compartidos entre modelos', 'errores del productor permanecen visibles al reconciliar', function (t) {
+    var providers = Fixtures.providers([
+      { text: 'Consulto un objeto.', tool_requests: [request('notion.fetch', { id: 'sho-01' }, 0)], stop_reason: 'tool_use' },
+      { text: 'Análisis con una lectura fallida.', tool_requests: [], stop_reason: 'end_turn' },
+      { text: 'DICTAMEN: RECHAZAR\nEvidencia acotada por la lectura fallida.', tool_requests: [], stop_reason: 'end_turn' }
+    ], [
+      { text: 'BLOQUEO_MATERIAL: NO\nAuditoría acotada.', tool_requests: [], stop_reason: 'end_turn' }
+    ]);
+    var result = Orchestrator.run('Audita Metis.', {
+      current_model: 'OPENAI', operator_context: 'METIS', intent: 'audit', providers: providers
+    });
+    t.equals(result.tool_errors.length, 1, 'el objeto fuera de partición produce un error real del fixture');
+    t.equals(result.tool_errors[0].code, 'PARTITION_VIOLATION', 'la partición se sigue haciendo cumplir');
+    t.includes(providers.OPENAI.calls[1].system, 'SESSION_TOOL_ERROR_COUNT: 1', 'el productor conoce su error al responder');
+    t.includes(providers.OPENAI.calls[2].system, 'RUN_TOOL_ERROR_COUNT: 1', 'la reconciliación no pierde el error del productor');
+    t.includes(providers.OPENAI.calls[2].system, 'SESSION_TOOL_ERROR_COUNT: 0', 'distingue la sesión auditora sin errores');
+  });
+
   [
     { text: 'DICTAMEN: RECHAZAR\nLa propuesta requiere corregir su justificación técnica.', status: 'COMPLETED' },
     { text: 'DICTAMEN: APROBAR\nAprobación que contradice el bloqueo material.', status: 'REQUIRES_ANDRES' },
@@ -196,6 +214,20 @@ function registerUnitAuditTelemetry() {
 
       t.equals(run.result.status, 'COMPLETED', 'la ruta CROSS_AUDIT completa');
       t.equals(run.auditor.calls.length, 4, 'el auditor completa tres turnos de lectura y uno final');
+      t.includes(run.auditor.calls[0].system, 'MAX_TOOL_CALLS_EFFECTIVE: ' + Config.limits().MAX_TOOL_CALLS,
+        'el auditor recibe configuración factual antes de formular objeciones');
+      t.includes(run.auditor.calls[0].system, 'SESSION_TOOL_CALLS_SO_FAR: 0',
+        'el auditor empieza con su sesión independiente vacía');
+      t.includes(run.auditor.calls[3].system, 'SESSION_TOOL_CALLS_SO_FAR: 15',
+        'el veredicto auditor recibe el consumo actualizado de sus lecturas');
+      t.includes(run.auditor.calls[3].system, 'SESSION_TOOL_ERROR_COUNT: 0',
+        'no infiere errores del texto de otros modelos');
+      t.includes(run.auditor.calls[3].system, '"skipped":3',
+        'el auditor conoce sus propias omisiones antes de dictaminar');
+      t.includes(run.origin.calls[0].system, 'MAX_TOOL_CALLS_EFFECTIVE: ' + Config.limits().MAX_TOOL_CALLS,
+        'el productor comparte la misma fuente factual');
+      t.includes(prompt, 'RUN_TOOL_CALLS_TOTAL: 15', 'la reconciliación distingue el total agregado');
+      t.includes(prompt, 'RUN_TOOL_ERROR_COUNT: 0', 'la reconciliación recibe los errores agregados');
       t.includes(prompt, 'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
         'el bloque declara procedencia del sistema');
       t.includes(prompt, 'AUDIT_TURNS_COMPLETED: 4', 'el prompt contiene los cuatro turnos terminados');
