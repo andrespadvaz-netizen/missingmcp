@@ -965,7 +965,41 @@ function pilotoCasoMaestro() {
   var resultado;
   try {
     resultado = runPrototypeLive(
-      'Audita esta propuesta de cambio a Metis y dime si la aprobamos.'
+      [
+        'Audita esta propuesta de cambio a Metis y dime si la aprobamos.',
+        '',
+        'PROPUESTA ID: PILOTO-METIS-001',
+        'PROPIETARIO: Andrés',
+        'FECHA: 2026-09-13',
+        'ALCANCE: Orquestador Metis, únicamente comportamiento de retrieval durante auditoría cruzada.',
+        '',
+        'CAMBIO PROPUESTO:',
+        'Mantener como comportamiento estable MAX_TOOL_CALLS_PER_TURN = 5 para herramientas de lectura, preservando MAX_TOOL_CALLS = 16 como fusible global. El cap por turno no aplica a simulate.* y debe preservar el orden relativo original de las tool calls.',
+        '',
+        'MOTIVO:',
+        'Las corridas reales 4-6 mostraron fan-out excesivo del auditor dentro de un solo turno; subir el límite global no resolvió la causa.',
+        '',
+        'SUPUESTO:',
+        'El límite de 5 reduce fan-out sin impedir que el auditor reúna evidencia suficiente dentro de hasta 3 turnos de lectura más un turno final.',
+        '',
+        'CRITERIOS DE ACEPTACIÓN:',
+        '1. Un turno con más de 5 lecturas ejecuta sólo las primeras 5.',
+        '2. Las lecturas omitidas no consumen tool_calls ni generan tool_errors.',
+        '3. simulate.* no se trunca por este cap.',
+        '4. El orden relativo de las tool calls ejecutadas se preserva.',
+        '5. El auditor puede completar y emitir veredicto sin degradación técnica.',
+        '',
+        'IMPACTO ESPERADO:',
+        'Reducir costo y evitar LIMIT_EXCEEDED por fan-out sin eliminar la auditoría independiente.',
+        '',
+        'SOLICITUD:',
+        'Evalúa esta propuesta contra la evidencia vigente de Metis y concluye:',
+        'APROBAR',
+        'RECHAZAR',
+        'o',
+        'REQUIERE DECISIÓN DE ANDRÉS',
+        'explicando bloqueos materiales si existen.'
+      ].join('\n')
     );
   } finally {
     Config._setRunLevel(Config.LEVELS.LEVEL_0);

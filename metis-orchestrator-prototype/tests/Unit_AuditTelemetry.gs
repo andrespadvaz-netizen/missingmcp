@@ -1,6 +1,57 @@
 /** Regresiones de telemetría factual entre auditoría y reconciliación. */
 function registerUnitAuditTelemetry() {
 
+  TestRunner.unit('Entrada del caso maestro',
+    'el punto de entrada real entrega la propuesta completa y restituye el nivel', function (t) {
+      var originalLive = runPrototypeLive;
+      var originalLog = Logger.log;
+      var requests = [];
+      var observedLevel;
+      var expectedResult = { status: 'COMPLETED', final_answer: 'Respuesta sintética.' };
+      runPrototypeLive = function (requestText) {
+        requests.push(requestText);
+        observedLevel = Config.runLevel();
+        return expectedResult;
+      };
+      Logger.log = function () {};
+      Config._setRunLevel(Config.LEVELS.LEVEL_0);
+      var result;
+      try {
+        result = pilotoCasoMaestro();
+      } finally {
+        runPrototypeLive = originalLive;
+        Logger.log = originalLog;
+      }
+      t.equals(requests.length, 1, 'el piloto entrega una sola solicitud');
+      t.equals(observedLevel, Config.LEVELS.LEVEL_2, 'la solicitud pasa por el nivel del piloto real');
+      t.equals(Config.runLevel(), Config.LEVELS.LEVEL_0, 'el piloto restituye el nivel inerte');
+      t.equals(result, expectedResult, 'devuelve el resultado sin sustituirlo');
+      var text = requests[0];
+      [
+        'Audita esta propuesta de cambio a Metis y dime si la aprobamos.',
+        'PROPUESTA ID: PILOTO-METIS-001',
+        'PROPIETARIO: Andrés',
+        'FECHA: 2026-09-13',
+        'ALCANCE: Orquestador Metis, únicamente comportamiento de retrieval durante auditoría cruzada.',
+        'MAX_TOOL_CALLS_PER_TURN = 5',
+        'MAX_TOOL_CALLS = 16',
+        'El cap por turno no aplica a simulate.*',
+        'Las corridas reales 4-6 mostraron fan-out excesivo del auditor dentro de un solo turno',
+        'hasta 3 turnos de lectura más un turno final',
+        '1. Un turno con más de 5 lecturas ejecuta sólo las primeras 5.',
+        '2. Las lecturas omitidas no consumen tool_calls ni generan tool_errors.',
+        '3. simulate.* no se trunca por este cap.',
+        '4. El orden relativo de las tool calls ejecutadas se preserva.',
+        '5. El auditor puede completar y emitir veredicto sin degradación técnica.',
+        'Reducir costo y evitar LIMIT_EXCEEDED por fan-out sin eliminar la auditoría independiente.',
+        'Evalúa esta propuesta contra la evidencia vigente de Metis',
+        'APROBAR', 'RECHAZAR', 'REQUIERE DECISIÓN DE ANDRÉS',
+        'explicando bloqueos materiales si existen.'
+      ].forEach(function (fragment) {
+        t.includes(text, fragment, 'la solicitud real conserva: ' + fragment);
+      });
+    });
+
   function request(name, args, ordinal) {
     return { id: 'audit-' + ordinal + '-' + name, name: name, arguments: args || {} };
   }
