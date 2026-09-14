@@ -49,6 +49,8 @@ function registerAcceptanceCases() {
     var providers = Fixtures.providers([
       { text: '', tool_requests: [read('notion.search', { query: 'gobernanza' })] },
       { text: 'Entregable del productor: la propuesta de gobernanza tiene tres huecos de autoridad.',
+        tool_requests: [] },
+      { text: 'Conclusión reconciliada: contrastada contra el CANON, la propuesta requiere cerrar la matriz de autoridad.',
         tool_requests: [] }
     ], [
       // Turno 1 del auditor: pide evidencia que el productor NO recuperó.
@@ -84,7 +86,10 @@ function registerAcceptanceCases() {
     t.includes(result.auditor_documents, 'met-canon-01',
       'el auditor trajo un documento que el productor no había recuperado');
     t.includes(result.final_answer, 'contrastada contra el CANON',
-      'el veredicto final es el del SEGUNDO turno, no el del primero');
+      'la reconciliación incorpora el veredicto sustantivo del auditor');
+    t.equals(providers.OPENAI.calls.length, 3, 'el originador reconcilia después de sus dos turnos de producción');
+    t.includes(providers.OPENAI.calls[2].prompt, 'Veredicto: contrastada contra el CANON',
+      'el reconciliador recibe el segundo turno del auditor, no su anuncio de lectura');
 
     // --- independencia y cierre de ciclo
     t.equals(result.models.filter(function (m) { return m.role === 'AUDITOR'; }).length, 2,
