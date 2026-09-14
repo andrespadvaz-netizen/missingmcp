@@ -311,7 +311,9 @@ var Fixtures = (function () {
           text: raw.text ? raw.text : '',
           tool_requests: raw.tool_requests ? raw.tool_requests : [],
           usage: usage,
-          stop_reason: raw.stop_reason ? raw.stop_reason : 'end_turn',
+          stop_reason: Object.prototype.hasOwnProperty.call(raw, 'stop_reason')
+            ? raw.stop_reason
+            : 'end_turn',
           // El fixture declara el identificador de modelo igual que un
           // proveedor real: forma parte del contrato normalizado.
           provider_model: raw.model ? raw.model : name.toLowerCase() + '-fixture',

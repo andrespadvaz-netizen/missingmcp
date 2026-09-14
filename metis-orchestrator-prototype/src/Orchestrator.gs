@@ -77,6 +77,8 @@ var Orchestrator = (function () {
       blocks: [],
       producer_turns: 0,
       auditor_turns: 0,
+      auditor_stop_reasons: [],
+      reconciliation_stop_reason: null,
       notes: [],
       stage: null,
       active_provider: null,
@@ -221,13 +223,14 @@ var Orchestrator = (function () {
    * agotar el tope, se fuerza un turno final de producción sin más lecturas.
    *
    * @param {{model, role, session, readGrant, actionGrant, readPrompt, producePrompt}} spec
-   * @return {{text:string, turns:number, retrieved:boolean}}
+   * @return {{text:string, turns:number, retrieved:boolean, stop_reasons:Array}}
    */
   function _modelCycle(options, runtime, spec) {
     var limits = Config.limits();
     var turns = 0;
     var retrieved = false;
     var text = null;
+    var stopReasons = [];
     var prompt = spec.readPrompt;
 
     while (turns < limits.MAX_READ_TURNS_PER_CYCLE) {
@@ -238,13 +241,14 @@ var Orchestrator = (function () {
         prompt: prompt
       }, ToolBroker.contract(grant));
       turns++;
+      stopReasons.push(turnResult.stop_reason);
       text = turnResult.text;
       var toolResults = _executeToolRequests(spec.session, turnResult.tool_requests, runtime);
       if (toolResults.length) { retrieved = true; }
       if (!toolResults.length) {
         // Este turno no pidió más lecturas: su texto ya es la respuesta final
         // (sea porque nunca hubo retrieval, o porque ya produjo sobre lo leído).
-        return { text: text, turns: turns, retrieved: retrieved };
+        return { text: text, turns: turns, retrieved: retrieved, stop_reasons: stopReasons };
       }
       prompt = spec.producePrompt(_renderEvidence(spec.session)) +
         '\n\nContinúa recuperando evidencia si todavía falta; pide como máximo 5 lecturas por turno y priorízalas por poder probatorio. No emitas el veredicto final hasta terminar las lecturas.';
@@ -263,10 +267,24 @@ var Orchestrator = (function () {
       prompt: spec.producePrompt(_renderEvidence(spec.session))
     }, finalToolContract);
     turns++;
+    stopReasons.push(finalTurn.stop_reason);
     _executeToolRequests(spec.session, finalTurn.tool_requests, runtime);
     if (finalTurn.text) { text = finalTurn.text; }
 
-    return { text: text, turns: turns, retrieved: retrieved };
+    return { text: text, turns: turns, retrieved: retrieved, stop_reasons: stopReasons };
+  }
+
+  /** Telemetría factual del auditor, generada por el runtime y no por modelos. */
+  function _renderAuditTelemetry(targetCycle, targetSession) {
+    return [
+      'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
+      'AUDIT_TURNS_COMPLETED: ' + targetCycle.turns,
+      'AUDITOR_TOOL_CALLS: ' + targetSession.tool_calls,
+      'AUDITOR_RETRIEVED_BY_ITSELF: ' + targetCycle.retrieved,
+      'AUDITOR_DOCUMENT_IDS: ' + JSON.stringify(targetSession.documents.map(function (x) { return x.id; })),
+      'AUDITOR_TURN_TOOL_TRUNCATIONS: ' + JSON.stringify(targetSession.turn_tool_truncations),
+      'AUDITOR_STOP_REASONS: ' + JSON.stringify(targetCycle.stop_reasons)
+    ].join('\n');
   }
 
   /** Punteros + sustancia acotada, siempre marcados como evidencia. */
@@ -603,8 +621,10 @@ var Orchestrator = (function () {
           verdict_text: targetCycle.text,
           turns: targetCycle.turns,
           retrieved_by_itself: targetCycle.retrieved,
+          stop_reasons: targetCycle.stop_reasons.slice(),
           blocks_materially: blocksMaterially
         };
+        runtime.auditor_stop_reasons = targetCycle.stop_reasons.slice();
 
         // Cierre de ciclo: el veredicto vuelve al flujo originador y el handoff
         // queda reconciliado. Un replay posterior se rechaza. Stage se
@@ -636,6 +656,7 @@ var Orchestrator = (function () {
         // omite la llave `tools` del body cuando el contrato es `null`
         // (`if (toolContract && toolContract.length) { body.tools = ...; }`),
         // así que este turno queda forzado a responder solo con texto.
+        var auditTelemetry = _renderAuditTelemetry(targetCycle, targetSession);
         var reconciliation = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
           system: SYSTEM_POLICY,
           prompt: [
@@ -645,12 +666,17 @@ var Orchestrator = (function () {
             'No sustituyas el objeto de decisión por problemas generales del contexto.',
             '',
             'Tu análisis original:', producerText, '',
+            auditTelemetry, '',
+            'Estos hechos son telemetría verificada por el sistema y prevalecen sobre cualquier afirmación narrativa incompatible del productor o del auditor.',
+            'No afirmes que la auditoría se interrumpió ni que su recuperación quedó incompleta salvo que esta telemetría lo respalde.',
+            '',
             'Veredicto del auditor:', targetCycle.text, '',
             runtime.audit.blocks_materially
               ? 'El auditor marcó BLOQUEO_MATERIAL: SI. Integra sus correcciones y produce UNA recomendación final. Si queda un desacuerdo real que Andrés deba decidir, termina con el encabezado REQUIERE DECISIÓN DE ANDRÉS:.'
               : 'El auditor marcó BLOQUEO_MATERIAL: NO. Produce UNA conclusión final incorporando los matices relevantes del auditor.'
           ].join('\n')
         }, null);
+        runtime.reconciliation_stop_reason = reconciliation.stop_reason;
         producerText = reconciliation.text
           ? reconciliation.text
           : producerText + '\n\nVeredicto del auditor: ' + targetCycle.text;
@@ -868,6 +894,7 @@ var Orchestrator = (function () {
       audit: runtime.audit ? {
         turns: runtime.audit.turns,
         retrieved_by_itself: runtime.audit.retrieved_by_itself,
+        stop_reasons: runtime.audit.stop_reasons,
         blocks_materially: runtime.audit.blocks_materially
       } : null,
       action_plan: execution.action_plan,
@@ -877,6 +904,8 @@ var Orchestrator = (function () {
       provider_provenance: runtime.provider_provenance,
       auditor_tool_calls: runtime.auditor_tool_calls === undefined ? 0 : runtime.auditor_tool_calls,
       auditor_documents: runtime.auditor_documents === undefined ? [] : runtime.auditor_documents,
+      auditor_stop_reasons: runtime.auditor_stop_reasons,
+      reconciliation_stop_reason: runtime.reconciliation_stop_reason,
       final_answer: execution.final_answer,
       ledger: Ledger.available() ? Ledger.entriesFor(execution.execution_id) : [],
       limits: {

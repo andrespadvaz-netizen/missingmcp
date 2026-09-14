@@ -47,6 +47,23 @@ function runPrototypeLive(operatorRequest, options) {
   return runPrototype(operatorRequest, opts);
 }
 
+/** Observabilidad nominal del piloto; una línea estable por campo. */
+function _logPilotResult(result) {
+  var audit = result.audit || {};
+  var limits = result.limits || {};
+  Logger.log('STATUS=' + result.status);
+  Logger.log('ROUTE=' + result.route);
+  Logger.log('AUDIT_BLOCKS=' + (audit.blocks_materially === undefined ? null : audit.blocks_materially));
+  Logger.log('AUDITOR_TOOL_CALLS=' + result.auditor_tool_calls);
+  Logger.log('TOOL_CALLS=' + limits.tool_calls);
+  Logger.log('COST_USD=' + limits.estimated_cost_usd);
+  Logger.log('RECONCILIATION_STOP_REASON=' + result.reconciliation_stop_reason);
+  Logger.log('FINAL_ANSWER_BEGIN');
+  Logger.log(result.final_answer);
+  Logger.log('FINAL_ANSWER_END');
+  return result;
+}
+
 /** Ejecuta los tests unitarios (spec §17). */
 function runUnitTests() {
   var report = TestRunner.runUnitTests();
@@ -955,7 +972,5 @@ function pilotoCasoMaestro() {
     Logger.log('Nivel restituido a ' + Config.runLevel());
   }
 
-  Logger.log(JSON.stringify(resultado, null, 2));
-  return resultado;
+  return _logPilotResult(resultado);
 }
-
