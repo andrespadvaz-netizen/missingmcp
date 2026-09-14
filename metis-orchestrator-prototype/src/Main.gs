@@ -2,11 +2,11 @@
  * Main.gs — puntos de entrada MANUALES del prototipo.
  *
  * CERO TRIGGERS. Este proyecto no instala ni programa nada:
- *   - no existe ninguna llamada a `ScriptApp.newTrigger(...)`;
- *   - no hay funciones `onOpen`, `onEdit`, `onFormSubmit`, `doGet` ni `doPost`;
- *   - `appsscript.json` no declara scope de `script.scriptapp`, de modo que el
- *     proyecto ni siquiera está autorizado a crear un trigger;
- *   - todas las funciones de abajo se ejecutan a mano desde el editor.
+ * - no existe ninguna llamada a `ScriptApp.newTrigger(...)`;
+ * - no hay funciones `onOpen`, `onEdit`, `onFormSubmit`, `doGet` ni `doPost`;
+ * - `appsscript.json` no declara scope de `script.scriptapp`, de modo que el
+ *   proyecto ni siquiera está autorizado a crear un trigger;
+ * - todas las funciones de abajo se ejecutan a mano desde el editor.
  *
  * CERO ESCRITURAS PRODUCTIVAS. Los scopes declarados son `drive.readonly`,
  * `calendar.readonly` y `script.external_request`. No hay scope de escritura de
@@ -37,6 +37,9 @@ function runPrototype(operatorRequest, options) {
 /** Corrida manual con proveedores reales (requiere Script Properties cargadas). */
 function runPrototypeLive(operatorRequest, options) {
   var opts = options || {};
+  // Metis has a declared primary model in Config; the entry point reads it
+  // rather than inventing a provider identity locally.
+  opts.current_model = opts.current_model || Config.primaryFor('METIS');
   opts.providers = {
     OPENAI: OpenAIAdapter.create(),
     ANTHROPIC: AnthropicAdapter.create()
@@ -86,6 +89,7 @@ function checkConfiguration() {
   Object.keys(Config.SECRET_PROPERTY_NAMES).forEach(function (symbolic) {
     secrets[symbolic] = { property: Config.SECRET_PROPERTY_NAMES[symbolic], present: Config.hasSecret(symbolic) };
   });
+
   var settings = {};
   Object.keys(Config.SETTING_PROPERTY_NAMES).forEach(function (symbolic) {
     settings[symbolic] = {
@@ -114,7 +118,7 @@ function checkConfiguration() {
     partitions: partitions,
     limits: Config.limits(),
     pricing_configured: !!Config.priceFor('OPENAI', Config.PROVIDERS.OPENAI.model) ||
-                        !!Config.priceFor('ANTHROPIC', Config.PROVIDERS.ANTHROPIC.model),
+      !!Config.priceFor('ANTHROPIC', Config.PROVIDERS.ANTHROPIC.model),
     triggers_declared: 0,
     productive_write_tools: 0,
     simulated_write_tools: AuthorityPolicy.SIMULATED_WRITE_TOOLS.length,
@@ -126,16 +130,16 @@ function checkConfiguration() {
 
 function _containerCount(partition) {
   return (partition.data_sources || partition.project_gids ||
-          partition.folder_ids || partition.calendar_ids || []).length;
+    partition.folder_ids || partition.calendar_ids || []).length;
 }
 
 /** Estados de una comprobación del smoke test. */
 var SMOKE_STATUS = {
-  PASS: 'PASS',                    // demostrado con al menos un resultado real
-  FAIL: 'FAIL',                    // algo salió mal, o el canario no apareció
-  NO_DEMOSTRADO: 'NO_DEMOSTRADO',  // no hubo error, pero tampoco evidencia
-  OMITIDA: 'OMITIDA',              // no se leyó por diseño (sin partición)
-  INFO: 'INFO'                     // informativo; nunca decide el veredicto
+  PASS: 'PASS',               // demostrado con al menos un resultado real
+  FAIL: 'FAIL',               // algo salió mal, o el canario no apareció
+  NO_DEMOSTRADO: 'NO_DEMOSTRADO', // no hubo error, pero tampoco evidencia
+  OMITIDA: 'OMITIDA',         // no se leyó por diseño (sin partición)
+  INFO: 'INFO'                // informativo; nunca decide el veredicto
 };
 
 /**
@@ -182,11 +186,10 @@ function smokeEvaluateCanary(canary, admitted) {
       return {
         status: SMOKE_STATUS.FAIL,
         detail: 'FUGA DE CONTEXTO: el objeto `' + c.forbid_id +
-                '` pertenece a otro contexto y fue ADMITIDO en esta sesión.'
+          '` pertenece a otro contexto y fue ADMITIDO en esta sesión.'
       };
     }
   }
-
   if (c.forbid_title_contains) {
     var vetado = ContextResolver.normalize(c.forbid_title_contains);
     var coincidencias = admitted.filter(function (d) {
@@ -196,7 +199,7 @@ function smokeEvaluateCanary(canary, admitted) {
       return {
         status: SMOKE_STATUS.FAIL,
         detail: 'FUGA DE CONTEXTO: ' + coincidencias.length + ' admitido(s) contienen "' +
-                c.forbid_title_contains + '", que sólo existe en otro contexto.'
+          c.forbid_title_contains + '", que sólo existe en otro contexto.'
       };
     }
   }
@@ -205,10 +208,10 @@ function smokeEvaluateCanary(canary, admitted) {
     return {
       status: SMOKE_STATUS.FAIL,
       detail: 'cardinalidad incorrecta: admitidos ' + admitted.length +
-              ', esperados exactamente ' + c.expect_exactly +
-              (admitted.length > c.expect_exactly
-                ? '. De más: la partición deja pasar objetos ajenos.'
-                : '. De menos: la partición filtra objetos propios.')
+        ', esperados exactamente ' + c.expect_exactly +
+        (admitted.length > c.expect_exactly
+          ? '. De más: la partición deja pasar objetos ajenos.'
+          : '. De menos: la partición filtra objetos propios.')
     };
   }
 
@@ -216,7 +219,7 @@ function smokeEvaluateCanary(canary, admitted) {
     return {
       status: SMOKE_STATUS.NO_DEMOSTRADO,
       detail: 'admitidos ' + admitted.length + ', se exigían ' + min +
-              '. Sin resultado real no se puede afirmar que la fuente esté bien leída.'
+        '. Sin resultado real no se puede afirmar que la fuente esté bien leída.'
     };
   }
 
@@ -226,7 +229,7 @@ function smokeEvaluateCanary(canary, admitted) {
       return {
         status: SMOKE_STATUS.FAIL,
         detail: 'el canario `' + c.expect_id + '` NO está entre los ' +
-                admitted.length + ' admitidos: la fuente devuelve algo, pero no lo esperado.'
+          admitted.length + ' admitidos: la fuente devuelve algo, pero no lo esperado.'
       };
     }
   }
@@ -247,11 +250,11 @@ function smokeEvaluateCanary(canary, admitted) {
   return {
     status: SMOKE_STATUS.PASS,
     detail: 'admitidos: ' + admitted.length +
-            (typeof c.expect_exactly === 'number' ? ' (cardinalidad exacta esperada)' : '') +
-            (c.expect_id ? ', canario positivo `' + c.expect_id + '` presente' : '') +
-            (c.expect_title_contains ? ', título esperado presente' : '') +
-            (c.forbid_id ? ', canario negativo `' + c.forbid_id + '` ausente' : '') +
-            (c.forbid_title_contains ? ', título vetado ausente' : '')
+      (typeof c.expect_exactly === 'number' ? ' (cardinalidad exacta esperada)' : '') +
+      (c.expect_id ? ', canario positivo `' + c.expect_id + '` presente' : '') +
+      (c.expect_title_contains ? ', título esperado presente' : '') +
+      (c.forbid_id ? ', canario negativo `' + c.forbid_id + '` ausente' : '') +
+      (c.forbid_title_contains ? ', título vetado ausente' : '')
   };
 }
 
@@ -278,11 +281,11 @@ function smokeEvaluateCanary(canary, admitted) {
  *     contexts: ['METIS'],
  *     canaries: {
  *       METIS: {
- *         'notion.search':    { query: 'gate', expect_id: '<page-id>' },
+ *         'notion.search': { query: 'gate', expect_id: '<page-id>' },
  *         'notion.decisions': { min_results: 3 },
- *         'asana.search':     { query: 'registrar', expect_title_contains: 'gobernanza' },
- *         'drive.search':     { query: 'notas' },
- *         'calendar.read':    { min_results: 1 }
+ *         'asana.search': { query: 'registrar', expect_title_contains: 'gobernanza' },
+ *         'drive.search': { query: 'notas' },
+ *         'calendar.read': { min_results: 1 }
  *       }
  *     }
  *   });
@@ -377,6 +380,7 @@ function smokeTestLevel1(options) {
     var session = ToolBroker.newSession({ execution_id: 'smoke-' + context },
       ContextResolver.scopeFor([context], context),
       AuthorityPolicy.preRetrievalGrant([context]));
+
     var contextCanaries = canaries[context] || {};
 
     [['notion.search', { page_size: 3 }],
@@ -421,6 +425,7 @@ function smokeTestLevel1(options) {
             discarded + ' de ' + returned + ' resultados DESCARTADOS por contexto: la partición no acotó en origen');
           return;
         }
+
         var veredicto = smokeEvaluateCanary(canary, admitted);
         check(etiqueta, veredicto.status, veredicto.detail);
       } catch (e) {
@@ -435,7 +440,7 @@ function smokeTestLevel1(options) {
     check(context + '/sin_contaminacion',
       descartes.length === 0 ? SMOKE_STATUS.INFO : SMOKE_STATUS.FAIL,
       descartes.length ? (descartes.length + ' resultados de otro contexto llegaron de la fuente')
-                       : 'ningún resultado ajeno llegó de la fuente');
+        : 'ningún resultado ajeno llegó de la fuente');
 
     check(context + '/documentos_en_sesion', SMOKE_STATUS.INFO,
       'total admitido: ' + session.documents.length +
@@ -462,10 +467,10 @@ function smokeTestLevel1(options) {
  * Ejecútala a mano desde el editor. Es la única función que necesitas correr.
  *
  * Alcance deliberado del primer ensayo:
- *   - contexto: METIS y sólo METIS;
- *   - fuentes: Notion y Asana. Drive y Calendar quedan OMITIDAS porque no se
- *     declara partición para ellas, y sin partición no se leen (fail closed);
- *   - canarios: dos objetos verificados que las fuentes DEBEN devolver.
+ * - contexto: METIS y sólo METIS;
+ * - fuentes: Notion y Asana. Drive y Calendar quedan OMITIDAS porque no se
+ *   declara partición para ellas, y sin partición no se leen (fail closed);
+ * - canarios: dos objetos verificados que las fuentes DEBEN devolver.
  *
  * Cero modelos, cero escrituras. No se invoca OpenAI ni Anthropic: este camino
  * no pasa por `Orchestrator.run` ni toca ningún ProviderAdapter.
@@ -676,9 +681,9 @@ function smokeAislamientoMetisShokko() {
  *
  * REPETICIÓN SELECTIVA
  *
- *   smokeProveedoresReales()             prueba los dos
- *   smokeProveedoresReales('OPENAI')     prueba sólo OpenAI
- *   smokeProveedoresReales('ANTHROPIC')  prueba sólo Anthropic
+ *   smokeProveedoresReales()               prueba los dos
+ *   smokeProveedoresReales('OPENAI')       prueba sólo OpenAI
+ *   smokeProveedoresReales('ANTHROPIC')    prueba sólo Anthropic
  *
  * Hace falta porque el desenlace esperable de la primera corrida es que un
  * proveedor devuelva un identificador de modelo sin precio declarado. En ese
@@ -770,102 +775,101 @@ function smokeProveedoresReales(soloProveedor) {
   anota('nivel_elevado', 'INFO',
     Config.runLevel() + ' — elevación temporal para llamada a proveedor');
   try {
-  // Acumulador de la corrida. Es el mismo objeto que usa el orquestador, para
-  // que el tope por corrida se aplique aquí igual que allí.
-  var runtime = { cost_usd: 0, cost_known: true };
+    // Acumulador de la corrida. Es el mismo objeto que usa el orquestador, para
+    // que el tope por corrida se aplique aquí igual que allí.
+    var runtime = { cost_usd: 0, cost_known: true };
 
-  for (var i = 0; i < proveedores.length; i++) {
-    var p = proveedores[i];
-    var etiqueta = p.nombre + '/complete';
-    try {
-      // MISMA puerta que el orquestador. Antes se llamaba al adaptador
-      // directamente y eso saltaba la contabilidad entera: los techos estaban
-      // declarados y ninguno se comprobaba.
-      var normalized = ProviderAdapter.callBudgeted(p.adapter, {
-        system: 'Responde en una sola palabra.',
-        prompt: 'Di la palabra: aislamiento',
-        max_output_tokens: 256
-      }, null, runtime);
+    for (var i = 0; i < proveedores.length; i++) {
+      var p = proveedores[i];
+      var etiqueta = p.nombre + '/complete';
+      try {
+        // MISMA puerta que el orquestador. Antes se llamaba al adaptador
+        // directamente y eso saltaba la contabilidad entera: los techos estaban
+        // declarados y ninguno se comprobaba.
+        var normalized = ProviderAdapter.callBudgeted(p.adapter, {
+          system: 'Responde en una sola palabra.',
+          prompt: 'Di la palabra: aislamiento',
+          max_output_tokens: 256
+        }, null, runtime);
 
-      reporte.observed_model_ids[p.nombre] =
-        normalized.provider_model ? normalized.provider_model : '(no informado)';
+        reporte.observed_model_ids[p.nombre] =
+          normalized.provider_model ? normalized.provider_model : '(no informado)';
 
-      var costo = normalized.usage ? normalized.usage.estimated_cost_usd : null;
-      var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
+        var costo = normalized.usage ? normalized.usage.estimated_cost_usd : null;
+        var texto = normalized.text ? String(normalized.text).slice(0, 60) : '(sin texto)';
 
-      // Recálculo independiente, aquí y no a mano: el costo informado debe ser
-      // aritmética reproducible desde los tokens y el precio declarado.
-      var precio = normalized.usage ? Config.priceFor(p.nombre, normalized.provider_model) : null;
-      var recalculado = (precio && normalized.usage)
-        ? (normalized.usage.input_tokens / 1000) * precio.input_per_1k +
-          (normalized.usage.output_tokens / 1000) * precio.output_per_1k
-        : null;
-      var coincide = (recalculado !== null) && Math.abs(recalculado - costo) < 1e-9;
+        // Recálculo independiente, aquí y no a mano: el costo informado debe ser
+        // aritmética reproducible desde los tokens y el precio declarado.
+        var precio = normalized.usage ? Config.priceFor(p.nombre, normalized.provider_model) : null;
+        var recalculado = (precio && normalized.usage)
+          ? (normalized.usage.input_tokens / 1000) * precio.input_per_1k +
+            (normalized.usage.output_tokens / 1000) * precio.output_per_1k
+          : null;
+        var coincide = (recalculado !== null) && Math.abs(recalculado - costo) < 1e-9;
 
-      // Criterio de PASS endurecido: la contabilidad correcta ya no basta.
-      // La clasificación vive en smokeClasificaRespuestaProveedor() —
-      // función pura— para poder probarla sin pagar una llamada real.
-      var hayUsage = !!normalized.usage;
-      var textoNoVacio = !!(normalized.text && String(normalized.text).trim().length > 0);
-      var estado = smokeClasificaRespuestaProveedor(normalized, coincide);
+        // Criterio de PASS endurecido: la contabilidad correcta ya no basta.
+        // La clasificación vive en smokeClasificaRespuestaProveedor() —
+        // función pura— para poder probarla sin pagar una llamada real.
+        var hayUsage = !!normalized.usage;
+        var textoNoVacio = !!(normalized.text && String(normalized.text).trim().length > 0);
+        var estado = smokeClasificaRespuestaProveedor(normalized, coincide);
 
-      anota(etiqueta, estado,
-        'modelo devuelto `' + reporte.observed_model_ids[p.nombre] + '`; ' +
-        'respondió "' + texto + '"; tokens entrada ' + (hayUsage ? normalized.usage.input_tokens : '(sin usage)') +
-        ', salida ' + (hayUsage ? normalized.usage.output_tokens : '(sin usage)') +
-        '; costo informado ' + costo +
-        (coincide
-          ? '; recálculo independiente coincide'
-          : '; RECÁLCULO NO COINCIDE, esperado ' + recalculado) +
-        (textoNoVacio ? '' : '; SIN TEXTO: la sonda no demostró una respuesta real'));
+        anota(etiqueta, estado,
+          'modelo devuelto `' + reporte.observed_model_ids[p.nombre] + '`; ' +
+          'respondió "' + texto + '"; tokens entrada ' + (hayUsage ? normalized.usage.input_tokens : '(sin usage)') +
+          ', salida ' + (hayUsage ? normalized.usage.output_tokens : '(sin usage)') +
+          '; costo informado ' + costo +
+          (coincide
+            ? '; recálculo independiente coincide'
+            : '; RECÁLCULO NO COINCIDE, esperado ' + recalculado) +
+          (textoNoVacio ? '' : '; SIN TEXTO: la sonda no demostró una respuesta real'));
 
-    } catch (e) {
-      if (Errors.is(e, Errors.CODES.PRICE_UNKNOWN)) {
-        // El caso que hay que OBSERVAR, no evitar. La sonda ya se pagó; lo que
-        // el sistema se niega a hacer es contabilizarla con un precio inventado.
+      } catch (e) {
+        if (Errors.is(e, Errors.CODES.PRICE_UNKNOWN)) {
+          // El caso que hay que OBSERVAR, no evitar. La sonda ya se pagó; lo que
+          // el sistema se niega a hacer es contabilizarla con un precio inventado.
+          //
+          // Y AQUÍ SE CORTA. Perder el conocimiento del costo es perder el
+          // contador contra el que se vigilan los techos: seguir con el
+          // proveedor siguiente sería pagar otra llamada sabiendo que ya no se
+          // puede saber cuánto va gastado. El comentario de la puerta dice que
+          // no se sigue gastando contra un contador ciego; esto lo cumple.
+          reporte.cost_known = false;
+          anota(etiqueta, SMOKE_STATUS.FAIL,
+            'COSTO DESCONOCIDO: se gastó una sonda mínima y el sistema se negó a ' +
+            'contabilizarla falsamente. ' + Errors.redactText(e.message) +
+            ' Declara ESE identificador exacto en METIS_PRICING, verifica su tarifa, ' +
+            'y repite SÓLO este proveedor con smokeProveedoresReales(\'' + p.nombre + '\').');
+          anota('corte', 'INFO',
+            'ventana de gasto cerrada tras el costo desconocido: no se llama a ' +
+            'ningún proveedor posterior');
+          break;
+        }
+        if (Errors.is(e, Errors.CODES.LIMIT_EXCEEDED)) {
+          // Un techo alcanzado vale para toda la corrida, no para un proveedor.
+          anota(etiqueta, SMOKE_STATUS.FAIL,
+            'TECHO ALCANZADO: ' + Errors.redactText(e.message));
+          anota('corte', 'INFO', 'ventana de gasto cerrada por techo alcanzado');
+          break;
+        }
+        // Un fallo inequívocamente previo al despacho —credencial ausente, nivel,
+        // presupuesto— no impide probar el otro proveedor: sabemos que no hubo
+        // llamada y la contabilidad sigue intacta.
         //
-        // Y AQUÍ SE CORTA. Perder el conocimiento del costo es perder el
-        // contador contra el que se vigilan los techos: seguir con el
-        // proveedor siguiente sería pagar otra llamada sabiendo que ya no se
-        // puede saber cuánto va gastado. El comentario de la puerta dice que
-        // no se sigue gastando contra un contador ciego; esto lo cumple.
-        reporte.cost_known = false;
+        // Pero si la puerta dejó el contador ciego, la corrida se acabó. Es el
+        // caso del error posterior al intento de red: la inferencia pudo
+        // ejecutarse y cobrarse aunque la respuesta se perdiera.
         anota(etiqueta, SMOKE_STATUS.FAIL,
-          'COSTO DESCONOCIDO: se gastó una sonda mínima y el sistema se negó a ' +
-          'contabilizarla falsamente. ' + Errors.redactText(e.message) +
-          ' Declara ESE identificador exacto en METIS_PRICING, verifica su tarifa, ' +
-          'y repite SÓLO este proveedor con smokeProveedoresReales(\'' + p.nombre + '\').');
-        anota('corte', 'INFO',
-          'ventana de gasto cerrada tras el costo desconocido: no se llama a ' +
-          'ningún proveedor posterior');
-        break;
-      }
-      if (Errors.is(e, Errors.CODES.LIMIT_EXCEEDED)) {
-        // Un techo alcanzado vale para toda la corrida, no para un proveedor.
-        anota(etiqueta, SMOKE_STATUS.FAIL,
-          'TECHO ALCANZADO: ' + Errors.redactText(e.message));
-        anota('corte', 'INFO', 'ventana de gasto cerrada por techo alcanzado');
-        break;
-      }
-      // Un fallo inequívocamente previo al despacho —credencial ausente, nivel,
-      // presupuesto— no impide probar el otro proveedor: sabemos que no hubo
-      // llamada y la contabilidad sigue intacta.
-      //
-      // Pero si la puerta dejó el contador ciego, la corrida se acabó. Es el
-      // caso del error posterior al intento de red: la inferencia pudo
-      // ejecutarse y cobrarse aunque la respuesta se perdiera.
-      anota(etiqueta, SMOKE_STATUS.FAIL,
-        (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
-      if (runtime.cost_known === false) {
-        reporte.cost_known = false;
-        anota('corte', 'INFO',
-          'ventana de gasto cerrada: el fallo ocurrió tras el intento de red y ' +
-          'el costo de esa llamada es indeterminable');
-        break;
+          (e.code ? e.code + ': ' : '') + Errors.redactText(e.message));
+        if (runtime.cost_known === false) {
+          reporte.cost_known = false;
+          anota('corte', 'INFO',
+            'ventana de gasto cerrada: el fallo ocurrió tras el intento de red y ' +
+            'el costo de esa llamada es indeterminable');
+          break;
+        }
       }
     }
-  }
-
   } finally {
     Config._setRunLevel(Config.LEVELS.LEVEL_0);
     anota('nivel_al_terminar', 'INFO',
@@ -886,6 +890,7 @@ function smokeProveedoresReales(soloProveedor) {
 
   var fallos = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.FAIL; }).length;
   var noDemostrados = reporte.checks.filter(function (c) { return c.status === SMOKE_STATUS.NO_DEMOSTRADO; }).length;
+
   if (fallos > 0) {
     reporte.status = SMOKE_STATUS.FAIL;
   } else if (noDemostrados > 0) {
@@ -909,11 +914,9 @@ function smokeClasificaRespuestaProveedor(normalized, coincide) {
   if (hayUsage && coincide && modeloExacto && textoNoVacio) {
     return SMOKE_STATUS.PASS;
   }
-
   if (hayUsage && coincide && modeloExacto && !textoNoVacio) {
     return SMOKE_STATUS.NO_DEMOSTRADO;
   }
-
   return SMOKE_STATUS.FAIL;
 }
 
@@ -924,3 +927,35 @@ function smokeProveedorAnthropic() {
 function smokeProveedorOpenAI() {
   return smokeProveedoresReales('OPENAI');
 }
+
+
+/**
+ * PILOTO DEL CASO MAESTRO — Orquestación real, LEVEL_2, gasta dinero.
+ *
+ * Mismo patrón que smokeProveedoresReales: exige LEVEL_0 al inicio de esta
+ * ejecución, eleva a LEVEL_2 sólo en memoria durante esta misma ejecución
+ * (RUN_LEVEL es una variable de módulo, no una Script Property: no
+ * sobrevive entre ejecuciones separadas), y restituye en un finally que
+ * corre pase lo que pase.
+ */
+function pilotoCasoMaestro() {
+  if (Config.runLevel() !== Config.LEVELS.LEVEL_0) {
+    Logger.log('ABORTADO: RUN_LEVEL en esta ejecución es ' + Config.runLevel() + ', debe ser LEVEL_0.');
+    return { status: 'ABORTADO', reason: 'nivel_incorrecto_en_esta_ejecucion' };
+  }
+
+  Config._setRunLevel(Config.LEVELS.LEVEL_2);
+  var resultado;
+  try {
+    resultado = runPrototypeLive(
+      'Audita esta propuesta de cambio a Metis y dime si la aprobamos.'
+    );
+  } finally {
+    Config._setRunLevel(Config.LEVELS.LEVEL_0);
+    Logger.log('Nivel restituido a ' + Config.runLevel());
+  }
+
+  Logger.log(JSON.stringify(resultado, null, 2));
+  return resultado;
+}
+

@@ -160,9 +160,10 @@ var Config = (function () {
    * (JSON parcial). Alcanzarlos = parada dura, nunca auto-ampliación.
    */
   var DEFAULT_LIMITS = {
-    // Un ciclo cerrado: productor (lectura + producción) + auditor (lectura +
-    // veredicto). Cuatro intervenciones, sin bucles adicionales.
-    MAX_MODEL_INTERVENTIONS: 4,
+    // Cada ciclo admite hasta tres turnos de lectura y un turno final.
+    MAX_READ_TURNS_PER_CYCLE: 3,
+    // Productor (4) + auditor (4) + reconciliación (1).
+    MAX_MODEL_INTERVENTIONS: 9,
     MAX_TOOL_CALLS: 16,
     MAX_READ_RETRIES: 2
   };

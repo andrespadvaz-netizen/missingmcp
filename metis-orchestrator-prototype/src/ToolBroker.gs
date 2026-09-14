@@ -55,7 +55,21 @@ var ToolBroker = (function () {
     'simulate.gmail_send': 'Propone un envío por Gmail. SIMULADA: no ejecuta nada.'
   };
 
-  /** Contrato expuesto al modelo. Sólo nombres abstractos, jamás secretos. */
+  /**
+   * Contrato expuesto al modelo. Sólo nombres abstractos, jamás secretos.
+   *
+   * El campo `context` se ELIMINÓ del schema de lectura (auditoría cruzada,
+   * 2026-09-13, causa raíz de "Lectura fuera del contexto resuelto"). Cuando
+   * `_modelCycle` construye este contrato, el contexto ya está resuelto en
+   * `session.scope` — `invoke()` siempre usa `session.scope.resolved` para
+   * acotar la lectura real, nunca el valor que el modelo pase. Ofrecer el
+   * campo de todos modos sólo le daba al modelo una forma de escribir un
+   * valor que `ContextResolver.assertReadAllowed()` podía rechazar sin que
+   * ese rechazo cambiara nada de lo que realmente se iba a leer: un vector de
+   * fallo sin ningún propósito. Sin el campo, el modelo nunca lo declara, y
+   * la guarda de `assertReadAllowed` queda como red de seguridad silenciosa,
+   * no como fuente de fallos evitables.
+   */
   function contract(grant) {
     var tools = [];
     for (var i = 0; i < grant.allowed_tools.length; i++) {
@@ -68,7 +82,7 @@ var ToolBroker = (function () {
         description: DESCRIPTIONS[name] ? DESCRIPTIONS[name] : '',
         input_schema: isRead
           ? { type: 'object', properties: { query: { type: 'string' }, id: { type: 'string' },
-                                            context: { type: 'string' }, time_window: { type: 'object' } } }
+                                            time_window: { type: 'object' } } }
           : { type: 'object', properties: { operation: { type: 'string' }, destination: { type: 'string' },
                                             destination_provenance: { type: 'string' }, payload: { type: 'object' } },
               required: ['operation'] }

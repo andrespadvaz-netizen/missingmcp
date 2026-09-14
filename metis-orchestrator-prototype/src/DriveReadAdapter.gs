@@ -7,7 +7,7 @@
  */
 var DriveReadAdapter = (function () {
 
-  var MAX_TEXT_BYTES = 20000;
+  var MAX_TEXT_BYTES = 60000;
 
   var _backend = null;
 

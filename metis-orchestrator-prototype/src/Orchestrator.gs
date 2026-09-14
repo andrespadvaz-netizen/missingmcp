@@ -2,8 +2,8 @@
  * Orchestrator.gs — controlador determinista de la corrida (spec §1, §7–§15).
  *
  * Flujo obligatorio:
- *   necesidad natural -> contexto -> Retrieval real de sólo lectura -> routing
- *   -> handoff interno -> segundo modelo cuando corresponda -> retorno único
+ * necesidad natural -> contexto -> Retrieval real de sólo lectura -> routing
+ * -> handoff interno -> segundo modelo cuando corresponda -> retorno único
  *
  * El controlador —no el modelo— decide contexto, autoridad, routing, límites,
  * validación de plan y simulación. Los modelos interpretan, analizan, piden
@@ -112,7 +112,6 @@ var Orchestrator = (function () {
    */
   function _modelTurn(options, runtime, model, role, request, toolContract) {
     runtime.stage = 'MODEL_INTERVENTION_GUARD';
-
     var limits = Config.limits();
     if (runtime.model_interventions >= limits.MAX_MODEL_INTERVENTIONS) {
       throw Errors.limitExceeded('MAX_MODEL_INTERVENTIONS', runtime.model_interventions);
@@ -144,7 +143,6 @@ var Orchestrator = (function () {
     // contabilidad: si hubiera dos caminos de gasto podrían divergir en
     // política, y uno de los dos terminaría sin enforcement real.
     var normalized = ProviderAdapter.callBudgeted(provider, request, toolContract, runtime);
-
     runtime.model_interventions++;
     runtime.models.push({ model: model, role: role });
     runtime.active_provider = null;
@@ -181,50 +179,71 @@ var Orchestrator = (function () {
   }
 
   /**
-   * Ciclo de modelo: turno de lectura + turno de producción sobre lo leído.
-   * Es el mismo para productor y auditor.
+   * Ciclo de modelo: lecturas acotadas + turno de producción sobre lo leído.
+   * Es el mismo para productor y auditor. Permite hasta
+   * Config.limits().MAX_READ_TURNS_PER_CYCLE turnos que combinan lectura y
+   * producción: cada turno puede pedir más herramientas (busca -> obtiene ->
+   * analiza) y el ciclo retorna en cuanto un turno no pide ninguna. Si el
+   * primer turno no pide nada, el ciclo termina en 1 turno — igual que antes
+   * de este cambio. Sólo si el modelo sigue pidiendo herramientas hasta
+   * agotar el tope, se fuerza un turno final de producción sin más lecturas.
    *
    * @param {{model, role, session, readGrant, actionGrant, readPrompt, producePrompt}} spec
    * @return {{text:string, turns:number, retrieved:boolean}}
    */
   function _modelCycle(options, runtime, spec) {
-    var readTurn = _modelTurn(options, runtime, spec.model, spec.role, {
-      system: SYSTEM_POLICY,
-      prompt: spec.readPrompt
-    }, ToolBroker.contract(spec.readGrant));
+    var limits = Config.limits();
+    var turns = 0;
+    var retrieved = false;
+    var text = null;
+    var prompt = spec.readPrompt;
 
-    var toolResults = _executeToolRequests(spec.session, readTurn.tool_requests, runtime);
-    var text = readTurn.text;
-    var turns = 1;
-
-    if (toolResults.length) {
+    while (turns < limits.MAX_READ_TURNS_PER_CYCLE) {
       var grant = spec.actionGrant ? spec.actionGrant : spec.readGrant;
       spec.session.grant = grant;
-
-      var produceTurn = _modelTurn(options, runtime, spec.model, spec.role, {
+      var turnResult = _modelTurn(options, runtime, spec.model, spec.role, {
         system: SYSTEM_POLICY,
-        prompt: spec.producePrompt(_renderEvidence(spec.session))
+        prompt: prompt
       }, ToolBroker.contract(grant));
-
-      _executeToolRequests(spec.session, produceTurn.tool_requests, runtime);
-      if (produceTurn.text) { text = produceTurn.text; }
-      turns = 2;
+      turns++;
+      text = turnResult.text;
+      var toolResults = _executeToolRequests(spec.session, turnResult.tool_requests, runtime);
+      if (toolResults.length) { retrieved = true; }
+      if (!toolResults.length) {
+        // Este turno no pidió más lecturas: su texto ya es la respuesta final
+        // (sea porque nunca hubo retrieval, o porque ya produjo sobre lo leído).
+        return { text: text, turns: turns, retrieved: retrieved };
+      }
+      prompt = spec.producePrompt(_renderEvidence(spec.session)) +
+        '\n\nContinúa recuperando evidencia si todavía falta; no emitas el veredicto final hasta terminar las lecturas.';
     }
 
-    return { text: text, turns: turns, retrieved: toolResults.length > 0 };
+    // Se agotó el tope de turnos y el modelo seguía pidiendo herramientas:
+    // se fuerza un turno final de producción sobre lo acumulado hasta ahora.
+    var finalGrant = spec.actionGrant ? spec.actionGrant : spec.readGrant;
+    spec.session.grant = finalGrant;
+    var finalTurn = _modelTurn(options, runtime, spec.model, spec.role, {
+      system: SYSTEM_POLICY,
+      prompt: spec.producePrompt(_renderEvidence(spec.session))
+    }, ToolBroker.contract(finalGrant));
+    turns++;
+    _executeToolRequests(spec.session, finalTurn.tool_requests, runtime);
+    if (finalTurn.text) { text = finalTurn.text; }
+
+    return { text: text, turns: turns, retrieved: retrieved };
   }
 
   /** Punteros + sustancia acotada, siempre marcados como evidencia. */
   function _renderEvidence(session) {
     if (!session.documents.length) { return '(sin evidencia recuperada)'; }
     var lines = [EVIDENCE_BANNER];
-    var docs = session.documents.slice(0, 12);
+    var docs = session.documents.slice(0, 20);
     for (var i = 0; i < docs.length; i++) {
       var d = docs[i];
       lines.push('[' + d.epistemic_status + '] ' + d.source + ':' + d.id + ' — ' + (d.title || 'sin título') +
-                 (d.context ? ' (contexto ' + d.context + ')' : ''));
+        (d.context ? ' (contexto ' + d.context + ')' : ''));
       if (d.snippet) {
-        lines.push('    texto: ' + String(d.snippet).slice(0, 400));
+        lines.push('  texto: ' + String(d.snippet).slice(0, 2000));
       }
     }
     lines.push('--- FIN DEL CONTENIDO RECUPERADO ---');
@@ -237,7 +256,6 @@ var Orchestrator = (function () {
    */
   function _analyzeEvidence(session, options) {
     var decisions = session.decisions.slice();
-
     var currency = null;
     if (options.currency_root) {
       currency = RetrievalPolicy.closeCurrencyChain(decisions, options.currency_root);
@@ -301,6 +319,7 @@ var Orchestrator = (function () {
   }
 
   // ------------------------------------------------------------------- run
+
   /**
    * Ejecuta una corrida completa. Devuelve el contrato de salida mínimo.
    */
@@ -309,7 +328,6 @@ var Orchestrator = (function () {
     var execution = Schemas.newExecution(operatorRequest);
     var runtime = _newRuntime(opts);
     HandoffBuilder.resetRegistry();
-
     var session = null;
     var analysis = null;
     var routing = null;
@@ -420,7 +438,7 @@ var Orchestrator = (function () {
             ? 'Auditar de forma independiente el entregable del productor.'
             : 'Continuar la ejecución en el entorno competente.',
           context: 'Contexto ' + execution.resolved_context + '. Intención ' + execution.intent +
-                   '. Recupera por ti mismo desde las fuentes; no se transporta corpus.',
+            '. Recupera por ti mismo desde las fuentes; no se transporta corpus.',
           evidence_refs: RetrievalPolicy.minimumSufficient(session.evidence_refs, 8),
           restrictions: [
             'Sólo lectura real; toda escritura es simulada.',
@@ -434,12 +452,12 @@ var Orchestrator = (function () {
         });
         execution.handoff = handoff;
         runtime.handoff = handoff;
-
         HandoffBuilder.consume(handoff);
 
         // Sesión propia: el receptor recupera por sí mismo desde la fuente.
         runtime.stage = 'SESSION_SETUP';
         var targetSession = ToolBroker.newSession(execution, verdict.scope, handoffGrant);
+
         var handoffHeader = [
           'Handoff interno recibido (generado por el sistema, no por el operador).',
           'handoff_id: ' + handoff.handoff_id,
@@ -455,60 +473,81 @@ var Orchestrator = (function () {
         ].join('\n');
 
         var isAudit = routing.route === 'CROSS_AUDIT';
-        var targetCycle = _modelCycle(opts, runtime, {
-          model: target,
-          role: isAudit ? 'AUDITOR' : 'PRODUCER',
-          session: targetSession,
-          readGrant: handoffGrant,
-          actionGrant: handoffGrant,
-          readPrompt: [
-            handoffHeader, '',
-            'Trabajo del productor:', producerText, '',
-            'Primer turno: pide las lecturas que necesites para verificarlo por ti mismo.',
-            'No emitas veredicto todavía.'
-          ].join('\n'),
-          producePrompt: function (evidence) {
-            return [
+
+        // Ciclo del segundo modelo, envuelto en try/finally (auditoría cruzada,
+        // 2026-09-14): dos corridas reales mostraron que el auditor puede
+        // agotar MAX_TOOL_CALLS en SU PROPIA sesión (targetSession) y lanzar
+        // LIMIT_EXCEEDED antes de que la fusión hacia `session` ocurriera. Con
+        // la fusión fuera del finally, esa evidencia se perdía por completo:
+        // el reporte final mostraba `tool_calls` del productor únicamente,
+        // como si el auditor nunca hubiera pedido nada. El finally garantiza
+        // que documentos, referencias de evidencia, decisiones, acciones
+        // propuestas, señales de riesgo, errores de herramienta y el contador
+        // de `tool_calls` del auditor se fusionen SIEMPRE hacia `session` —
+        // tanto si el ciclo completa como si lanza— para que un fallo dentro
+        // del ciclo del auditor sea diagnosticable en el JSON final en vez de
+        // desaparecer sin dejar rastro. Esto no cambia si la corrida completa
+        // o falla; sólo qué tanto queda visible cuando falla.
+        var targetCycle = null;
+        try {
+          targetCycle = _modelCycle(opts, runtime, {
+            model: target,
+            role: isAudit ? 'AUDITOR' : 'PRODUCER',
+            session: targetSession,
+            readGrant: handoffGrant,
+            actionGrant: handoffGrant,
+            readPrompt: [
               handoffHeader, '',
               'Trabajo del productor:', producerText, '',
-              'Evidencia que TÚ recuperaste:',
-              evidence, '',
-              isAudit
-                ? 'Segundo turno: emite ahora tu veredicto sobre esa evidencia.'
-                : 'Segundo turno: entrega el resultado de la intervención.'
-            ].join('\n');
+              'Primer turno: pide las lecturas que necesites para verificarlo por ti mismo.',
+              'No emitas veredicto todavía.'
+            ].join('\n'),
+            producePrompt: function (evidence) {
+              return [
+                handoffHeader, '',
+                'Trabajo del productor:', producerText, '',
+                'Evidencia que TÚ recuperaste:',
+                evidence, '',
+                isAudit
+                  ? 'Empieza tu veredicto con exactamente una de estas dos líneas: BLOQUEO_MATERIAL: SI o BLOQUEO_MATERIAL: NO. Después emite tu veredicto completo sobre esa evidencia.'
+                  : 'Segundo turno: entrega el resultado de la intervención.'
+              ].join('\n');
+            }
+          });
+        } finally {
+          runtime.auditor_turns = targetCycle ? targetCycle.turns : 0;
+
+          // El receptor aporta su propia evidencia a la corrida, complete o no.
+          for (var d = 0; d < targetSession.documents.length; d++) {
+            session.documents.push(targetSession.documents[d]);
           }
-        });
-        runtime.auditor_turns = targetCycle.turns;
+          for (var er = 0; er < targetSession.evidence_refs.length; er++) {
+            session.evidence_refs.push(targetSession.evidence_refs[er]);
+          }
+          for (var dec = 0; dec < targetSession.decisions.length; dec++) {
+            session.decisions.push(targetSession.decisions[dec]);
+          }
+          for (var pa = 0; pa < targetSession.proposed_actions.length; pa++) {
+            session.proposed_actions.push(targetSession.proposed_actions[pa]);
+          }
+          session.risk_signals = session.risk_signals.concat(targetSession.risk_signals);
+          session.tool_errors = session.tool_errors.concat(targetSession.tool_errors);
+          session.tool_calls += targetSession.tool_calls;
+          var targetSources = Object.keys(targetSession.source_status);
+          for (var ts = 0; ts < targetSources.length; ts++) {
+            session.source_status[targetSources[ts]] = targetSession.source_status[targetSources[ts]];
+          }
 
-        // El receptor aporta su propia evidencia a la corrida.
-        for (var d = 0; d < targetSession.documents.length; d++) {
-          session.documents.push(targetSession.documents[d]);
+          runtime.auditor_tool_calls = targetSession.tool_calls;
+          runtime.auditor_documents = targetSession.documents.map(function (x) { return x.id; });
         }
-        for (var er = 0; er < targetSession.evidence_refs.length; er++) {
-          session.evidence_refs.push(targetSession.evidence_refs[er]);
-        }
-        for (var dec = 0; dec < targetSession.decisions.length; dec++) {
-          session.decisions.push(targetSession.decisions[dec]);
-        }
-        for (var pa = 0; pa < targetSession.proposed_actions.length; pa++) {
-          session.proposed_actions.push(targetSession.proposed_actions[pa]);
-        }
-        session.risk_signals = session.risk_signals.concat(targetSession.risk_signals);
-        session.tool_errors = session.tool_errors.concat(targetSession.tool_errors);
-        session.tool_calls += targetSession.tool_calls;
-        var targetSources = Object.keys(targetSession.source_status);
-        for (var ts = 0; ts < targetSources.length; ts++) {
-          session.source_status[targetSources[ts]] = targetSession.source_status[targetSources[ts]];
-        }
-        runtime.auditor_tool_calls = targetSession.tool_calls;
-        runtime.auditor_documents = targetSession.documents.map(function (x) { return x.id; });
 
+        var blocksMaterially = /^BLOQUEO_MATERIAL:\s*SI/i.test(String(targetCycle.text || '').trim());
         runtime.audit = {
           verdict_text: targetCycle.text,
           turns: targetCycle.turns,
           retrieved_by_itself: targetCycle.retrieved,
-          blocks_materially: opts.audit_blocks_materially === true
+          blocks_materially: blocksMaterially
         };
 
         // Cierre de ciclo: el veredicto vuelve al flujo originador y el handoff
@@ -526,11 +565,34 @@ var Orchestrator = (function () {
           audit_blocks_materially: runtime.audit.blocks_materially,
           coverage: analysis.coverage
         });
+
         if (closing.route === 'REQUIRES_ANDRES') {
           execution.status = 'REQUIRES_ANDRES';
           runtime.blocks.push({ code: 'AUDIT_BLOCKS_MATERIALLY', detail: closing.reason });
         }
-        producerText = producerText + '\n\nVeredicto del auditor: ' + targetCycle.text;
+
+        // Turno de reconciliación puro: SIN contrato de herramientas (auditoría
+        // cruzada, 2026-09-14). Darle un contrato aquí —como en la versión
+        // anterior— dejaba al modelo tratar este turno como una oportunidad más
+        // de planear lecturas en vez de sintetizar la conclusión final; el
+        // primer piloto real produjo exactamente eso ("Ejecuto el plan de
+        // lecturas aprobado...") en vez de un veredicto. `AnthropicAdapter`
+        // omite la llave `tools` del body cuando el contrato es `null`
+        // (`if (toolContract && toolContract.length) { body.tools = ...; }`),
+        // así que este turno queda forzado a responder solo con texto.
+        var reconciliation = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
+          system: SYSTEM_POLICY,
+          prompt: [
+            'Tu análisis original:', producerText, '',
+            'Veredicto del auditor:', targetCycle.text, '',
+            runtime.audit.blocks_materially
+              ? 'El auditor marcó BLOQUEO_MATERIAL: SI. Integra sus correcciones y produce UNA recomendación final. Si queda un desacuerdo real que Andrés deba decidir, termina con el encabezado REQUIERE DECISIÓN DE ANDRÉS:.'
+              : 'El auditor marcó BLOQUEO_MATERIAL: NO. Produce UNA conclusión final incorporando los matices relevantes del auditor.'
+          ].join('\n')
+        }, null);
+        producerText = reconciliation.text
+          ? reconciliation.text
+          : producerText + '\n\nVeredicto del auditor: ' + targetCycle.text;
       }
 
       // 10-12. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.
@@ -645,6 +707,7 @@ var Orchestrator = (function () {
         return r.source + ':' + r.object_id + ' [' + r.epistemic_status + ']';
       }).join(', '));
     }
+
     if (analysis && analysis.currency) {
       lines.push('Vigencia: cadena ' + (analysis.currency.closed ? 'cerrada' : 'ABIERTA') +
         ' (' + analysis.currency.chain.join(' -> ') + ')' +
@@ -654,25 +717,31 @@ var Orchestrator = (function () {
           'declarado en la propiedad ("por defecto vigente"), no un valor explícito.');
       }
     }
+
     if (analysis && analysis.currency_conflicts && analysis.currency_conflicts.length) {
       lines.push('Contradicción en el registro de decisiones: ' +
         analysis.currency_conflicts.map(function (c) { return c.id + ' (' + c.reason + ')'; }).join(', ') +
         '. No la resuelvo por juicio propio.');
     }
+
     if (analysis && analysis.coverage && analysis.coverage.complete === false) {
       lines.push('Cobertura incompleta en: ' + analysis.coverage.missing.join(', ') +
         '. No afirmo exhaustividad; la respuesta queda acotada a lo verificable.');
     }
+
     if (analysis && analysis.conflict && analysis.conflict.conflict) {
       lines.push('Conflicto real de autoridad sobre "' + analysis.conflict.subject +
         '": no lo resuelvo por juicio propio.');
     }
+
     if (runtime.blocks.length) {
       lines.push('Bloqueos: ' + runtime.blocks.map(function (b) { return b.code + ' (' + b.detail + ')'; }).join(' | '));
     }
+
     if (simulations.length) {
       lines.push('Acciones materiales: ' + simulations.length + ', todas SIMULADAS.');
     }
+
     return lines.join('\n');
   }
 
@@ -702,6 +771,7 @@ var Orchestrator = (function () {
     }
 
     var limits = Config.limits();
+
     return {
       execution_id: execution.execution_id,
       created_at: execution.created_at,
@@ -768,4 +838,5 @@ var Orchestrator = (function () {
     buildPlannedActions: buildPlannedActions,
     run: run
   };
+
 })();
