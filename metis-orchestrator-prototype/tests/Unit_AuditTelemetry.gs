@@ -175,6 +175,17 @@ function registerUnitAuditTelemetry() {
       t.includes(prompt, 'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
         'el bloque declara procedencia del sistema');
       t.includes(prompt, 'AUDIT_TURNS_COMPLETED: 4', 'el prompt contiene los cuatro turnos terminados');
+      t.includes(prompt, 'AUDITOR_MAX_READ_TURNS: ' + Config.limits().MAX_READ_TURNS_PER_CYCLE,
+        'la capacidad de lectura procede de la configuración efectiva');
+      t.includes(prompt, 'AUDITOR_FINAL_TOOL_CONTRACT: null', 'distingue el turno final sin herramientas');
+      t.equals(run.auditor.calls[3].tools.length, 0, 'el contrato final real coincide con los hechos enviados');
+      t.includes(prompt, 'MAX_READ_CALLS_PER_TURN_EFFECTIVE: ' + Config.limits().MAX_TOOL_CALLS_PER_TURN,
+        'expone el cap efectivo sin convertir la propuesta en configuración');
+      t.includes(prompt, 'MAX_TOOL_CALLS_EFFECTIVE: ' + Config.limits().MAX_TOOL_CALLS,
+        'expone el fusible efectivo');
+      t.includes(prompt, 'por sesión de ToolBroker', 'explica el alcance real del contador');
+      t.includes(prompt, 'No existe igualdad esperada entre llamadas, IDs totales e IDs únicos',
+        'no confunde llamadas con cardinalidad de resultados');
       t.includes(prompt, 'AUDITOR_TOOL_CALLS: 15', 'el prompt contiene las quince lecturas ejecutadas');
       t.includes(prompt, 'AUDITOR_RETRIEVED_BY_ITSELF: true', 'el prompt acredita recuperación propia');
       t.includes(prompt, 'met-gate-01', 'el prompt contiene ids recuperados por el auditor');

@@ -275,13 +275,26 @@ var Orchestrator = (function () {
   }
 
   /** Telemetría factual del auditor, generada por el runtime y no por modelos. */
-  function _renderAuditTelemetry(targetCycle, targetSession) {
+  function _renderAuditTelemetry(targetCycle, targetSession, isAudit) {
+    var limits = Config.limits();
     return [
       'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
       'AUDIT_TURNS_COMPLETED: ' + targetCycle.turns,
+      'AUDITOR_MAX_READ_TURNS: ' + limits.MAX_READ_TURNS_PER_CYCLE,
+      isAudit
+        ? 'AUDITOR_FINAL_TOOL_CONTRACT: null (el turno adicional final no ofrece herramientas)'
+        : 'RECEIVER_FINAL_TOOL_CONTRACT: contrato normal de acción (receptor productor, no auditor)',
+      'MAX_READ_CALLS_PER_TURN_EFFECTIVE: ' + limits.MAX_TOOL_CALLS_PER_TURN,
+      'MAX_TOOL_CALLS_EFFECTIVE: ' + limits.MAX_TOOL_CALLS,
+      'MAX_TOOL_CALLS_SCOPE: por sesión de ToolBroker; productor y auditor tienen sesiones distintas. El total reportado de la corrida suma ambas sesiones.',
+      isAudit
+        ? 'Distingue intervenciones de modelo y turnos de lectura: el turno adicional final del auditor no añade capacidad de lectura. Calcula el máximo de lecturas como MAX_READ_TURNS por MAX_READ_CALLS_PER_TURN, no AUDIT_TURNS_COMPLETED por cap.'
+        : 'El receptor productor conserva herramientas en su turno final; no le atribuyas el contrato restringido del auditor.',
+      'Las simulaciones no consumen el cap de lecturas por turno, pero sí el contador de herramientas de su sesión. No confundas un límite propuesto con la configuración efectiva.',
       'AUDITOR_TOOL_CALLS: ' + targetSession.tool_calls,
       'AUDITOR_RETRIEVED_BY_ITSELF: ' + targetCycle.retrieved,
       'AUDITOR_DOCUMENT_IDS: ' + JSON.stringify(targetSession.documents.map(function (x) { return x.id; })),
+      'Una llamada puede devolver cero, uno o varios documentos; un documento puede aparecer en varias llamadas. No existe igualdad esperada entre llamadas, IDs totales e IDs únicos. La repetición no demuestra pérdida de trazabilidad.',
       'AUDITOR_TURN_TOOL_TRUNCATIONS: ' + JSON.stringify(targetSession.turn_tool_truncations),
       'AUDITOR_STOP_REASONS: ' + JSON.stringify(targetCycle.stop_reasons)
     ].join('\n');
@@ -656,7 +669,7 @@ var Orchestrator = (function () {
         // omite la llave `tools` del body cuando el contrato es `null`
         // (`if (toolContract && toolContract.length) { body.tools = ...; }`),
         // así que este turno queda forzado a responder solo con texto.
-        var auditTelemetry = _renderAuditTelemetry(targetCycle, targetSession);
+        var auditTelemetry = _renderAuditTelemetry(targetCycle, targetSession, isAudit);
         var reconciliation = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
           // Hechos del controlador en el canal de sistema; las narraciones de
           // los modelos quedan en el prompt como contenido sin autoridad.
@@ -669,6 +682,7 @@ var Orchestrator = (function () {
             'Entrega una respuesta final completa y breve: máximo 450 palabras. Abre con el dictamen sobre el objeto original, luego fundamentos y bloqueos materiales.',
             'No incluyas planificación, explicaciones sobre el prompt ni metacomentarios sobre instrucciones.',
             'Comprueba toda aritmética. Un riesgo inferido no es un fallo observado.',
+            'La ausencia de un caso en esta corrida no demuestra ausencia de pruebas en el proyecto. Acota cada conclusión al alcance de la evidencia disponible.',
             'Una falta de evidencia o fallo técnico no se convierte en preferencia humana: rechaza o acota la propuesta si no puede justificarse; reserva REQUIERE DECISIÓN DE ANDRÉS para autoridad o preferencias sustantivas.'
           ].join('\n'),
           prompt: [
