@@ -160,8 +160,40 @@ var Orchestrator = (function () {
    */
   function _executeToolRequests(session, toolRequests, runtime) {
     var results = [];
+    var perTurnLimit = Config.limits().MAX_TOOL_CALLS_PER_TURN;
+    var readsExecuted = 0;
+    var requestedReads = 0;
+    var truncation = null;
+
+    for (var count = 0; count < toolRequests.length; count++) {
+      if (ToolBroker.READ_TOOLS[toolRequests[count].name]) { requestedReads++; }
+    }
+
     for (var i = 0; i < toolRequests.length; i++) {
       var req = toolRequests[i];
+      var isRead = !!ToolBroker.READ_TOOLS[req.name];
+
+      // El cap es por lote/turno y sólo cuenta lecturas. Las herramientas
+      // simulate.* atraviesan el bucle en su posición original y siguen bajo
+      // el fusible global de ToolBroker.invoke().
+      if (isRead && readsExecuted >= perTurnLimit) {
+        if (!truncation) {
+          truncation = {
+            requested: requestedReads,
+            executed: readsExecuted,
+            skipped: 0,
+            skipped_tools: []
+          };
+          session.turn_tool_truncations.push(truncation);
+        }
+        truncation.skipped++;
+        if (truncation.skipped_tools.indexOf(req.name) === -1) {
+          truncation.skipped_tools.push(req.name);
+        }
+        continue;
+      }
+
+      if (isRead) { readsExecuted++; }
       runtime.stage = 'TOOL_EXECUTION';
       try {
         results.push({ name: req.name, ok: true, result: ToolBroker.invoke(session, req.name, req.arguments) });
@@ -215,17 +247,21 @@ var Orchestrator = (function () {
         return { text: text, turns: turns, retrieved: retrieved };
       }
       prompt = spec.producePrompt(_renderEvidence(spec.session)) +
-        '\n\nContinúa recuperando evidencia si todavía falta; no emitas el veredicto final hasta terminar las lecturas.';
+        '\n\nContinúa recuperando evidencia si todavía falta; pide como máximo 5 lecturas por turno y priorízalas por poder probatorio. No emitas el veredicto final hasta terminar las lecturas.';
     }
 
     // Se agotó el tope de turnos y el modelo seguía pidiendo herramientas:
     // se fuerza un turno final de producción sobre lo acumulado hasta ahora.
     var finalGrant = spec.actionGrant ? spec.actionGrant : spec.readGrant;
     spec.session.grant = finalGrant;
+    var normalFinalToolContract = ToolBroker.contract(finalGrant);
+    var finalToolContract = Object.prototype.hasOwnProperty.call(spec, 'finalToolContract')
+      ? spec.finalToolContract
+      : normalFinalToolContract;
     var finalTurn = _modelTurn(options, runtime, spec.model, spec.role, {
       system: SYSTEM_POLICY,
       prompt: spec.producePrompt(_renderEvidence(spec.session))
-    }, ToolBroker.contract(finalGrant));
+    }, finalToolContract);
     turns++;
     _executeToolRequests(spec.session, finalTurn.tool_requests, runtime);
     if (finalTurn.text) { text = finalTurn.text; }
@@ -384,7 +420,8 @@ var Orchestrator = (function () {
           'Contexto resuelto: ' + execution.resolved_context,
           'Intención detectada: ' + execution.intent,
           '',
-          'Pide sólo las lecturas necesarias (contexto mínimo suficiente).',
+          'Pide como máximo 5 lecturas por turno y priorízalas por poder probatorio',
+          '(contexto mínimo suficiente).',
           'Para preguntas de vigencia usa notion.decisions: trae el Estado y las',
           'relaciones de sustitución del registro de decisiones.'
         ].join('\n'),
@@ -490,7 +527,7 @@ var Orchestrator = (function () {
         // o falla; sólo qué tanto queda visible cuando falla.
         var targetCycle = null;
         try {
-          targetCycle = _modelCycle(opts, runtime, {
+          var targetCycleSpec = {
             model: target,
             role: isAudit ? 'AUDITOR' : 'PRODUCER',
             session: targetSession,
@@ -499,7 +536,8 @@ var Orchestrator = (function () {
             readPrompt: [
               handoffHeader, '',
               'Trabajo del productor:', producerText, '',
-              'Primer turno: pide las lecturas que necesites para verificarlo por ti mismo.',
+              'Primer turno: pide como máximo 5 lecturas y priorízalas por poder probatorio',
+              'para verificarlo por ti mismo.',
               'No emitas veredicto todavía.'
             ].join('\n'),
             producePrompt: function (evidence) {
@@ -513,7 +551,11 @@ var Orchestrator = (function () {
                   : 'Segundo turno: entrega el resultado de la intervención.'
               ].join('\n');
             }
-          });
+          };
+          // Sólo el auditor pierde herramientas en el turno final forzado. Un
+          // receptor productor conserva el contrato normal de acción.
+          if (isAudit) { targetCycleSpec.finalToolContract = null; }
+          targetCycle = _modelCycle(opts, runtime, targetCycleSpec);
         } finally {
           runtime.auditor_turns = targetCycle ? targetCycle.turns : 0;
 
@@ -532,6 +574,8 @@ var Orchestrator = (function () {
           }
           session.risk_signals = session.risk_signals.concat(targetSession.risk_signals);
           session.tool_errors = session.tool_errors.concat(targetSession.tool_errors);
+          session.turn_tool_truncations = session.turn_tool_truncations.concat(
+            targetSession.turn_tool_truncations);
           session.tool_calls += targetSession.tool_calls;
           var targetSources = Object.keys(targetSession.source_status);
           for (var ts = 0; ts < targetSources.length; ts++) {
@@ -794,6 +838,7 @@ var Orchestrator = (function () {
       evidence_refs: execution.evidence_refs,
       risk_signals: session ? session.risk_signals : [],
       tool_errors: session ? session.tool_errors : [],
+      turn_tool_truncations: session ? session.turn_tool_truncations : [],
       handoff: execution.handoff ? {
         handoff_id: execution.handoff.handoff_id,
         origin_model: execution.handoff.origin_model,
@@ -822,6 +867,7 @@ var Orchestrator = (function () {
         max_model_interventions: limits.MAX_MODEL_INTERVENTIONS,
         tool_calls: session ? session.tool_calls : 0,
         max_tool_calls: limits.MAX_TOOL_CALLS,
+        max_tool_calls_per_turn: limits.MAX_TOOL_CALLS_PER_TURN,
         read_retries: session ? session.read_retries : 0,
         estimated_cost_usd: runtime.cost_known ? runtime.cost_usd : null,
         cost_known: runtime.cost_known,

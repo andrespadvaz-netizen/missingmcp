@@ -164,6 +164,9 @@ var Config = (function () {
     MAX_READ_TURNS_PER_CYCLE: 3,
     // Productor (4) + auditor (4) + reconciliación (1).
     MAX_MODEL_INTERVENTIONS: 9,
+    // Cap por turno, sólo para lecturas. Es distinto del fusible global:
+    // aumentar MAX_TOOL_CALLS no resolvió la causa observada del lote excesivo.
+    MAX_TOOL_CALLS_PER_TURN: 5,
     MAX_TOOL_CALLS: 16,
     MAX_READ_RETRIES: 2
   };

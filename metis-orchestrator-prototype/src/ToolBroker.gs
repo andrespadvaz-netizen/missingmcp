@@ -103,6 +103,7 @@ var ToolBroker = (function () {
       decisions: [],
       risk_signals: [],
       tool_errors: [],
+      turn_tool_truncations: [],
       source_status: {},
       read_retries: 0
     };

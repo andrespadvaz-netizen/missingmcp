@@ -37,6 +37,7 @@ var TestRunner = (function () {
     'registerUnitSimulatedWrite',
     'registerUnitAislamientoMulticontexto',
     'registerUnitProveedoresReales',
+    'registerUnitTurnToolCap',
     'registerUnitInformeTroceado',
     'registerAcceptanceCases'
   ];
