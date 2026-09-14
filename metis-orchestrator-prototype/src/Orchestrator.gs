@@ -294,7 +294,7 @@ var Orchestrator = (function () {
       'AUDITOR_TOOL_CALLS: ' + targetSession.tool_calls,
       'AUDITOR_RETRIEVED_BY_ITSELF: ' + targetCycle.retrieved,
       'AUDITOR_DOCUMENT_IDS: ' + JSON.stringify(targetSession.documents.map(function (x) { return x.id; })),
-      'Una llamada puede devolver cero, uno o varios documentos; un documento puede aparecer en varias llamadas. No existe igualdad esperada entre llamadas, IDs totales e IDs únicos. La repetición no demuestra pérdida de trazabilidad.',
+      'Una llamada puede devolver cero, uno o varios documentos; un documento puede aparecer en varias llamadas. No existe igualdad esperada entre llamadas, IDs totales e IDs únicos. La repetición no demuestra pérdida de trazabilidad ni ausencia de contenido nuevo: los IDs no describen qué fragmentos se leyeron.',
       'AUDITOR_TURN_TOOL_TRUNCATIONS: ' + JSON.stringify(targetSession.turn_tool_truncations),
       'AUDITOR_STOP_REASONS: ' + JSON.stringify(targetCycle.stop_reasons)
     ].join('\n');
@@ -680,9 +680,12 @@ var Orchestrator = (function () {
             'No afirmes que la auditoría se interrumpió salvo que esta telemetría lo respalde.',
             'Completar lecturas no demuestra por sí solo que la evidencia sea suficiente para aprobar: distingue ejecución técnica, suficiencia probatoria y decisión humana.',
             'Entrega una respuesta final completa y breve: máximo 450 palabras. Abre con el dictamen sobre el objeto original, luego fundamentos y bloqueos materiales.',
+            'Primera línea: DICTAMEN: APROBAR, DICTAMEN: RECHAZAR o DICTAMEN: REQUIERE DECISIÓN DE ANDRÉS. Después justifica el dictamen sobre la propuesta completa, distinguiendo sus componentes si es necesario.',
             'No incluyas planificación, explicaciones sobre el prompt ni metacomentarios sobre instrucciones.',
             'Comprueba toda aritmética. Un riesgo inferido no es un fallo observado.',
             'La ausencia de un caso en esta corrida no demuestra ausencia de pruebas en el proyecto. Acota cada conclusión al alcance de la evidencia disponible.',
+            'Un valor propuesto distinto del desplegado es un cambio que debes evaluar, no una preferencia que el operador omitió expresar. No le pidas volver a elegir un valor que ya indicó. Si la propuesta confunde el estado actual con el deseado, señala el defecto y evalúa si aprobar o rechazar su texto; auditar no exige modificar la configuración.',
+            'No conviertas éxito técnico en una aprobación estable sin justificar los criterios de aceptación. Tampoco conviertas objeciones técnicas resueltas o una recomendación de rechazo en una decisión humana pendiente.',
             'Una falta de evidencia o fallo técnico no se convierte en preferencia humana: rechaza o acota la propuesta si no puede justificarse; reserva REQUIERE DECISIÓN DE ANDRÉS para autoridad o preferencias sustantivas.'
           ].join('\n'),
           prompt: [
@@ -708,6 +711,16 @@ var Orchestrator = (function () {
           throw Errors.schemaError('Respuesta de reconciliación incompleta: ' + reconciliation.stop_reason);
         }
         producerText = reconciliation.text;
+        // En una auditoría sin acciones, rechazar la propuesta ya responde al
+        // operador. No confundir bloqueo de la propuesta con bloqueo del flujo.
+        // Nunca levanta un bloqueo de autoridad, un plan, ni una petición humana
+        // explícita; tampoco autoriza una aprobación contra el auditor.
+        if (isAudit && !session.proposed_actions.length &&
+            /^DICTAMEN: RECHAZAR(?:\r?\n|$)/.test(producerText.trim()) &&
+            !/^\s*(?:\*\*)?REQUIERE DECISI[ÓO]N DE ANDR[ÉE]S\b/im.test(producerText) &&
+            runtime.blocks.length === 1 && runtime.blocks[0].code === 'AUDIT_BLOCKS_MATERIALLY') {
+          execution.status = 'COMPLETED';
+        }
       }
 
       // 10-12. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.
