@@ -156,4 +156,71 @@ function registerUnitTurnToolCap() {
     t.equals(run.result.limits.max_tool_calls_per_turn, 5, 'el retorno publica el cap efectivo por turno');
     t.equals(run.result.limits.max_tool_calls, 16, 'el fusible global permanece en dieciséis');
   });
+
+  TestRunner.unit('Objeto de auditoría', 'la solicitud original sobrevive productor, auditor y reconciliación', function (t) {
+    var marker = 'PILOTO-METIS-001';
+    var operatorRequest = 'Audita exclusivamente la solicitud ' + marker + '.';
+
+    function promptAwareProvider(name, responder) {
+      var provider = Fixtures.scriptedProvider(name, []);
+      provider.complete = function (requestData) {
+        return provider.completeWithTools(requestData, null);
+      };
+      provider.completeWithTools = function (requestData, toolContract) {
+        provider.calls.push({
+          system: requestData.system,
+          prompt: requestData.prompt,
+          tools: (toolContract || []).map(function (tool) { return tool.name; })
+        });
+        return provider.normalizeResponse(responder(requestData, provider.calls.length));
+      };
+      return provider;
+    }
+
+    var openai = promptAwareProvider('OPENAI', function (requestData, callNumber) {
+      var receivedMarker = requestData.prompt.indexOf(marker) !== -1;
+      if (callNumber === 1) {
+        return {
+          text: receivedMarker
+            ? 'Análisis del productor sin repetir el identificador.'
+            : 'ERROR: el productor no recibió la solicitud original.',
+          tool_requests: []
+        };
+      }
+      return {
+        text: receivedMarker
+          ? 'Respuesta final para ' + marker + '.'
+          : 'ERROR: la reconciliación perdió la solicitud original.',
+        tool_requests: []
+      };
+    });
+
+    var anthropic = promptAwareProvider('ANTHROPIC', function (requestData) {
+      return {
+        text: requestData.prompt.indexOf(marker) !== -1
+          ? 'BLOQUEO_MATERIAL: NO\nSolicitud específica evaluada sin repetir el identificador.'
+          : 'BLOQUEO_MATERIAL: SI\nERROR: el auditor no recibió la solicitud original.',
+        tool_requests: []
+      };
+    });
+
+    var result = Orchestrator.run(operatorRequest, {
+      current_model: 'OPENAI',
+      operator_context: 'METIS',
+      intent: 'audit',
+      providers: { OPENAI: openai, ANTHROPIC: anthropic }
+    });
+
+    t.equals(result.status, 'COMPLETED', 'el flujo end-to-end completa sin bloqueo material');
+    t.equals(anthropic.calls.length, 1, 'el auditor interviene una vez');
+    t.includes(anthropic.calls[0].prompt, marker, 'el prompt recibido por el auditor contiene la solicitud original');
+    t.includes(anthropic.calls[0].prompt, 'Objeto de auditoría: evalúa exclusivamente esa solicitud original.',
+      'el auditor recibe la restricción explícita sobre el objeto');
+    t.equals(openai.calls.length, 2, 'el productor y la reconciliación usan el proveedor de origen');
+    t.includes(openai.calls[1].prompt, marker, 'el prompt de reconciliación contiene la solicitud original');
+    t.includes(openai.calls[1].prompt, 'Debes responder exclusivamente a esa solicitud original.',
+      'la reconciliación recibe la restricción explícita de decisión');
+    t.includes(result.final_answer, marker,
+      'la respuesta final sólo recupera el marcador porque llegó al prompt de reconciliación');
+  });
 }

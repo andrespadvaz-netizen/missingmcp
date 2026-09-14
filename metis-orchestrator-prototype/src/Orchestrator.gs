@@ -535,6 +535,12 @@ var Orchestrator = (function () {
             actionGrant: handoffGrant,
             readPrompt: [
               handoffHeader, '',
+              'Solicitud original del operador:',
+              operatorRequest, '',
+              'Objeto de auditoría: evalúa exclusivamente esa solicitud original.',
+              'No sustituyas el objeto de auditoría por problemas generales del contexto.',
+              'Usa la evidencia recuperada sólo para evaluar esa solicitud.',
+              '',
               'Trabajo del productor:', producerText, '',
               'Primer turno: pide como máximo 5 lecturas y priorízalas por poder probatorio',
               'para verificarlo por ti mismo.',
@@ -543,6 +549,12 @@ var Orchestrator = (function () {
             producePrompt: function (evidence) {
               return [
                 handoffHeader, '',
+                'Solicitud original del operador:',
+                operatorRequest, '',
+                'Objeto de auditoría: evalúa exclusivamente esa solicitud original.',
+                'No sustituyas el objeto de auditoría por problemas generales del contexto.',
+                'Usa la evidencia recuperada sólo para evaluar esa solicitud.',
+                '',
                 'Trabajo del productor:', producerText, '',
                 'Evidencia que TÚ recuperaste:',
                 evidence, '',
@@ -627,6 +639,11 @@ var Orchestrator = (function () {
         var reconciliation = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
           system: SYSTEM_POLICY,
           prompt: [
+            'Solicitud original del operador:',
+            operatorRequest, '',
+            'Debes responder exclusivamente a esa solicitud original.',
+            'No sustituyas el objeto de decisión por problemas generales del contexto.',
+            '',
             'Tu análisis original:', producerText, '',
             'Veredicto del auditor:', targetCycle.text, '',
             runtime.audit.blocks_materially
