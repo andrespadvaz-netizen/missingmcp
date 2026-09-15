@@ -1,7 +1,7 @@
 {
   "timeZone": "America/Mexico_City",
   "runtimeVersion": "V8",
-  "dependencies": {"libraries": [{
+  "dependencies": {"enabledAdvancedServices": [{"userSymbol":"Docs","serviceId":"docs","version":"v1"}], "libraries": [{
     "userSymbol": "Engine",
     "libraryId": "1g9BKx5-TShUuUi2w0fZLByFydG8_l1WB74vn-MDOYWc4nd3OGiolDp9o",
     "version": "8",

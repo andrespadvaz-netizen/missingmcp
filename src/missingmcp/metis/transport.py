@@ -60,6 +60,7 @@ class Worker:
             except (httpx.HTTPError, ValueError, TypeError):
                 pass
             return
+        await self.write_worker.reconcile_known_object()
         row = self.queue.next()
         if not row:
             return

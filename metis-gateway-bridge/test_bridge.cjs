@@ -159,3 +159,21 @@ test('Changed counters or receipt keep the incident paused',()=>{
   review.seq=2;assert.throws(()=>f.context.applyAccountingReview_(review));
 });
 console.log(`${tests} total bridge checks passed`);
+
+test('Known-object reconciliation uses readback only and retains prior failure',()=>{
+  const f=fixture();f.data.GATEWAY_PRODUCTIVE_ENABLED='true';let effects=0,readable=false,matching=true;
+  const write={context:'TEST',destination:'docs',provider:'DRIVE',operation:'create',object_id:'folder',policy_revision:'r',policy_hash:'hash',payload:{title:'Test',text:'Body'}};
+  f.context.Engine.Schemas={payloadHash:()=> 'hash'};
+  f.context.Engine.ProductivePolicy={config:()=>({revision:'r'}),destination:()=>({provider:'DRIVE'})};
+  f.context.Engine.ProductiveAdapter={apply:()=>{effects++;return {status:'UNCERTAIN',verified:false,provider_object_id:'known',error:'PROVIDER_HTTP_403'};},
+    inspect:(d,id)=>{assert.equal(id,'known');if(!readable)throw Error('403');return {url:'https://docs.google.com/document/d/known/edit'};},verify:()=>matching};
+  const fingerprint=crypto.createHash('sha256').update(f.context.canonicalWrite_(write)).digest('hex');
+  const call=action=>f.request(1,action,{write,fingerprint});
+  assert.equal(call('write').result.status,'UNCERTAIN');
+  assert.equal(call('write_status').result.status,'UNCERTAIN');readable=true;matching=false;
+  assert.equal(call('write_status').result.status,'UNCERTAIN');matching=true;
+  const result=call('write_status').result;
+  assert.equal(result.status,'CONFIRMED');assert.equal(result.reconciliation.prior_error,'PROVIDER_HTTP_403');
+  assert.equal(call('write').result.status,'CONFIRMED');assert.equal(effects,1);assert.equal(f.level(),'LEVEL_0');
+});
+console.log(`${tests} total bridge checks including readback reconciliation passed`);

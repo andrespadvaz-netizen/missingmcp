@@ -85,6 +85,48 @@ def receipts(queue, execution_id):
 class WriteWorker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
+        self.last_reconciliation = None
+
+    async def reconcile_known_object(self):
+        """Ask only for a receipt; never resend an uncertain mutation."""
+        if self.last_reconciliation is not None and time.monotonic() - self.last_reconciliation < 60:
+            return
+        q = self.queue
+        row = q.db.execute("""SELECT a.* FROM metis_write_actions a
+            JOIN metis_write_pause p ON p.execution_id=a.execution_id
+            WHERE a.status='UNCERTAIN' ORDER BY a.dispatch_seq DESC LIMIT 1""").fetchone()
+        if not row or not row['result_enc']:
+            return
+        self.last_reconciliation = time.monotonic()
+        prior = json.loads(decrypt(q.secret, row['result_enc']))
+        if not prior.get('provider_object_id'):
+            return
+        action = json.loads(decrypt(q.secret, row['action_enc']))
+        wire = {'seq': row['dispatch_seq'], 'id': row['execution_id'], 'fingerprint': row['fingerprint']}
+        try:
+            reply = await self.bridge.call_write('write_status', wire, action)
+        except Exception:
+            return
+        result = reply.get('result', {})
+        if (reply.get('state') != 'DONE' or result.get('status') != 'CONFIRMED'
+                or result.get('verified') is not True
+                or result.get('provider_object_id') != prior['provider_object_id']
+                or result.get('provider') != action['provider']
+                or result.get('reconciliation', {}).get('method') != 'READBACK_KNOWN_OBJECT'):
+            return
+        q.db.execute('BEGIN IMMEDIATE')
+        try:
+            changed = q.db.execute("""UPDATE metis_write_actions SET status='CONFIRMED',result_enc=?
+                WHERE seq=? AND status='UNCERTAIN' AND result_enc=?""",
+                (encrypt(q.secret, json.dumps(result, ensure_ascii=False)), row['seq'], row['result_enc'])).rowcount
+            if changed and not q.db.execute("SELECT 1 FROM metis_write_actions WHERE execution_id=? AND status='UNCERTAIN'", (row['execution_id'],)).fetchone():
+                q.db.execute('DELETE FROM metis_write_pause WHERE execution_id=?', (row['execution_id'],))
+            if changed:
+                self.finish_execution({'id': row['execution_id']}, reconciled=True)
+            q.db.execute('COMMIT')
+        except BaseException:
+            q.db.execute('ROLLBACK')
+            raise
 
     async def step(self, execution):
         q = self.queue
@@ -145,7 +187,7 @@ class WriteWorker:
             raise
         self.finish_execution(execution)
 
-    def finish_execution(self, execution):
+    def finish_execution(self, execution, reconciled=False):
         q = self.queue
         entries = receipts(q, execution["id"])
         if not entries or any(x["status"] in {"PREPARED", "SENT"} for x in entries):
@@ -165,5 +207,5 @@ class WriteWorker:
                 lines.append(f"- Operación {item['ordinal']}: no ejecutada ({item['status']}).")
         result["final_answer"] = "\n".join(lines)
         result["write_receipts"] = entries
-        q.db.execute("UPDATE metis_executions SET status=?,result_enc=? WHERE id=? AND status='APPLYING'",
-                     (status, encrypt(q.secret, json.dumps(result, ensure_ascii=False)), execution["id"]))
+        q.db.execute("UPDATE metis_executions SET status=?,result_enc=? WHERE id=? AND (status='APPLYING' OR (? AND status='REQUIRES_ANDRES'))",
+                     (status, encrypt(q.secret, json.dumps(result, ensure_ascii=False)), execution["id"], reconciled))

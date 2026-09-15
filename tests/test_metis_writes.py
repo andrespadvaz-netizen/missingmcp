@@ -157,3 +157,38 @@ def test_origin_is_persisted_by_client_not_request(q):
     duplicate = q.create('operator', {'request': 'Read', 'idempotency_key': 'read-request-0001'}, 'ANTHROPIC')
     assert duplicate['execution_id'] == value['execution_id']
     assert q.next()['origin_model'] == 'OPENAI'
+
+@pytest.mark.asyncio
+async def test_readback_reconciliation_unpauses_without_replaying(q):
+    eid, row = schedule(q)
+    original = {'status': 'UNCERTAIN', 'verified': False, 'provider_object_id': 'known', 'error': 'PROVIDER_HTTP_403'}
+    await WriteWorker(q, FakeBridge(q, [original])).step(row)
+    class Recovery:
+        calls = []
+        async def call_write(self, kind, wire, action):
+            self.calls.append(kind)
+            assert kind == 'write_status'
+            return {'state': 'DONE', 'result': {'status': 'CONFIRMED', 'verified': True,
+                'provider_object_id': 'known', 'provider': 'NOTION', 'reconciliation':
+                {'method': 'READBACK_KNOWN_OBJECT', 'prior_status': 'UNCERTAIN', 'prior_error': 'PROVIDER_HTTP_403'}}}
+    bridge = Recovery()
+    await WriteWorker(q, bridge).reconcile_known_object()
+    view = q.get('operator', eid)
+    assert view['status'] == 'COMPLETED' and not view['writes_paused']
+    assert view['write_receipts'][0]['reconciliation']['prior_error'] == 'PROVIDER_HTTP_403'
+    assert bridge.calls == ['write_status']
+    assert q.create('operator', {'request': 'Create a note', 'idempotency_key': 'write-request-0001'}) == view
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('known,returned,verified', [(None,'known',True),('known','different',True),('known','known',False)])
+async def test_reconciliation_cannot_guess_or_accept_unverified_objects(q, known, returned, verified):
+    eid, row = schedule(q)
+    await WriteWorker(q, FakeBridge(q, [{'status':'UNCERTAIN','verified':False,'provider_object_id':known}])).step(row)
+    class Recovery:
+        async def call_write(self, kind, wire, action):
+            assert known is not None
+            return {'state':'DONE','result':{'status':'CONFIRMED','verified':verified,'provider_object_id':returned,
+                'provider':'NOTION','reconciliation':{'method':'READBACK_KNOWN_OBJECT'}}}
+    await WriteWorker(q, Recovery()).reconcile_known_object()
+    assert q.get('operator', eid)['writes_paused']
+    assert receipts(q, eid)[0]['status'] == 'UNCERTAIN'

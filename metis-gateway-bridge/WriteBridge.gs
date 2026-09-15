@@ -23,6 +23,11 @@ function dispatchWrite_(p) {
         r.state='DONE'; r.result={status:'UNCERTAIN',verified:false,error:'WRITE_INTERRUPTED',requires_review:true};
         props.setProperty('write_receipt',JSON.stringify(r));
       }
+      if(p.action==='write_status' && r.state==='DONE' && r.result &&
+          r.result.status==='UNCERTAIN' && r.result.provider_object_id) {
+        var recovered=reconcileKnownWrite_(p.write,r.result);
+        if(recovered) { r.result=recovered; props.setProperty('write_receipt',JSON.stringify(r)); }
+      }
       return {id:p.id,seq:p.seq,state:'DONE',result:r.result};
     }
     if(p.seq!==r.seq+1) { return {id:p.id,seq:p.seq,state:'SEQUENCE_GAP'}; }
@@ -43,4 +48,24 @@ function dispatchWrite_(p) {
     props.setProperty('write_receipt',JSON.stringify(r));
     return {id:p.id,seq:p.seq,state:'DONE',result:result};
   } finally { lock.releaseLock(); }
+}
+
+/** Read-back only. Never creates, updates, searches for, or guesses an object. */
+function reconcileKnownWrite_(action, prior) {
+  var previous=Engine.Config.runLevel();
+  if(previous!=='LEVEL_0') { return null; }
+  try {
+    Engine.Config._setRunLevel('LEVEL_3');
+    var policy=Engine.ProductivePolicy.config();
+    if(action.policy_revision!==policy.revision || action.policy_hash!==Engine.Schemas.payloadHash(policy)) { return null; }
+    var d=Engine.ProductivePolicy.destination(action.destination,action.context);
+    if(d.provider!==action.provider || !prior.provider_object_id ||
+        (action.operation==='update' && prior.provider_object_id!==action.object_id)) { return null; }
+    var after=Engine.ProductiveAdapter.inspect(d,prior.provider_object_id);
+    if(!Engine.ProductiveAdapter.verify(action,after)) { return null; }
+    return {status:'CONFIRMED',verified:true,provider:d.provider,provider_object_id:prior.provider_object_id,
+      url:after.url || (d.provider==='NOTION'?'https://www.notion.so/'+prior.provider_object_id.replace(/-/g,''):'https://app.asana.com/0/0/'+prior.provider_object_id),
+      reconciliation:{method:'READBACK_KNOWN_OBJECT',verified_at:new Date().toISOString(),prior_status:prior.status,prior_error:prior.error || null}};
+  } catch(_) { return null; }
+  finally { Engine.Config._setRunLevel(previous); }
 }
