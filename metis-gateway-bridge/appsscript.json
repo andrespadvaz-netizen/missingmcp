@@ -4,13 +4,13 @@
   "dependencies": {"libraries": [{
     "userSymbol": "Engine",
     "libraryId": "1g9BKx5-TShUuUi2w0fZLByFydG8_l1WB74vn-MDOYWc4nd3OGiolDp9o",
-    "version": "5",
+    "version": "6",
     "developmentMode": false
   }]},
   "webapp": {"access": "ANYONE_ANONYMOUS", "executeAs": "USER_DEPLOYING"},
   "oauthScopes": [
     "https://www.googleapis.com/auth/script.external_request",
-    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/calendar.readonly"
   ]
 }

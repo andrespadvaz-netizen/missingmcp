@@ -1,4 +1,4 @@
-/** Transport only. Separate project; Engine library MUST stay pinned to v5.
+/** Transport only. Separate project; Engine library pinned to reviewed v6.
  * One monotonic receipt survives forever; only the latest result is cached.
  * Railway persists it before sending the next sequence. Old sequences never run.
  * Never log requests, results, exceptions or signing/provider credentials.
@@ -6,7 +6,7 @@
 function doPost(e) {
   try {
     var raw = e && e.postData && e.postData.contents;
-    if (!raw || raw.length > 40000) { return json_({error: 'invalid_request'}); }
+    if (!raw || raw.length > 150000) { return json_({error: 'invalid_request'}); }
     var envelope = JSON.parse(raw);
     var secret = PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET');
     if (!secret || secret.length < 32 || typeof envelope.payload !== 'string' || typeof envelope.signature !== 'string') {
@@ -20,10 +20,10 @@ function doPost(e) {
     var p = JSON.parse(envelope.payload);
     if (!Number.isSafeInteger(p.timestamp) || Math.abs(Date.now()/1000-p.timestamp) > 90 ||
         !Number.isSafeInteger(p.seq) || p.seq < 1 || !/^[a-f0-9-]{36}$/.test(p.id) ||
-        !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','status'].indexOf(p.action) < 0) {
+        !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','status','write','write_status'].indexOf(p.action) < 0) {
       return json_({error: 'invalid_request'});
     }
-    return json_(dispatch_(p));
+    return json_(p.action === 'write' || p.action === 'write_status' ? dispatchWrite_(p) : dispatch_(p));
   } catch (_) { return json_({error: 'bridge_failure'}); }
 }
 
@@ -52,6 +52,9 @@ function dispatch_(p) {
     }
     if (p.seq !== receipt.seq + 1) { return {id:p.id, seq:p.seq, state:'SEQUENCE_GAP'}; }
     if (p.action === 'run') {
+      if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) {
+        return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
+      }
       if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 16000) {
         return {id:p.id, seq:p.seq, state:'INVALID_REQUEST'};
       }
@@ -71,10 +74,12 @@ function dispatch_(p) {
     var previous = Engine.Config.runLevel();
     try {
       if (previous !== Engine.Config.LEVELS.LEVEL_0) { throw new Error('unexpected_level'); }
-      Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_2);
+      var productive = props.getProperty('GATEWAY_PRODUCTIVE_ENABLED') === 'true';
+      Engine.Config._setRunLevel(productive ? 'LEVEL_3' : Engine.Config.LEVELS.LEVEL_2);
       var result = Engine.Orchestrator.run(p.request, {
         // First client is Claude. Identity is server-declared, never client-selected.
-        current_model: 'ANTHROPIC',
+        current_model: p.origin_model || 'ANTHROPIC',
+        mandate: {source:'FIXED_POLICY',requests_execution:productive},
         providers: {OPENAI:Engine.OpenAIAdapter.create(), ANTHROPIC:Engine.AnthropicAdapter.create()}
       });
       var output = {
@@ -86,7 +91,10 @@ function dispatch_(p) {
         degradation:result.degradation, blocks:result.blocks,
         reconciliation_stop_reason:result.reconciliation_stop_reason,
         requires_review:result.limits.cost_known !== true,
-        engine_version:5
+        engine_version:6,
+        resolved_context:result.resolved_context,
+        write_plan:result.write_plan || [],
+        write_plan_verified:productive && result.status === 'COMPLETED' && !!result.action_plan && result.action_plan.valid === true
       };
       finish_(props, receipt, output);
     } catch (_) {
@@ -123,7 +131,8 @@ function cached_(props, receipt) {
 
 /** Read-only capability probe: no credential values and no provider calls. */
 function inspectBridge() {
-  return {engine_version:5, level:Engine.Config.runLevel(),
+  return {engine_version:6, level:Engine.Config.runLevel(),
+    productive_enabled:PropertiesService.getScriptProperties().getProperty('GATEWAY_PRODUCTIVE_ENABLED')==='true',
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};
 }

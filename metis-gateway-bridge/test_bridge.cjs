@@ -30,6 +30,7 @@ function fixture() {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(__dirname+'/Bridge.gs','utf8'), context);
+  vm.runInContext(fs.readFileSync(__dirname+'/WriteBridge.gs','utf8'), context);
   function request(seq=1,action='run',override={}) {
     const p = {seq,id:'11111111-1111-4111-8111-111111111111',action,request:'Consulta Metis',
       fingerprint:crypto.createHash('sha256').update('Consulta Metis').digest('hex'),timestamp:Math.floor(Date.now()/1000),...override};
@@ -79,11 +80,50 @@ test('Fail closed on missing secret, invalid signature, stale request and finger
 });
 test('Pin remains immutable and bridge contains no log/trigger/provider endpoint',()=>{
   const manifest=JSON.parse(fs.readFileSync(__dirname+'/appsscript.json'));
-  assert.equal(manifest.dependencies.libraries[0].version,'5');
+  assert.equal(manifest.dependencies.libraries[0].version,'6');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
 });
 console.log(`${tests} bridge checks passed`);
+
+function writeFixture() {
+  const f=fixture();let effects=0;f.data.GATEWAY_PRODUCTIVE_ENABLED='true';
+  f.context.Engine.ProductiveAdapter={apply:()=>{
+    const r=JSON.parse(f.data.write_receipt);assert.equal(r.state,'RUNNING');
+    assert.equal(f.level(),'LEVEL_3');effects++;
+    return {status:'CONFIRMED',verified:true,provider_object_id:'synthetic-object'};
+  }};
+  const write={context:'TEST',payload:{text:'Acentos á y 漢🙂'}};
+  const fingerprint=crypto.createHash('sha256').update(f.context.canonicalWrite_(write)).digest('hex');
+  return {...f,effects:()=>effects,send:(seq=1,action='write',overrides={})=>f.request(seq,action,{write,fingerprint,...overrides})};
+}
+test('Write receipt precedes effect and exact replay cannot duplicate',()=>{
+  const f=writeFixture();assert.equal(f.send().result.status,'CONFIRMED');
+  assert.equal(f.send().result.provider_object_id,'synthetic-object');
+  assert.equal(f.send(1,'write_status').result.status,'CONFIRMED');
+  assert.equal(f.effects(),1);assert.equal(f.level(),'LEVEL_0');
+});
+test('Undelivered write status seals a tombstone against late delivery',()=>{
+  const f=writeFixture();assert.equal(f.send(1,'write_status').result.error,'WRITE_NOT_DELIVERED');
+  assert.equal(f.send().result.status,'REJECTED');assert.equal(f.effects(),0);
+});
+test('Interrupted write reports uncertainty without replay',()=>{
+  const f=writeFixture();f.send();const r=JSON.parse(f.data.write_receipt);r.state='RUNNING';delete r.result;
+  f.data.write_receipt=JSON.stringify(r);
+  assert.equal(f.send(1,'write_status').result.status,'UNCERTAIN');f.send();assert.equal(f.effects(),1);
+});
+test('Disabled, conflicting, stale and out of sequence writes cause zero effects',()=>{
+  const f=writeFixture();assert.equal(f.send(2).state,'SEQUENCE_GAP');
+  assert.equal(f.send(1,'write',{fingerprint:'0'.repeat(64)}).state,'CONFLICT');
+  assert.equal(f.send(1,'write',{timestamp:1}).error,'invalid_request');
+  f.data.GATEWAY_PRODUCTIVE_ENABLED='false';assert.equal(f.send().result.status,'REJECTED');assert.equal(f.effects(),0);
+});
+test('Lost write receipt save preserves RUNNING barrier',()=>{
+  const f=writeFixture(),props=f.context.PropertiesService.getScriptProperties(),save=props.setProperty;
+  let lost=false;props.setProperty=(k,v)=>{if(k==='write_receipt' && JSON.parse(v).state==='DONE' && !lost){lost=true;throw Error('storage cut');}save(k,v);};
+  f.send();assert.equal(f.effects(),1);
+  assert.equal(f.send(1,'write_status').result.status,'UNCERTAIN');assert.equal(f.effects(),1);
+});
 
 function accountingFixture() {
   const f=fixture(); f.request();

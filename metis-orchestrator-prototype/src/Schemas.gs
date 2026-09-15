@@ -15,7 +15,7 @@ var Schemas = (function () {
     MODEL: ['OPENAI', 'ANTHROPIC'],
     AUTHORITY_SOURCE: ['LIVE_OPERATOR', 'FIXED_POLICY'],
     PROVENANCE: ['LIVE_OPERATOR', 'PRE_RETRIEVAL_SOURCE', 'RETRIEVED_CONTENT', 'FIXED_POLICY'],
-    EFFECT: ['READ', 'SIMULATED_WRITE'],
+    EFFECT: ['READ', 'SIMULATED_WRITE', 'WRITE_PLANNED'],
     RECONCILIATION: ['RECONCILABLE', 'NON_RECONCILABLE', 'NOT_APPLICABLE'],
     ACTION_STATUS: ['PLANNED', 'INTENT_RECORDED', 'SENT', 'CONFIRMED', 'FAILED', 'UNCERTAIN', 'SIMULATED'],
     MODEL_ROLE: ['PRODUCER', 'AUDITOR', 'LOCAL']
@@ -143,7 +143,7 @@ var Schemas = (function () {
         errors.push('AuthorityGrant.' + f + ': debe ser array');
       }
     });
-    if (grant.writes_are_simulated_only !== true) {
+    if (grant.writes_are_simulated_only !== true && !(ProductivePolicy.enabled() && grant.writes_are_simulated_only === false)) {
       errors.push('AuthorityGrant.writes_are_simulated_only: debe ser true en Nivel 0-2');
     }
     return errors;

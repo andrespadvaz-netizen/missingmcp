@@ -6,6 +6,7 @@ import json
 import time
 import httpx
 from ..log import private_transport
+from .writes import WriteWorker
 
 
 class Bridge:
@@ -13,9 +14,16 @@ class Bridge:
         self.url, self.secret = url, secret
 
     async def call(self, action, row, request=None):
-        payload = json.dumps({"action": action, "seq": row["seq"], "id": row["id"],
+        return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                               "fingerprint": row["fingerprint"], "request": request,
-                              "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
+                              "origin_model": row["origin_model"] if "origin_model" in row.keys() else "ANTHROPIC"}, row)
+
+    async def call_write(self, action, row, write):
+        return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
+                                 "fingerprint": row["fingerprint"], "write": write}, row)
+
+    async def _call(self, envelope, row):
+        payload = json.dumps({**envelope, "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
         try:
@@ -36,6 +44,7 @@ class Worker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
         self.last_review = None
+        self.write_worker = WriteWorker(queue, bridge)
 
     async def step(self):
         paused = self.queue.paused_execution()
@@ -53,6 +62,9 @@ class Worker:
             return
         row = self.queue.next()
         if not row:
+            return
+        if row["status"] == "APPLYING":
+            await self.write_worker.step(row)
             return
         if row["status"] == "QUEUED" and self.queue.claim(row):
             # From this commit onward a transport failure NEVER causes another run.

@@ -74,6 +74,10 @@ var ToolBroker = (function () {
     var tools = [];
     for (var i = 0; i < grant.allowed_tools.length; i++) {
       var name = grant.allowed_tools[i];
+      if (ProductivePolicy.TOOLS.indexOf(name) >= 0) {
+        tools.push(ProductivePolicy.contract(name, grant.allowed_contexts.length === 1 ? grant.allowed_contexts[0] : null));
+        continue;
+      }
       var isRead = !!READ_TOOLS[name];
       tools.push({
         name: name,
@@ -209,6 +213,11 @@ var ToolBroker = (function () {
       throw Errors.limitExceeded('MAX_TOOL_CALLS', session.tool_calls);
     }
     session.tool_calls++;
+
+    if (ProductivePolicy.TOOLS.indexOf(toolName) >= 0) {
+      ContextResolver.assertReadAllowed(session.scope, session.scope.resolved, true);
+      return ProductivePolicy.invoke(session, toolName, params);
+    }
 
     // --- herramientas de escritura: encolan acción propuesta, no ejecutan.
     if (SimulatedWriteAdapter.isSimulationTool(toolName)) {

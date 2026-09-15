@@ -33,15 +33,17 @@ var AuthorityPolicy = (function () {
       allowed_tools: tools.slice(),
       allowed_operations: operations.slice(),
       allowed_contexts: contexts.slice(),
-      forbidden_effects: Config.FORBIDDEN_EFFECTS.slice(),
-      writes_are_simulated_only: true
+      forbidden_effects: Config.FORBIDDEN_EFFECTS.filter(function(effect) {
+        return !ProductivePolicy.enabled() || ['REAL_EXTERNAL_WRITE','MUTATE_PRODUCTIVE_SOURCE'].indexOf(effect)<0;
+      }),
+      writes_are_simulated_only: tools.indexOf('productive.propose') < 0
     };
   }
 
   /** Techo predeclarado de la corrida, fijado ANTES de Retrieval. */
   function declaredCeiling() {
     return _grant('FIXED_POLICY',
-      READ_TOOLS.concat(SIMULATED_WRITE_TOOLS),
+      READ_TOOLS.concat(ProductivePolicy.enabled() ? ProductivePolicy.TOOLS : SIMULATED_WRITE_TOOLS),
       READ_OPERATIONS.concat(WRITE_OPERATIONS),
       Config.contextNames());
   }
@@ -49,7 +51,7 @@ var AuthorityPolicy = (function () {
   /** Fase 1: sólo lectura, acotada a contextos candidatos. */
   function preRetrievalGrant(candidateContexts) {
     var contexts = (candidateContexts && candidateContexts.length) ? candidateContexts : Config.contextNames();
-    return _grant('FIXED_POLICY', READ_TOOLS, READ_OPERATIONS, contexts);
+    return _grant('FIXED_POLICY', READ_TOOLS.concat(ProductivePolicy.enabled() ? ['productive.inspect'] : []), READ_OPERATIONS, contexts);
   }
 
   /**
@@ -59,12 +61,13 @@ var AuthorityPolicy = (function () {
   function postContextGrant(ceiling, resolvedContext, mandate) {
     assertMandateSource(mandate);
     var tools = READ_TOOLS.slice();
+    if (ProductivePolicy.enabled()) { tools.push('productive.inspect'); }
     var operations = READ_OPERATIONS.slice();
 
     // Las herramientas de escritura simulada sólo se habilitan si el mandato
     // vivo del operador (o una regla fija) pide una ejecución.
     if (mandate.requests_execution === true) {
-      tools = tools.concat(SIMULATED_WRITE_TOOLS);
+      tools = tools.concat(ProductivePolicy.enabled() ? ['productive.propose'] : SIMULATED_WRITE_TOOLS);
       operations = operations.concat(WRITE_OPERATIONS);
     }
 
@@ -98,7 +101,8 @@ var AuthorityPolicy = (function () {
     if (!_isSubset(next.allowed_contexts, previous.allowed_contexts)) { return false; }
     // Los efectos prohibidos sólo pueden crecer.
     if (!_isSubset(previous.forbidden_effects, next.forbidden_effects)) { return false; }
-    if (next.writes_are_simulated_only !== true) { return false; }
+    if (next.writes_are_simulated_only !== true &&
+        (previous.writes_are_simulated_only === true || !ProductivePolicy.enabled())) { return false; }
     return true;
   }
 

@@ -7,6 +7,7 @@ import sqlite3
 import time
 import uuid
 from ..store import encrypt, decrypt
+from . import writes
 
 TERMINAL = {"COMPLETED", "FAILED", "REQUIRES_ANDRES"}
 KEY = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -48,8 +49,14 @@ class Queue:
             status TEXT NOT NULL, created REAL NOT NULL, dispatched REAL,
             result_enc TEXT, UNIQUE(owner, idem))""")
         self.db.execute("CREATE TABLE IF NOT EXISTS metis_pause (execution_id TEXT PRIMARY KEY)")
+        writes.initialize(self.db)
+        columns = {x[1] for x in self.db.execute("PRAGMA table_info(metis_executions)")}
+        if "origin_model" not in columns:
+            self.db.execute("ALTER TABLE metis_executions ADD COLUMN origin_model TEXT NOT NULL DEFAULT 'ANTHROPIC'")
 
-    def create(self, owner, args):
+    def create(self, owner, args, origin_model="ANTHROPIC"):
+        if origin_model not in {"ANTHROPIC", "OPENAI"}:
+            raise RequestError("invalid_origin")
         text, key = validate(args)
         fp = hashlib.sha256(text.encode()).hexdigest()
         self.db.execute("BEGIN IMMEDIATE")
@@ -65,11 +72,12 @@ class Queue:
                 now = time.time()
                 if self.db.execute("SELECT count(*) FROM metis_executions WHERE created>?", (now-3600,)).fetchone()[0] >= 20:
                     raise RequestError("hourly_request_limit")
-                if self.db.execute("SELECT count(*) FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED')").fetchone()[0] >= 5:
+                if self.db.execute("SELECT count(*) FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED','APPLYING')").fetchone()[0] >= 5:
                     raise RequestError("queue_full")
                 eid = str(uuid.uuid4())
                 self.db.execute("INSERT INTO metis_executions (id,owner,idem,fingerprint,request_enc,status,created) VALUES (?,?,?,?,?,'QUEUED',?)",
                                 (eid, owner, key, fp, encrypt(self.secret, text), now))
+                self.db.execute("UPDATE metis_executions SET origin_model=? WHERE id=?", (origin_model, eid))
                 row = self.db.execute("SELECT * FROM metis_executions WHERE id=?", (eid,)).fetchone()
             self.db.execute("COMMIT")
         except BaseException:
@@ -87,6 +95,11 @@ class Queue:
 
     def view(self, row):
         result = json.loads(decrypt(self.secret, row["result_enc"])) if row["result_enc"] else {}
+        plan = result.pop("write_plan", [])
+        if plan:
+            result["write_plan_count"] = len(plan)
+            result["write_receipts"] = writes.receipts(self, row["id"])
+        result["writes_paused"] = bool(self.db.execute("SELECT 1 FROM metis_write_pause LIMIT 1").fetchone())
         return {**result, "execution_id": row["id"], "correlation_id": row["id"],
                 "status": row["status"], "created_at": row["created"],
                 "gateway_paused": bool(self.db.execute("SELECT 1 FROM metis_pause LIMIT 1").fetchone()),
@@ -95,7 +108,7 @@ class Queue:
     def next(self):
         if self.db.execute("SELECT 1 FROM metis_pause LIMIT 1").fetchone():
             return None
-        return self.db.execute("SELECT * FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED') ORDER BY seq LIMIT 1").fetchone()
+        return self.db.execute("SELECT * FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED','APPLYING') ORDER BY seq LIMIT 1").fetchone()
 
     def claim(self, row):
         return self.db.execute("UPDATE metis_executions SET status='DISPATCHED', dispatched=? WHERE id=? AND status='QUEUED'",
@@ -140,6 +153,19 @@ class Queue:
             raise ValueError("invalid_terminal_status")
         self.db.execute("BEGIN IMMEDIATE")
         try:
+            current = self.db.execute("SELECT status FROM metis_executions WHERE id=?", (row["id"],)).fetchone()
+            if not current or current["status"] != "DISPATCHED":
+                self.db.execute("COMMIT")
+                return
+            try:
+                status = writes.schedule(self, row["id"], result)
+            except ValueError:
+                # A malformed signed plan must terminate without provider I/O,
+                # rather than leaving this execution polling forever.
+                result = {**result, "status": "REQUIRES_ANDRES", "write_plan": [],
+                          "write_plan_verified": False, "write_error": "INVALID_WRITE_PLAN",
+                          "final_answer": "El plan no superó la validación. No se ejecutaron escrituras."}
+                status = "REQUIRES_ANDRES"
             if result.get("requires_review"):
                 self.db.execute("INSERT OR IGNORE INTO metis_pause VALUES (?)", (row["id"],))
             self.db.execute("UPDATE metis_executions SET status=?,result_enc=? WHERE id=? AND status='DISPATCHED'",
