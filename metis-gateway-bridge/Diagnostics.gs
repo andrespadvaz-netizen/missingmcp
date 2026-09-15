@@ -26,6 +26,43 @@ function inspectCachedTransport() {
   } catch(e) { console.log('Cache decoding failed: '+e.message); }
 }
 
+/** Read-only destination probe. No model calls or external mutations. */
+/** Read-only Notion diagnostic; logs no credentials or page content. */
+function checkNotionAccessDetails() {
+  var d=Engine.ProductivePolicy.config().destinations.metis_notes;
+  if (!d || d.provider!=="NOTION") { throw new Error("Destination unavailable"); }
+  ["users/me","pages/"+encodeURIComponent(d.root_id),"blocks/"+encodeURIComponent(d.root_id)].forEach(function(path) {
+    var r=UrlFetchApp.fetch("https://api.notion.com/v1/"+path,{method:"get",muteHttpExceptions:true,followRedirects:false,headers:{Authorization:"Bearer "+Engine.Config.secret("NOTION_API_KEY"),"Notion-Version":Engine.Config.NOTION_VERSION}});
+    var body=JSON.parse(r.getContentText());
+    console.log(JSON.stringify({endpoint:path.split("/")[0],status:r.getResponseCode(),object:body.object,code:body.code,bot_name:path==="users/me"?body.name:undefined}));
+  });
+}
+
+function inspectProductiveDestinations() {
+  var policy=Engine.ProductivePolicy.config();
+  Object.keys(policy.destinations || {}).forEach(function(key) {
+    var d=policy.destinations[key];
+    try {
+      var snap=Engine.ProductiveAdapter.inspect(d,d.root_id);
+      console.log(JSON.stringify({destination:key,provider:d.provider,ok:true,kind:snap.kind}));
+    } catch(e) {
+      console.log(JSON.stringify({destination:key,provider:d.provider,ok:false,error:Engine.Errors.redactText(e.message)}));
+    }
+  });
+}
+
+/** Operator-authorized read-only probe; restores the level on every exit. */
+function checkProductiveReadAccess() {
+  var lock=LockService.getScriptLock();
+  if (!lock.tryLock(100)) { throw new Error('Bridge busy'); }
+  var previous=Engine.Config.runLevel();
+  try {
+    if(previous!=='LEVEL_0') { throw new Error('Unexpected run level'); }
+    Engine.Config._setRunLevel('LEVEL_3');
+    inspectProductiveDestinations();
+  } finally { Engine.Config._setRunLevel(previous); lock.releaseLock(); }
+}
+
 /** Operator-only incident closure. Not exposed through doPost or the client tools.
  * Evidence: provider usage + Andres' confirmation of exclusive use in this window.
  * No model invocation, limit change, success substitution or engine source edit.

@@ -80,7 +80,7 @@ test('Fail closed on missing secret, invalid signature, stale request and finger
 });
 test('Pin remains immutable and bridge contains no log/trigger/provider endpoint',()=>{
   const manifest=JSON.parse(fs.readFileSync(__dirname+'/appsscript.json'));
-  assert.equal(manifest.dependencies.libraries[0].version,'7');
+  assert.equal(manifest.dependencies.libraries[0].version,'8');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
 });

@@ -126,4 +126,20 @@ test('Productive tool failure cannot report an executed write',()=>{
   const result=c.Orchestrator.run('Contexto: TEST\nCrea una nota.',{current_model:'ANTHROPIC',providers:{ANTHROPIC:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
   assert.equal(result.status,'REQUIRES_ANDRES');assert.equal(result.write_plan.length,0);assert(result.final_answer.startsWith('No se ejecutó ninguna escritura.'));
 });
+test('Tool failures are available to the next producer turn',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_3');
+  const producer=c.Fixtures.scriptedProvider('ANTHROPIC',[
+    {tool_requests:[{name:'productive.inspect',arguments:{destination:'missing'},id:'bad'}]},
+    {text:'Bloqueado por destino no permitido.'}]);
+  c.Orchestrator.run('Contexto: TEST\nCrea una nota.',{current_model:'ANTHROPIC',providers:{ANTHROPIC:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
+  assert(producer.calls[1].prompt.includes('RESULTADOS DEL ÚLTIMO LOTE'));
+  assert(producer.calls[1].prompt.includes('"ok":false'));
+});
+test('Repeated inspections cannot finish as a completed write',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_3');const backend=asana();
+  const producer=c.Fixtures.scriptedProvider('ANTHROPIC',Array.from({length:4},()=>({text:'Primero inspecciono.',tool_requests:[{name:'productive.inspect',arguments:{destination:'tasks'},id:'inspect'}]})));
+  const result=c.Orchestrator.run('Contexto: TEST\nCrea una tarea.',{current_model:'ANTHROPIC',providers:{ANTHROPIC:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
+  assert.notEqual(result.status,'COMPLETED');assert.equal(result.write_plan.length,0);
+  assert(backend.calls.every(x=>x.method==='get'));
+});
 console.log(`${tests} productive policy/adapter/engine tests passed; no network used.`);
