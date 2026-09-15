@@ -5,9 +5,11 @@ import os
 import sys
 import time
 import traceback
+from contextvars import ContextVar
 from typing import Any, TextIO
 
 _file: TextIO | None = None
+private_transport = ContextVar('private_transport', default=False)
 
 # Optional tee of every emitted record (telemetry.py ships the log stream to
 # PostHog through this). The sink sees the exact record dict that went to
@@ -44,6 +46,8 @@ class _StructuredHandler(logging.Handler):
     uvicorn's plain 'INFO: Started server process' lines showed up as errors."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        if private_transport.get():
+            return  # Redirect URLs can grant temporary access to a tool result.
         try:
             fields: dict[str, Any] = {"logger": record.name,
                                       "message": record.getMessage()}

@@ -118,7 +118,7 @@ function cached_(props, receipt) {
   var packed = '';
   for (var i=0;i<receipt.chunks;i++) {packed += props.getProperty('result_'+i) || '';}
   return {id:receipt.id, seq:receipt.seq, state:'DONE',
-    result:JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(packed))).getDataAsString())};
+    result:JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(packed), 'application/x-gzip')).getDataAsString('UTF-8'))};
 }
 
 /** Read-only capability probe: no credential values and no provider calls. */

@@ -5,6 +5,7 @@ import hmac
 import json
 import time
 import httpx
+from ..log import private_transport
 
 
 class Bridge:
@@ -16,12 +17,16 @@ class Bridge:
                               "fingerprint": row["fingerprint"], "request": request,
                               "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-        async with httpx.AsyncClient(timeout=390, follow_redirects=True) as client:
-            response = await client.post(self.url, json={"payload": payload, "signature": signature})
-            response.raise_for_status()
-            if len(response.content) > 500000:
-                raise ValueError("bridge_response_too_large")
-            data = response.json()
+        token = private_transport.set(True)
+        try:
+            async with httpx.AsyncClient(timeout=390, follow_redirects=True) as client:
+                response = await client.post(self.url, json={"payload": payload, "signature": signature})
+                response.raise_for_status()
+                if len(response.content) > 500000:
+                    raise ValueError("bridge_response_too_large")
+                data = response.json()
+        finally:
+            private_transport.reset(token)
         if not isinstance(data, dict) or data.get("id") != row["id"] or data.get("seq") != row["seq"]:
             raise ValueError("bridge_correlation_mismatch")
         return data

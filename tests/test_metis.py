@@ -8,6 +8,34 @@ from missingmcp.metis.transport import Worker
 from missingmcp.adapters.metis import MetisAdapter
 from missingmcp.adapters.base import LoginError, SessionExpired
 
+
+@pytest.mark.asyncio
+async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, capsys):
+    import logging
+    from missingmcp.log import _StructuredHandler, private_transport
+    from missingmcp.metis.transport import Bridge
+    real_client = httpx.AsyncClient
+    handler = _StructuredHandler()
+    logger = logging.getLogger('httpx')
+    prior = logger.level
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    def response(request):
+        if request.url.host == 'bridge.test':
+            return httpx.Response(302, headers={'location':'https://result.test/?user_content_key=PRIVATE_RESULT'})
+        return httpx.Response(200,json={'id':'id-1','seq':1,'state':'DONE'})
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kw:real_client(transport=httpx.MockTransport(response),**kw))
+    try:
+        await Bridge('https://bridge.test/', 'secret').call('status',{'id':'id-1','seq':1,'fingerprint':'fp'})
+        assert not private_transport.get()
+        logger.info('ordinary request remains visible')
+        output = capsys.readouterr().out
+        assert 'PRIVATE_RESULT' not in output
+        assert 'ordinary request remains visible' in output
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior)
+
 SECRET = 'storage-secret-' * 4
 REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001'}
 
