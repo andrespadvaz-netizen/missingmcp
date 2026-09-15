@@ -118,8 +118,11 @@ No se aumentaron presupuestos ni se creó un servicio de pago nuevo.
 
 ## Operación y revisión
 
-Instrucción de uso: «Usa Metis. Contexto: Metis. Audita [objeto y resultado esperado]».
-Para consultas simples puede sustituirse «Audita» por la acción deseada. El usuario
+Instrucción de uso actualizada el 15-sep-2026: «Usa Metis para auditar esta propuesta».
+Si el proyecto y la propuesta ya están disponibles en la conversación, el cliente
+los incorpora sin pedir que Andrés los repita. Sólo pregunta cuando faltan o son
+ambiguos. [Validación de continuidad de contexto](metis-gateway-context-v1.md).
+Para consultas simples puede sustituirse «auditar» por la acción deseada. El usuario
 no elige proveedor ni administra claves de idempotencia. El cliente debe conservar
 la solicitud y esperar el estado terminal. Ante FAILED, consulta el mismo ID.
 
