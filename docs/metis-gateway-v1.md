@@ -1,16 +1,19 @@
-# Metis Gateway v1 — desplegado, pausado por costo incierto
+# Metis Gateway v1 — arquitectura, operación y evidencia
 
 ## PIE y estado
 
-Techo técnico actual: **7/10**. Claude, Railway y el puente Google están conectados.
-Las pruebas reales simple y CROSS_AUDIT completaron con respuesta íntegra. Una cuarta
-solicitud produjo ENGINE_INTERRUPTED con costo desconocido; la pausa automática
-impide nuevos gastos. La causa de la interrupción no está acreditada. No repetir
-la solicitud ni levantar la pausa sin reconciliar su resultado y costo.
+Techo técnico declarado: **7/10**. Aceptación funcional completada el 15-sep-2026:
+Claude recibe una respuesta completa desde una solicitud natural y el reintento
+tras redespliegue devuelve exactamente el mismo resultado. Véase el
+[informe de aceptación](metis-gateway-acceptance-v1.md), que prevalece sobre
+las secciones históricas de este documento. No se acredita disponibilidad continua
+ni valor neto de uso prolongado con una prueba de aceptación.
 CANON consultado en vivo: v2.6, 15-ago-2026. La decisión vigente de 31-ago-2026
 levanta la moratoria; no autoriza automáticamente componentes con nuevo costo/riesgo.
 
-**Objetivo completo: NO CUMPLIDO. No crear el tag baseline del Gateway todavía.**
+La conciliación del incidente 4 sumó una sola vez US$0.072375 estimados por consumo
+y retiró la pausa. El fallo original sigue FAILED, sin respuesta final y sin repetición.
+Google informa UNKNOWN; la causa concreta de aquella interrupción sigue sin acreditarse.
 
 ## Gap y elección
 
@@ -19,7 +22,7 @@ técnicas para usarlo desde una conversación. El Gateway conserva la ejecución
 devuelve su respuesta al cliente. Su beneficio deberá verificarse con uso real;
 hasta esa prueba sigue siendo costo de implementación, no MEM demostrado.
 
-Arquitectura elegida para validar:
+Arquitectura implementada y acreditada:
 
 1. Claude como primer cliente, mediante su conector MCP remoto.
 2. Adaptador `/metis/mcp` en el MissingMCP de Andrés ya existente en Railway.
@@ -42,15 +45,15 @@ No hay modelo de routing nuevo, vector DB, nueva base de datos gestionada ni tri
 | Una llamada síncrona desde GPT Actions | Su límite de 45 segundos no cubre corridas de varios minutos. |
 | Apps Script Execution API directa | Exige proyecto Cloud estándar compartido con el cliente OAuth; no se acreditó esa configuración. |
 | Todo en Apps Script con Properties y triggers | Límites de almacenamiento y programación menos adecuados para historial durable. |
-| Reusar Railway + puente a biblioteca v5 | Reutiliza OAuth, TLS, proceso persistente y volumen; preserva motor. Falta validar biblioteca en vivo. |
+| Reusar Railway + puente a biblioteca v5 | Reutiliza OAuth, TLS, proceso persistente y volumen; biblioteca validada con simple y CROSS_AUDIT reales. |
 
 ### Infraestructura verificada
 
 - Railway: proyecto `heartfelt-healing`, servicio `missingmcp`, volumen `missingmcp-volume`.
 - URL actual: `https://missingmcp-production.up.railway.app`.
-- Una réplica; serverless deshabilitado; auto deploy desde `main`.
+- Una réplica; serverless deshabilitado; auto deploy desde `metis/orchestration-gateway-v1`.
 - Despliegue anterior: `10810a56-6843-4cfe-993a-2ac606359c59`.
-- No se modificó configuración ni se creó servicio de pago.
+- Se configuraron las tres variables Metis y la rama autorizada; se reutilizó el servicio existente.
 - Apps Script v5 descargado y comparado: 38 archivos coinciden con baseline.
 
 ## Contrato de ejecución
@@ -107,7 +110,7 @@ No se añade override a `METIS_LIMITS`.
 - La cola conserva historial y recibos; no hay purga automática. Una política de retención
   deberá preservar recibos, ser autorizada y no borrar evidencia antes de acreditar el DoD.
 
-## Despliegue — autorizado, en validación
+## Historial del despliegue autorizado
 
 Andrés autorizó expresamente crear y publicar el puente con sus permisos de lectura
 y llamadas externas. Se resolvió el bloqueo anterior de aprobación.
@@ -141,7 +144,7 @@ configurar firma secreta y publicar el puente autenticado por HMAC. Esto amplía
 superficie de invocación del motor; no cambia el código ni los límites del motor.
 No se solicita un nuevo servicio de pago ni ampliar presupuesto de modelos.
 
-Pasos tras aprobación:
+Pasos de reconstrucción en otro entorno autorizado:
 
 1. `node scripts/metis-bridge-project.cjs` crea/reutiliza sólo el proyecto separado,
    sube código y verifica lectura posterior. Rechaza el ID del motor.
@@ -166,7 +169,7 @@ ejecución pendiente antes de reactivar. No restaurar datos antiguos como rollba
 de código. Desactivar la publicación del puente cuando ya no haya corrida activa.
 Motor v5 y otros despliegues Google permanecen intactos.
 
-## Validación y límites de la evidencia
+## Validación inicial y límites de la evidencia (antes de conciliar)
 
 - CI Linux del código desplegado `85cf8b6`: **345 pruebas Python PASS**, 9 del puente
   PASS, motor 168 tests / 898 assertions PASS y 9 guardas PASS.
@@ -214,13 +217,15 @@ Motor v5 y otros despliegues Google permanecen intactos.
 - [Google: Execution API](https://developers.google.com/apps-script/api/how-tos/execute)
 - [Google: crear proyecto](https://developers.google.com/apps-script/api/reference/rest/v1/projects/create)
 
-## Fila de Chat Log propuesta — todavía no registrada
+## Fila histórica propuesta antes del cierre
 
 | Tema | Fecha | Modelo | Proyecto | Estado | Link |
 |---|---|---|---|---|---|
 | Gateway v1: simple y CROSS_AUDIT aprobados; pausa por ejecución con costo incierto | 2026-09-14 | ChatGPT | Metis | En curso | https://github.com/andrespadvaz-netizen/missingmcp/tree/metis/orchestration-gateway-v1 |
 
-No hay decisión canónica ni acreditación nueva registrada. Este texto documenta progreso.
+Esta fila describe el estado previo a la conciliación. El registro de cierre se
+documenta en el informe de aceptación; no confundir esta propuesta histórica con
+el estado actual ni crear una segunda fila desde aquí.
 
 
 ## Conciliación del incidente 4 — 14 septiembre, 23:25 México
@@ -252,3 +257,22 @@ la solicitud en éxito. Pruebas específicas:31 Python y12 puente PASS.
 Evidencia local íntegra: `.localdata/reconciliation-seq4.json` (excluida de Git),
 SHA256 `8ebe9f1018bb9766dd073ec8bbadd70f681bae9bb3f0353f38a6eba40f806571`.
 No incluye claves secretas ni el corpus recuperado.
+
+
+### Resultado verificado de la conciliación
+
+El 15-sep a05:28:37UTC se aplicó el ajuste. Lectura posterior Google: diario
+US$0.47216625 y mensualUS$5.2114525. Claude recibió el mismo execution_id con
+`cost_usd:0.072375`, `cost_known:true`, `requires_review:false`,
+`gateway_paused:false` y `original_failure` completo. EstadoFAILED conservado.
+No se creó nueva ejecución. Railway desplegó5150cf2 y entregó este resultado.
+Una prueba Linux detectó espera inicial dependiente del reloj del host; corregida
+por094479d con primera revisión inmediata y regresión con reloj iniciando en cero.
+La cifra es estimación derivada de consumo, no factura final de Anthropic.
+
+
+Validación final del cambio de recuperación: CI Linux run34933250727 SUCCESS,
+352 pruebas Python,12 del puente,168 del motor/898 assertions y9 guardas PASS.
+[CI](https://github.com/andrespadvaz-netizen/missingmcp/actions/runs/34933250727).
+Código094479d desplegado con éxito en Railway,e03b4bc1-dd34-4313-ab49-9e60de677ab6.
+La conciliación contable queda cerrada. No equivale al DoD final del Gateway.
