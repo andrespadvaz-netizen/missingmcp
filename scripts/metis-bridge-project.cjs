@@ -28,13 +28,25 @@ async function main() {
   }
   if(state.scriptId===engine) throw new Error('Refusing to modify baseline engine');
   const files=[{name:'appsscript',type:'JSON',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','appsscript.json'),'utf8')},
-    {name:'Bridge',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8')}];
+    {name:'Bridge',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8')},
+    {name:'Diagnostics',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','Diagnostics.gs'),'utf8')}];
   await api('/'+state.scriptId+'/content','PUT',{files});
   const check=await api('/'+state.scriptId+'/content');
   for(const file of files) {
     if(check.files.find(f=>f.name===file.name)?.source.trim()!==file.source.trim()) throw new Error('Content verification failed');
   }
+  if(process.argv.includes('--deploy')) {
+    if(state.deployment) throw new Error('Deployment already recorded; inspect before updating');
+    const version=await api('/'+state.scriptId+'/versions','POST',{description:'Gateway v1 transport candidate; frozen engine library v5'});
+    state.versionNumber=version.versionNumber;
+    fs.writeFileSync(statePath,JSON.stringify(state,null,2));
+    state.deployment=await api('/'+state.scriptId+'/deployments','POST',{
+      versionNumber:version.versionNumber,manifestFileName:'appsscript',
+      description:'Metis Gateway v1 bridge — HMAC authenticated; engine v5'});
+    fs.writeFileSync(statePath,JSON.stringify(state,null,2));
+  }
   console.log(JSON.stringify({scriptId:state.scriptId,files_verified:files.length,
-    editor:'https://script.google.com/home/projects/'+state.scriptId+'/edit',deployed:false}));
+    editor:'https://script.google.com/home/projects/'+state.scriptId+'/edit',
+    deployed:!!state.deployment, deployment:state.deployment}));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});

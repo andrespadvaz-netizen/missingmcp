@@ -102,12 +102,19 @@ No se añade override a `METIS_LIMITS`.
 - La cola conserva historial y recibos; no hay purga automática. Una política de retención
   deberá preservar recibos, ser autorizada y no borrar evidencia antes de acreditar el DoD.
 
-## Despliegue propuesto — pendiente de aprobación
+## Despliegue — autorizado, en validación
 
-La revisión automática bloqueó crear el proyecto Google y subir código porque constituye
-un componente externo nuevo. **No se creó el proyecto ni se publicó endpoint.**
+Andrés autorizó expresamente crear y publicar el puente con sus permisos de lectura
+y llamadas externas. Se resolvió el bloqueo anterior de aprobación.
 
-Acción concreta pendiente: crear `Metis Orchestration Gateway v1 — bridge` en la cuenta
+- Proyecto creado: `1kO_QM5HgBgG10O1wCTIuqeHgB_GfFRrPXyNnGf4_xr6LrzNsuZbchMBZ`.
+- Puente publicado v1: `AKfycbzQsyCh1k2aGCib_8TVBbWvrGCNcyAUZiGbg2Ho-JoDC6w16jMaBuQfzdvzJyUp_Typ`.
+- Prueba en Google: engine_version=5, LEVEL_0, providers_ready=true.
+- Prueba HTTP real sin firma: responde `unauthorized`, sin ejecución del motor.
+- Claves iniciales generadas en Script Properties, sin escribir valores en código/logs.
+- Railway y cliente: todavía pendientes de activación y prueba real.
+
+Acción concreta autorizada: crear `Metis Orchestration Gateway v1 — bridge` en la cuenta
 Google de Andrés, subir los dos archivos revisados y vincular biblioteca v5. Después,
 autorizar su ejecución con acceso de lectura a Drive/Calendar y llamadas externas,
 configurar firma secreta y publicar el puente autenticado por HMAC. Esto amplía la
