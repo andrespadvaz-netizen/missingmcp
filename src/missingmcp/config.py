@@ -45,6 +45,9 @@ class Config:
     posthog_host: str             # server-side ingestion host (EU cloud by default)
     posthog_web_host: str         # posthog-js api_host — the managed reverse proxy
     posthog_ui_host: str          # PostHog app host; posthog-js needs it behind a proxy
+    metis_bridge_url: str = ""
+    metis_bridge_secret: str = ""
+    metis_operator_key: str = ""
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -60,6 +63,14 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     data_dir = env.get("DATA_DIR", "/data")
     public_url = env.get("PUBLIC_URL", "http://localhost:8080").rstrip("/")
     cmd = env.get("GARMIN_MCP_CMD", "garmin-mcp").split()
+    metis = [env.get(name, "") for name in
+             ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
+    if any(metis):
+        import re
+        if not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0]) or any(len(x) < 32 for x in metis[1:]):
+            raise ValueError("Metis requires an Apps Script /exec URL and two secrets of at least 32 characters")
+        if metis[1] == metis[2] or secret in metis[1:]:
+            raise ValueError("Metis signing, operator and storage secrets must be distinct")
     return Config(
         gateway_secret=secret,
         public_url=public_url,
@@ -67,6 +78,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         data_dir=data_dir,
         db_path=env.get("DB_PATH", os.path.join(data_dir, "gateway.db")),
         garmin_mcp_cmd=cmd,
+        metis_bridge_url=metis[0],
+        metis_bridge_secret=metis[1],
+        metis_operator_key=metis[2],
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),
         worker_idle_ttl=int(env.get("WORKER_IDLE_TTL", "900")),

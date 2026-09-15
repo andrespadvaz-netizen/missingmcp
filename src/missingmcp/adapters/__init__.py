@@ -21,4 +21,7 @@ def build_adapters(config) -> dict:
     if config.whoop_client_id and config.whoop_client_secret:
         from .whoop import WhoopAdapter
         adapters["whoop"] = WhoopAdapter(config)
+    if config.metis_bridge_url:
+        from .metis import MetisAdapter
+        adapters["metis"] = MetisAdapter(config)
     return adapters

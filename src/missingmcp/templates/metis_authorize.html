@@ -1,0 +1,13 @@
+<div class="auth">
+  <h1>Conectar Metis</h1>
+  <p class="sub">Conecta tu conversación con Metis para enviar solicitudes y recuperar sus respuestas.</p>
+  <div class="note">Las solicitudes pueden consumir el presupuesto de modelos ya autorizado.
+    Se guardan cifradas junto con sus resultados para poder recuperarlas si cierras la conversación.
+    El motor conserva sus límites y no ejecuta escrituras externas reales.</div>
+  {ERROR}
+  <form method="post" action="{AUTHORIZE_ACTION}">
+    {OAUTH_FIELDS}
+    <label>Clave de conexión de Metis<input name="metis_key" type="password" required autocomplete="off"></label>
+    <button class="btn" type="submit">Conectar</button>
+  </form>
+</div>

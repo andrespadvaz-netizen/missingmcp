@@ -147,13 +147,14 @@ async def handle_mcp(request, method, adapter, conn, manager, config, secret, ra
         # valid Bearer, but the account blob is gone → re-authorize to self-heal
         return _reauth_required(config, adapter)
 
-    tool = _mcp_tool(body)
+    # Metis requests/results and client-supplied metadata stay off telemetry.
+    tool = "metis-request" if adapter.name == "metis" else _mcp_tool(body)
     if tool:
         try:
             store.record_usage(conn, adapter.name, key, tool)
         except Exception:  # noqa: BLE001 - usage metrics must never break a request
             pass
-    ph_event = _mcp_event(body, adapter.name)
+    ph_event = None if adapter.name == "metis" else _mcp_event(body, adapter.name)
 
     if is_local(adapter.forward):
         try:
@@ -162,7 +163,10 @@ async def handle_mcp(request, method, adapter, conn, manager, config, secret, ra
             log_error("local-forward-auth-stale", adapter=adapter.name, account=key)
             return _reauth_required(config, adapter)
         except Exception as e:  # noqa: BLE001 - a local forward must never leak a raw 500
-            log_exc("local-forward-error", e, adapter=adapter.name, account=key, tool=tool)
+            if adapter.name == "metis":
+                log_error("local-forward-error", adapter="metis")
+            else:
+                log_exc("local-forward-error", e, adapter=adapter.name, account=key, tool=tool)
             return JSONResponse({"error": "bad_gateway"}, status_code=502)
         ms = int((time.monotonic() - t0) * 1000)
         log("mcp-response", adapter=adapter.name, account=key, tool=tool,

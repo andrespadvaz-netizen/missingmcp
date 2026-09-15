@@ -1,0 +1,167 @@
+# Metis Gateway v1 — implementación pendiente de despliegue
+
+## PIE y estado
+
+Techo técnico actual: **7/10**. Código y pruebas locales disponibles; no hay aún
+prueba del puente en Google, despliegue del Gateway ni cliente conversacional acreditado.
+Confianza alta en la evidencia local, pendiente en ejecución entre plataformas.
+CANON consultado en vivo: v2.6, 15-ago-2026. La decisión vigente de 31-ago-2026
+levanta la moratoria; no autoriza automáticamente componentes con nuevo costo/riesgo.
+
+**Objetivo completo: NO CUMPLIDO. No crear el tag baseline del Gateway todavía.**
+
+## Gap y elección
+
+El motor está acreditado, pero Andrés todavía tendría que operar entradas y salidas
+técnicas para usarlo desde una conversación. El Gateway conserva la ejecución y
+devuelve su respuesta al cliente. Su beneficio deberá verificarse con uso real;
+hasta esa prueba sigue siendo costo de implementación, no MEM demostrado.
+
+Arquitectura elegida para validar:
+
+1. Claude como primer cliente, mediante su conector MCP remoto.
+2. Adaptador `/metis/mcp` en el MissingMCP de Andrés ya existente en Railway.
+3. Cola y resultados cifrados en SQLite sobre el volumen existente.
+4. Proyecto Apps Script **separado**, puente firmado que consume `Engine` versión 5.
+5. Engine conserva contexto, recuperación, routing, auditoría, reconciliación,
+   proveedores, credenciales, presupuesto y políticas. El puente no los reimplementa.
+
+El Gateway expone sólo `metis_create_execution` y `metis_get_execution`.
+La primera llamada devuelve identidad y estado; un worker independiente continúa.
+No hay modelo de routing nuevo, vector DB, nueva base de datos gestionada ni triggers.
+
+### Alternativas evaluadas
+
+| Alternativa | Resultado |
+|---|---|
+| Una llamada síncrona desde GPT Actions | Su límite de 45 segundos no cubre corridas de varios minutos. |
+| Apps Script Execution API directa | Exige proyecto Cloud estándar compartido con el cliente OAuth; no se acreditó esa configuración. |
+| Todo en Apps Script con Properties y triggers | Límites de almacenamiento y programación menos adecuados para historial durable. |
+| Reusar Railway + puente a biblioteca v5 | Reutiliza OAuth, TLS, proceso persistente y volumen; preserva motor. Falta validar biblioteca en vivo. |
+
+### Infraestructura verificada
+
+- Railway: proyecto `heartfelt-healing`, servicio `missingmcp`, volumen `missingmcp-volume`.
+- URL actual: `https://missingmcp-production.up.railway.app`.
+- Una réplica; serverless deshabilitado; auto deploy desde `main`.
+- Despliegue anterior: `10810a56-6843-4cfe-993a-2ac606359c59`.
+- No se modificó configuración ni se creó servicio de pago.
+- Apps Script v5 descargado y comparado: 38 archivos coinciden con baseline.
+
+## Contrato de ejecución
+
+Crear acepta exclusivamente `request` (1–16000 bytes UTF-8) e `idempotency_key`
+(16–128 caracteres ASCII de letras, dígitos, guion o guion bajo). La misma clave
+y el mismo texto devuelven la misma ejecución; texto distinto con la misma clave
+produce conflicto. El usuario no selecciona modelo ni eleva límites o autoridad.
+
+Estados: `QUEUED` → `DISPATCHED` → `COMPLETED`, `FAILED` o `REQUIRES_ANDRES`.
+La identidad UUID del Gateway también es el `correlation_id`. El resultado conserva
+por separado `engine_execution_id`, `engine_status`, ruta, costo conocido/desconocido,
+límites, auditoría, handoff, degradación y el `final_answer` íntegro.
+
+El origen lógico de este primer cliente se declara en servidor como `ANTHROPIC`.
+El motor corre con LEVEL_2 temporal (escrituras simuladas) y restaura LEVEL_0.
+No se añade override a `METIS_LIMITS`.
+
+### Reintentos y cortes
+
+- SQLite confirma el registro antes de enviar al puente; cliente y worker no comparten vida útil.
+- El puente mantiene un número de secuencia monotónico y una huella SHA-256.
+- Confirma su recibo antes de llamar al motor y mantiene el bloqueo durante la ejecución.
+- Una secuencia repetida devuelve su resultado; una antigua jamás vuelve a ejecutar.
+- El puente retiene sólo el resultado más reciente, comprimido y dividido en propiedades.
+  El Gateway lo guarda durablemente antes de enviar la siguiente secuencia.
+- Una consulta de estado que llega antes que una solicitud retrasada cierra esa secuencia
+  como `DISPATCH_NOT_DELIVERED`, con costo cero; la solicitud retrasada queda bloqueada.
+- Si el proceso Google terminó sin resultado, devuelve `ENGINE_INTERRUPTED`, costo
+  desconocido y revisión requerida. No se inventa un ID del motor.
+- Si no se puede reconciliar durante 15 minutos, `FAILED/TRANSPORT_UNCERTAIN` pausa
+  persistentemente nuevas corridas. Las ya en cola muestran `gateway_paused`.
+- No existe reintento automático de una corrida pagada. Una revisión humana es necesaria
+  para resolver una pausa, cotejar recibo/costos y recuperar el resultado antes de reabrir.
+- Nunca borrar/reiniciar secuencias ni restaurar SQLite a un punto anterior sin reconciliar
+  el recibo del puente. Ante una diferencia se falla cerrado.
+
+## Seguridad y límites
+
+- Reutiliza OAuth 2.1, PKCE y límites del proxy. Los tokens son específicos del adaptador.
+- La clave de conexión es exclusiva de Metis; no es una clave de proveedor.
+- La firma servidor→puente usa otra clave de al menos 32 caracteres, HMAC-SHA256
+  y ventana temporal de 90 segundos. El puente rechaza ausencia, firma o huella inválidas.
+- La URL pública de Apps Script sería accesible desde Internet, pero **no ejecuta** sin firma.
+- La clave de cifrado existente, la de conexión y la de firma deben ser distintas.
+- Las credenciales de OpenAI, Anthropic, Notion y Asana permanecen en la biblioteca.
+- Solicitudes y resultados Railway cifrados AES-GCM. El caché Google usa protección
+  de acceso de Script Properties, sin una capa de cifrado propia adicional.
+- No se envían argumentos, respuestas ni metadata suministrada por el cliente a PostHog.
+- Ingreso: máximo cinco pendientes y veinte nuevas solicitudes por hora; además de
+  los límites económicos del motor. Duplicados no consumen esas cuotas nuevamente.
+- Resultado del puente: máximo 360000 caracteres comprimidos/base64. Si lo excede,
+  falla explícitamente y pausa; nunca presenta una respuesta truncada como completa.
+- La cola conserva historial y recibos; no hay purga automática. Una política de retención
+  deberá preservar recibos, ser autorizada y no borrar evidencia antes de acreditar el DoD.
+
+## Despliegue propuesto — pendiente de aprobación
+
+La revisión automática bloqueó crear el proyecto Google y subir código porque constituye
+un componente externo nuevo. **No se creó el proyecto ni se publicó endpoint.**
+
+Acción concreta pendiente: crear `Metis Orchestration Gateway v1 — bridge` en la cuenta
+Google de Andrés, subir los dos archivos revisados y vincular biblioteca v5. Después,
+autorizar su ejecución con acceso de lectura a Drive/Calendar y llamadas externas,
+configurar firma secreta y publicar el puente autenticado por HMAC. Esto amplía la
+superficie de invocación del motor; no cambia el código ni los límites del motor.
+No se solicita un nuevo servicio de pago ni ampliar presupuesto de modelos.
+
+Pasos tras aprobación:
+
+1. `node scripts/metis-bridge-project.cjs` crea/reutiliza sólo el proyecto separado,
+   sube código y verifica lectura posterior. Rechaza el ID del motor.
+2. Ejecutar `inspectBridge` en Google; acreditar acceso a la biblioteca y presencia
+   de credenciales sin leer sus valores ni efectuar llamadas pagadas.
+3. Configurar `GATEWAY_BRIDGE_SECRET` en las propiedades del puente; nunca en Git/logs.
+4. Autorizar y publicar una versión inmutable del puente. Registrar ID, versión y URL.
+5. En Railway configurar `METIS_BRIDGE_URL`, `METIS_BRIDGE_SECRET` y `METIS_OPERATOR_KEY`
+   con el gestor de variables, y verificar volumen, ruta real de SQLite y respaldo.
+6. Desplegar la rama revisada manteniendo una réplica y los otros adaptadores.
+   No cambiar la rama de producción ni promover código sin revisar el diff completo.
+7. Conectar Claude mediante OAuth. Andrés completa login/MFA cuando se solicite.
+8. Probar caso natural simple y después CROSS_AUDIT; recuperar desde el cliente
+   la respuesta completa, IDs, costo y reconciliación. Probar corte/reintento sin nueva ejecución.
+9. Registrar evidencia real. Sólo entonces evaluar DoD y tag final.
+
+### Rollback
+
+Detener ingreso Metis retirando sus tres variables y volver al despliegue Railway
+anterior verificado. Conservar SQLite y recibo Google para reconciliar cualquier
+ejecución pendiente antes de reactivar. No restaurar datos antiguos como rollback
+de código. Desactivar la publicación del puente cuando ya no haya corrida activa.
+Motor v5 y otros despliegues Google permanecen intactos.
+
+## Validación y límites de la evidencia
+
+- Motor baseline: 168 tests, 898 assertions, 9 static guards PASS (antes de cambios).
+- Ningún archivo de `metis-orchestrator-prototype` modificado.
+- Pruebas nuevas Python: 21 PASS; puente JavaScript: 9 PASS.
+- Regresión Python en Windows: 339 PASS, 3 excluidas por los problemas de plataforma descritos abajo.
+- Regresión general Windows encontró tres pruebas preexistentes incompatibles:
+  dos comprueban permisos POSIX 0600 y una exige separador `/` en una ruta Windows.
+  Deben ejecutarse en Linux antes de promover a producción; no se debilitaron.
+- Pruebas A–P están cubiertas localmente para contrato, identidad, autenticación,
+  reintentos, estados, persistencia, respuesta íntegra y secretos. Budget real,
+  librería real y regreso al cliente **todavía no acreditados**.
+- No hubo nueva corrida pagada ni costo real de Gateway medido.
+- Riesgo residual: una corrida manual fuera del Gateway no toma su bloqueo; durante
+  la validación deben evitarse ejecuciones manuales concurrentes del motor.
+- Revisión de permanencia: cuatro semanas después de la acreditación del primer cliente;
+  retirar si no reduce operación técnica de Andrés o si su mantenimiento supera valor probado.
+
+## Fuentes
+
+- [GPT Actions: producción](https://developers.openai.com/api/docs/actions/production)
+- [Claude: conectores remotos](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)
+- [Google: bibliotecas y recursos compartidos](https://developers.google.com/apps-script/guides/libraries)
+- [Google: límites](https://developers.google.com/apps-script/guides/services/quotas)
+- [Google: Execution API](https://developers.google.com/apps-script/api/how-tos/execute)
+- [Google: crear proyecto](https://developers.google.com/apps-script/api/reference/rest/v1/projects/create)

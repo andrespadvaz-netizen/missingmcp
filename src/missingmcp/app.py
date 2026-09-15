@@ -356,12 +356,19 @@ def build_app(config: Config) -> Starlette:
                     await asyncio.wait_for(stop.wait(), timeout=60)
 
         task = asyncio.create_task(loop())
+        metis_task = (asyncio.create_task(adapters["metis"].worker.run(stop))
+                      if "metis" in adapters else None)
         log("gateway-started", port=config.port)
         try:
             yield
         finally:
             stop.set()
             task.cancel()
+            if metis_task:
+                metis_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await metis_task
+                adapters["metis"].queue.close()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             for manager in managers.values():
