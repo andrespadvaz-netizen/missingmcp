@@ -95,8 +95,8 @@ the current conversation, not other projects or the full chat.
    assume POSIX semantics and fail on Windows.
 2. Preserve the current library/deployment IDs and their existing versions as
    rollback references. Upload reviewed engine files and create a new immutable
-   library version. This candidate bridge expects version 6; verify that the
-   actual version is 6 before publishing it.
+   library version. Google confirmed version 7 on 2026-09-15 for engine commit
+   348a009; this bridge pins that immutable version. Real acceptance remains pending.
 3. Configure verified context roots, protected objects, and authorization record.
    Keep `GATEWAY_PRODUCTIVE_ENABLED` absent/false while staging.
 4. Authorize the new Drive scope for the deploying Google identity. The API

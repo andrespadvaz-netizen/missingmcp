@@ -40,7 +40,7 @@ async function main() {
   if(process.argv.includes('--update-deployment')) {
     if(!state.deployment?.deploymentId) throw new Error('No existing deployment');
     const current=await api('/'+state.scriptId+'/deployments/'+state.deployment.deploymentId);
-    const version=await api('/'+state.scriptId+'/versions','POST',{description:'Productive write receipts; reviewed engine library v6'});
+    const version=await api('/'+state.scriptId+'/versions','POST',{description:'Productive write receipts; reviewed engine library v7'});
     state.deployment=await api('/'+state.scriptId+'/deployments/'+state.deployment.deploymentId,'PUT',{
       deploymentConfig:{...current.deploymentConfig,versionNumber:version.versionNumber}});
     state.versionNumber=version.versionNumber;
