@@ -1,10 +1,11 @@
-# Metis Gateway v1 — implementación pendiente de despliegue
+# Metis Gateway v1 — desplegado, aceptación en curso
 
 ## PIE y estado
 
-Techo técnico actual: **7/10**. Código y pruebas locales disponibles; no hay aún
-prueba del puente en Google, despliegue del Gateway ni cliente conversacional acreditado.
-Confianza alta en la evidencia local, pendiente en ejecución entre plataformas.
+Techo técnico actual: **7/10**. Puente Google y Gateway Railway desplegados;
+Claude conectado mediante OAuth y herramientas reales acreditadas. El primer resultado
+del motor regresó como abstención por contexto ausente, sin costo. Falta completar
+la prueba sustantiva simple y CROSS_AUDIT antes de declarar el objetivo cumplido.
 CANON consultado en vivo: v2.6, 15-ago-2026. La decisión vigente de 31-ago-2026
 levanta la moratoria; no autoriza automáticamente componentes con nuevo costo/riesgo.
 
@@ -28,6 +29,9 @@ Arquitectura elegida para validar:
 
 El Gateway expone sólo `metis_create_execution` y `metis_get_execution`.
 La primera llamada devuelve identidad y estado; un worker independiente continúa.
+La consulta de estado espera hasta veinte segundos por el resultado, sin bloquear
+al worker ni volver a ejecutar modelos. Esto evita que el cliente agote consultas
+rápidas y cierre el turno prematuramente mientras el motor sigue trabajando.
 No hay modelo de routing nuevo, vector DB, nueva base de datos gestionada ni triggers.
 
 ### Alternativas evaluadas
@@ -112,7 +116,22 @@ y llamadas externas. Se resolvió el bloqueo anterior de aprobación.
 - Prueba en Google: engine_version=5, LEVEL_0, providers_ready=true.
 - Prueba HTTP real sin firma: responde `unauthorized`, sin ejecución del motor.
 - Claves iniciales generadas en Script Properties, sin escribir valores en código/logs.
-- Railway y cliente: todavía pendientes de activación y prueba real.
+- Railway activado: deployment `100fc746-584f-4691-8ced-67b1d6efa3ec`.
+- Claude conectado; [conversación de aceptación](https://claude.ai/chat/d18ef5b9-a36f-45dc-b7e4-54f976d091d9).
+- Puente actualizado a v2: corrige el tipo MIME necesario para descomprimir el caché.
+  El recibo y resultado original se recuperaron sin repetir el motor.
+- Primer execution_id `1e5eeb49-1dde-4ef6-a967-768e536e4b4e`; engine_execution_id
+  `39bfe82f-adaa-4a34-8373-fef246f28983`. REQUIRES_ANDRES / engine UNCERTAIN /
+  ABSTAIN, por no declarar contexto en la solicitud. Costo conocido $0, cero llamadas
+  y cero intervenciones. Claude mostró la respuesta completa; no cuenta como éxito simple.
+- Reintento real de create con mismos argumentos y clave devolvió el mismo ID,
+  timestamp y resultado tras reinicio del Gateway; no produjo otra ejecución.
+- Caso simple aclarado: `ffdcb44f-59e9-4f37-b5c7-1a880fbb0b89`, motor
+  `96dcbd0d-0c0d-43b8-a93d-9119206d211a`, COMPLETED / LOCAL, una intervención,
+  cero lecturas/escrituras, costo conocido US$0.032585. Respuesta completa en Claude.
+- Hallazgo: el logger HTTP heredado guardaba URLs temporales de respuestas de Google.
+  Corregido con supresión limitada al contexto de transporte Metis y prueba de regresión;
+  no se registraron claves de proveedor. El primer resultado sólo contenía abstención.
 
 Acción concreta autorizada: crear `Metis Orchestration Gateway v1 — bridge` en la cuenta
 Google de Andrés, subir los dos archivos revisados y vincular biblioteca v5. Después,

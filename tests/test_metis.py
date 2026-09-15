@@ -58,6 +58,39 @@ def test_identity_idempotency_and_conflict(queue):
         queue.get('intruder', one['execution_id'])
 
 
+@pytest.mark.asyncio
+async def test_client_poll_waits_for_worker_result_without_another_execution(queue, monkeypatch):
+    monkeypatch.setattr('missingmcp.adapters.metis.POLL_WAIT_SECONDS', .05)
+    adapter = object.__new__(MetisAdapter)
+    adapter.queue = queue
+    first = queue.create('operator', REQUEST)
+    row = queue.next()
+    queue.claim(row)
+    async def finish():
+        await asyncio.sleep(.01)
+        queue.finish(row, {'status':'COMPLETED','final_answer':'resultado íntegro','cost_usd':.01,'cost_known':True})
+    task = asyncio.create_task(finish())
+    reply = await adapter.wait_execution('operator', first['execution_id'])
+    await task
+    assert reply['status'] == 'COMPLETED'
+    assert reply['final_answer'] == 'resultado íntegro'
+    assert reply['execution_id'] == first['execution_id']
+    assert queue.db.execute('SELECT count(*) FROM metis_executions').fetchone()[0] == 1
+    with pytest.raises(RequestError, match='not_found'):
+        await adapter.wait_execution('intruder', first['execution_id'])
+
+
+@pytest.mark.asyncio
+async def test_client_poll_timeout_keeps_pending_and_does_not_dispatch(queue, monkeypatch):
+    monkeypatch.setattr('missingmcp.adapters.metis.POLL_WAIT_SECONDS', .01)
+    adapter = object.__new__(MetisAdapter)
+    adapter.queue = queue
+    first = queue.create('operator', REQUEST)
+    reply = await asyncio.wait_for(adapter.wait_execution('operator', first['execution_id']), .5)
+    assert reply['status'] == 'QUEUED'
+    assert queue.next()['dispatched'] is None
+
+
 @pytest.mark.parametrize('args', [None, {}, [], {**REQUEST,'model':'OPENAI'},
     {**REQUEST,'request':' '}, {**REQUEST,'request':'ñ'*8001},
     {**REQUEST,'request':42}, {**REQUEST,'idempotency_key':'short'}])
