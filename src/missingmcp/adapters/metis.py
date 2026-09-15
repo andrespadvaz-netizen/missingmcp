@@ -36,7 +36,7 @@ TOOLS = [
                         "description":"Self-contained user request, with the established project and necessary current-conversation facts carried forward. Preserve action and constraints. Resolve available context yourself; ask only for genuine ambiguity. Freeze this exact text for idempotent retries."},
                                   "idempotency_key":{"type":"string","minLength":16,"maxLength":128}},
                     "required":["request","idempotency_key"]},
-     "annotations":{"readOnlyHint":False,"destructiveHint":False,"idempotentHint":True,"openWorldHint":True}},
+     "annotations":{"readOnlyHint":False,"destructiveHint":True,"idempotentHint":True,"openWorldHint":True}},
     {"name":"metis_get_execution", "description":
      "Read an execution without triggering another model call. Waits up to 20 seconds for completion. "
      "Pending: continue polling the SAME execution until terminal; a pending reply is not a failure. "

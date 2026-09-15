@@ -814,6 +814,13 @@ var Orchestrator = (function () {
       execution.final_answer = _composeAnswer(execution, runtime, analysis, routing, producerText, simulations);
       if (runtime.write_plan && runtime.write_plan.length) {
         execution.final_answer = 'Plan validado. ' + runtime.write_plan.length + ' operación(es) pendientes de ejecución y verificación por el Gateway.';
+      } else if (ProductivePolicy.enabled()) {
+        if (session.tool_errors.some(function(x){return /^productive\./.test(x.name || '');})) {
+          execution.status = 'REQUIRES_ANDRES';
+          execution.final_answer = 'No se ejecutó ninguna escritura. No fue posible validar la inspección o propuesta del destino. Revisa los errores de herramientas antes de continuar.';
+        } else {
+          execution.final_answer += '\nEstado de escrituras: no se envió ninguna operación al Gateway y no se modificaron objetos externos en esta corrida.';
+        }
       }
       runtime.stage = 'OUTPUT_VALIDATION';
       Schemas.assertValid('Execution', execution);

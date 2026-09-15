@@ -90,4 +90,40 @@ for(const origin of ['OPENAI','ANTHROPIC']) test('Real engine plans from '+origi
 });
 test('Auditor receives concrete plan without proposing writes',()=>{const {result,auditor}=engineRun('OPENAI',true);assert.equal(result.status,'COMPLETED',JSON.stringify(result));assert.equal(result.write_plan.length,1);assert(auditor.calls[0].prompt.includes('Synthetic engine note'));assert(!auditor.calls[0].tools.includes('productive.propose'));});
 test('Material audit block prevents actual plan release',()=>{const {result,backend}=engineRun('OPENAI',true,true);assert.equal(result.status,'REQUIRES_ANDRES');assert.equal(result.write_plan.length,0);assert(backend.calls.every(x=>x.method==='get'));});
+test('Notion protects a paragraph inside a canonical ancestor',()=>{
+  A._useBackend((p,u,m)=>{assert.equal(m,'get');const id=u.split('/')[1];
+    if(u.startsWith('blocks/'))return id==='paragraph'?{id,type:'paragraph',last_edited_time:'r',parent:{type:'page_id',page_id:'canon'},paragraph:{rich_text:[]}}:{id,type:'child_page'};
+    return {id,object:'page',last_edited_time:'r',parent:{type:'page_id',page_id:'root'},properties:{title:{type:'title',title:[{plain_text:'CANON Maestro'}]}}};
+  });
+  assert.throws(()=>proposal('notes','paragraph','update',{text:'replacement'}),/CANON_REQUIRES_OPERATOR/);
+});
+test('Drive protects documents inside canonical ancestors',()=>{
+  A._useBackend((p,u,m)=>{assert.equal(m,'get');const id=u.split('/')[1].split('?')[0];return {id,name:id==='canon'?'CANON Derivado':'Routine',parents:[id==='doc'?'canon':'folder'],capabilities:{canEdit:true}};});
+  assert.throws(()=>proposal('docs','doc','update',{old_text:'Before',text:'After'}),/CANON_REQUIRES_OPERATOR/);
+});
+test('Drive creation requires child access and verifies multipart conversion',()=>{
+  let allowed=false,mutations=0,created=false;
+  A._useBackend((p,u,m,b)=>{
+    if(m==='get' && p==='DRIVE'){const id=u.split('/')[1].split('?')[0];return {id,name:id==='folder'?'Folder':'Created',mimeType:id==='folder'?'application/vnd.google-apps.folder':'application/vnd.google-apps.document',parents:id==='folder'?[]:['folder'],version:'1',capabilities:{canEdit:true,canAddChildren:allowed}};}
+    if(m==='get' && p==='DOCS'){assert(created);return {revisionId:'r',body:{content:[{paragraph:{elements:[{textRun:{content:'Line 1\nLine 2\n'}}]}}]}};}
+    assert.equal(p,'DRIVE_UPLOAD');assert.equal(m,'post');assert(b.includes('"parents":["folder"]'));assert(b.includes('Line 1\nLine 2'));mutations++;created=true;return {id:'doc'};
+  });
+  assert.throws(()=>proposal('docs',null,'create',{title:'Created',text:'Line 1\nLine 2'}),/DRIVE_CANNOT_CREATE_CHILD/);
+  allowed=true;assert.equal(A.apply(proposal('docs',null,'create',{title:'Created',text:'Line 1\nLine 2'})).status,'CONFIRMED');assert.equal(mutations,1);
+});
+test('Distinct creations share a container without losing whole-plan validation',()=>{
+  asana();const s=session(),snap=P.invoke(s,'productive.inspect',{destination:'tasks'});
+  for(const title of ['First','Second'])P.invoke(s,'productive.propose',{snapshot_id:snap.snapshot_id,operation:'create',payload:{title,text:'Body'}});
+  assert.equal(s.proposed_actions.length,2);
+  const planned=s.proposed_actions.map((p,i)=>({step:{tool:'productive.propose',ordinal:i+1},source_context:'TEST',payload:p.payload}));
+  assert(P.validatePlan('id',planned,s.grant,'TEST',{}).plan.valid);
+});
+test('Productive tool failure cannot report an executed write',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_3');
+  const producer=c.Fixtures.scriptedProvider('ANTHROPIC',[
+    {tool_requests:[{name:'productive.inspect',arguments:{destination:'missing'},id:'bad'}]},
+    {text:'Ya creé la nota.'}]);
+  const result=c.Orchestrator.run('Contexto: TEST\nCrea una nota.',{current_model:'ANTHROPIC',providers:{ANTHROPIC:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
+  assert.equal(result.status,'REQUIRES_ANDRES');assert.equal(result.write_plan.length,0);assert(result.final_answer.startsWith('No se ejecutó ninguna escritura.'));
+});
 console.log(`${tests} productive policy/adapter/engine tests passed; no network used.`);

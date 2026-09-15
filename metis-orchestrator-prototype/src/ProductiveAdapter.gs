@@ -42,6 +42,7 @@ var ProductiveAdapter = (function () {
     ProductivePolicy.assertObject('NOTION',id);
     var object=notionObject(id), chain=[id], current=object;
     for (var depth=0; depth<30; depth++) {
+      if (current.object === 'page') { assertName(title(current)); }
       if (ProductivePolicy.normalizeId('NOTION',current.id) === ProductivePolicy.normalizeId('NOTION',d.root_id)) { break; }
       var parent=current.parent, pid=parent && (parent.page_id || parent.block_id || parent.database_id || parent.data_source_id);
       if (!pid) { break; }
@@ -118,12 +119,14 @@ var ProductiveAdapter = (function () {
       var pid=current.parents[0]; ProductivePolicy.assertObject('DRIVE',pid);
       chain.push(pid); current=driveMeta(pid);
       if (current.trashed) { fail('ARCHIVED_ANCESTOR'); }
+      assertName(current.name);
     }
     ProductivePolicy.assertAncestry(d,chain);
     if (file.trashed || !file.capabilities || file.capabilities.canEdit !== true) { fail('DRIVE_NOT_EDITABLE'); }
     assertName(file.name);
     if (id===d.root_id) {
       if (file.mimeType!=='application/vnd.google-apps.folder') { fail('DESTINATION_NOT_FOLDER'); }
+      if (file.capabilities.canAddChildren !== true) { fail('DRIVE_CANNOT_CREATE_CHILD'); }
       return {object_id:id,kind:'container',title:file.name,text:'',revision:String(file.version),ancestry:chain};
     }
     if (file.mimeType!=='application/vnd.google-apps.document') { fail('ROUTINE_EDITOR_SUPPORTS_GOOGLE_DOCUMENTS'); }
