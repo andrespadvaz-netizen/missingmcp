@@ -250,7 +250,9 @@ def test_http_auth_isolation_and_malformed_request(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_accounting_review_reads_only_and_preserves_failure(queue):
+async def test_accounting_review_reads_only_and_preserves_failure(queue, monkeypatch):
+    # The first review must also run immediately on a freshly started host.
+    monkeypatch.setattr('missingmcp.metis.transport.time.monotonic', lambda: 0)
     first = queue.create('operator', REQUEST)
     row = queue.next()
     queue.claim(row)

@@ -35,12 +35,12 @@ class Bridge:
 class Worker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
-        self.last_review = 0
+        self.last_review = None
 
     async def step(self):
         paused = self.queue.paused_execution()
         if paused:
-            if time.monotonic() - self.last_review < 60:
+            if self.last_review is not None and time.monotonic() - self.last_review < 60:
                 return
             self.last_review = time.monotonic()
             # A paused gateway may read an explicitly reviewed receipt, never run.
