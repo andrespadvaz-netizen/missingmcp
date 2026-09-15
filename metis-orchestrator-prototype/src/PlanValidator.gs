@@ -127,6 +127,9 @@ var PlanValidator = (function () {
    * @return {{plan:object, violations:Array, per_action:Array}}
    */
   function validate(executionId, plannedActions, grant, resolvedContext, runState) {
+    if (plannedActions.some(function(p){return p.step.tool === 'productive.propose';})) {
+      return ProductivePolicy.validatePlan(executionId, plannedActions, grant, resolvedContext, runState || {});
+    }
     var state = runState || {};
     var violations = [];
     var perAction = [];
