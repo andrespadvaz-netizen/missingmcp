@@ -84,3 +84,38 @@ test('Pin remains immutable and bridge contains no log/trigger/provider endpoint
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
 });
 console.log(`${tests} bridge checks passed`);
+
+function accountingFixture() {
+  const f=fixture(); f.request();
+  const receipt=JSON.parse(f.data.receipt);
+  f.context.finish_(f.context.PropertiesService.getScriptProperties(),receipt,
+    {status:'FAILED',error:'ENGINE_INTERRUPTED',cost_known:false,cost_usd:null,requires_review:true,final_answer:null});
+  vm.runInContext(fs.readFileSync(__dirname+'/Diagnostics.gs','utf8'),f.context);
+  let daily=.4,monthly=5,counterCalls=0;
+  f.context.Engine.Ledger={spend:s=>s==='DAILY'?daily:monthly,addSpend:n=>{daily+=n;monthly+=n;counterCalls++;}};
+  const review={execution_id:receipt.id,seq:receipt.seq,day:new Date().toISOString().slice(0,10),
+    cost_usd:.07,daily_before:.4,monthly_before:5,evidence_sha256:'a'.repeat(64),provider_request_id:'req-test'};
+  return {f,review,counterCalls:()=>counterCalls,resetDaily:n=>{daily=n;}};
+}
+test('Operator accounting review adds spend exactly once and preserves FAILED',()=>{
+  const {f,review,counterCalls}=accountingFixture();
+  f.context.applyAccountingReview_(review); f.context.applyAccountingReview_(review);
+  const result=f.request(1,'status').result;
+  assert.equal(result.status,'FAILED');assert.equal(result.final_answer,null);
+  assert.equal(result.cost_usd,.07);assert.equal(result.accounting_reconciliation.ledger_verified,true);
+  assert.equal(counterCalls(),1);assert.equal(f.calls(),1);
+});
+test('Interrupted accounting write resumes without charging again',()=>{
+  const {f,review,counterCalls}=accountingFixture();
+  const finish=f.context.finish_;f.context.finish_=()=>{throw Error('storage failure');};
+  assert.throws(()=>f.context.applyAccountingReview_(review));
+  f.context.finish_=finish;f.context.applyAccountingReview_(review);
+  assert.equal(counterCalls(),1);assert.equal(f.request(1,'status').result.cost_known,true);
+});
+test('Changed counters or receipt keep the incident paused',()=>{
+  const {f,review,counterCalls,resetDaily}=accountingFixture();resetDaily(.43);
+  assert.throws(()=>f.context.applyAccountingReview_(review));assert.equal(counterCalls(),0);
+  assert.equal(f.request(1,'status').result.cost_known,false);
+  review.seq=2;assert.throws(()=>f.context.applyAccountingReview_(review));
+});
+console.log(`${tests} total bridge checks passed`);

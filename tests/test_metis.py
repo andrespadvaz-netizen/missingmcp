@@ -247,3 +247,48 @@ def test_http_auth_isolation_and_malformed_request(tmp_path):
     assert client.get('/metis').status_code == 200
     assert client.get('/.well-known/oauth-protected-resource/metis/mcp').status_code == 200
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_accounting_review_reads_only_and_preserves_failure(queue):
+    first = queue.create('operator', REQUEST)
+    row = queue.next()
+    queue.claim(row)
+    failure = {'status':'FAILED','error':'ENGINE_INTERRUPTED','cost_known':False,
+               'cost_usd':None,'requires_review':True,'final_answer':None}
+    queue.finish(row, failure)
+    row = queue.paused_execution()
+    proof = {'execution_id':row['id'],'seq':row['seq'],'ledger_verified':True,
+             'evidence_sha256':'a'*64}
+    reviewed = {**failure,'cost_known':True,'cost_usd':.072375,'requires_review':False,
+                'accounting_reconciliation':proof}
+    calls = []
+    class ReviewedBridge:
+        async def call(self, action, execution, request=None):
+            calls.append((action, execution['id'], request))
+            return {'state':'DONE','result':reviewed}
+    await Worker(queue, ReviewedBridge()).step()
+    answer = queue.get('operator', first['execution_id'])
+    assert calls == [('status',first['execution_id'],None)]
+    assert answer['status'] == 'FAILED' and answer['final_answer'] is None
+    assert answer['original_failure'] == failure
+    assert answer['cost_usd'] == .072375 and not answer['gateway_paused']
+    assert queue.create('operator', REQUEST)['execution_id'] == first['execution_id']
+    assert queue.next() is None
+    assert not queue.reconcile_accounting(row, reviewed)
+
+
+@pytest.mark.parametrize('change', [
+    {'accounting_reconciliation':{}}, {'cost_usd':float('nan')},
+    {'cost_usd':-1}, {'requires_review':True}, {'status':'COMPLETED'},
+    {'accounting_reconciliation':{'execution_id':'other','seq':1,'ledger_verified':True,'evidence_sha256':'a'*64}},
+])
+def test_accounting_review_fails_closed(queue, change):
+    queue.create('operator', REQUEST)
+    row=queue.next(); queue.claim(row)
+    queue.finish(row, {'status':'FAILED','cost_known':False,'requires_review':True})
+    reviewed={'status':'FAILED','cost_known':True,'cost_usd':.1,'requires_review':False,
+              'accounting_reconciliation':{'execution_id':row['id'],'seq':row['seq'],
+              'ledger_verified':True,'evidence_sha256':'a'*64}, **change}
+    assert not queue.reconcile_accounting(row, reviewed)
+    assert queue.paused_execution() is not None

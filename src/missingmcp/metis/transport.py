@@ -35,8 +35,22 @@ class Bridge:
 class Worker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
+        self.last_review = 0
 
     async def step(self):
+        paused = self.queue.paused_execution()
+        if paused:
+            if time.monotonic() - self.last_review < 60:
+                return
+            self.last_review = time.monotonic()
+            # A paused gateway may read an explicitly reviewed receipt, never run.
+            try:
+                reply = await self.bridge.call("status", paused)
+                if reply.get("state") == "DONE" and isinstance(reply.get("result"), dict):
+                    self.queue.reconcile_accounting(paused, reply["result"])
+            except (httpx.HTTPError, ValueError, TypeError):
+                pass
+            return
         row = self.queue.next()
         if not row:
             return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import math
 import re
 import sqlite3
 import time
@@ -99,6 +100,39 @@ class Queue:
     def claim(self, row):
         return self.db.execute("UPDATE metis_executions SET status='DISPATCHED', dispatched=? WHERE id=? AND status='QUEUED'",
                                (time.time(), row["id"])).rowcount == 1
+
+    def paused_execution(self):
+        return self.db.execute("SELECT e.* FROM metis_executions e JOIN metis_pause p ON p.execution_id=e.id ORDER BY e.seq LIMIT 1").fetchone()
+
+    def reconcile_accounting(self, row, result):
+        """Accept only an operator-reviewed bridge receipt; never rerun a failure."""
+        proof = result.get("accounting_reconciliation", {})
+        cost = result.get("cost_usd")
+        if (result.get("status") != "FAILED" or result.get("cost_known") is not True
+                or result.get("requires_review") is not False
+                or isinstance(cost, bool) or not isinstance(cost, (int, float))
+                or not math.isfinite(cost) or cost < 0
+                or not isinstance(proof, dict)
+                or proof.get("execution_id") != row["id"] or proof.get("seq") != row["seq"]
+                or proof.get("ledger_verified") is not True
+                or not re.fullmatch(r"[a-f0-9]{64}", str(proof.get("evidence_sha256", "")))):
+            return False
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.db.execute("SELECT * FROM metis_executions WHERE id=?", (row["id"],)).fetchone()
+            original = json.loads(decrypt(self.secret, current["result_enc"]))
+            paused = self.db.execute("SELECT 1 FROM metis_pause WHERE execution_id=?", (row["id"],)).fetchone()
+            if not paused or current["status"] != "FAILED" or original.get("cost_known") is not False:
+                self.db.execute("COMMIT")
+                return False
+            reviewed = {**result, "original_failure": original}
+            self.db.execute("UPDATE metis_executions SET result_enc=? WHERE id=?", (encrypt(self.secret, json.dumps(reviewed)), row["id"]))
+            self.db.execute("DELETE FROM metis_pause WHERE execution_id=?", (row["id"],))
+            self.db.execute("COMMIT")
+            return True
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
 
     def finish(self, row, result):
         status = result.get("status")

@@ -1,11 +1,12 @@
-# Metis Gateway v1 — desplegado, aceptación en curso
+# Metis Gateway v1 — desplegado, pausado por costo incierto
 
 ## PIE y estado
 
-Techo técnico actual: **7/10**. Puente Google y Gateway Railway desplegados;
-Claude conectado mediante OAuth y herramientas reales acreditadas. El primer resultado
-del motor regresó como abstención por contexto ausente, sin costo. Falta completar
-la prueba sustantiva simple y CROSS_AUDIT antes de declarar el objetivo cumplido.
+Techo técnico actual: **7/10**. Claude, Railway y el puente Google están conectados.
+Las pruebas reales simple y CROSS_AUDIT completaron con respuesta íntegra. Una cuarta
+solicitud produjo ENGINE_INTERRUPTED con costo desconocido; la pausa automática
+impide nuevos gastos. La causa de la interrupción no está acreditada. No repetir
+la solicitud ni levantar la pausa sin reconciliar su resultado y costo.
 CANON consultado en vivo: v2.6, 15-ago-2026. La decisión vigente de 31-ago-2026
 levanta la moratoria; no autoriza automáticamente componentes con nuevo costo/riesgo.
 
@@ -167,24 +168,42 @@ Motor v5 y otros despliegues Google permanecen intactos.
 
 ## Validación y límites de la evidencia
 
-- Motor baseline: 168 tests, 898 assertions, 9 static guards PASS (antes de cambios).
-- Ningún archivo de `metis-orchestrator-prototype` modificado.
-- Pruebas nuevas Python: 21 PASS; puente JavaScript: 9 PASS.
-- Regresión Python en Windows: 339 PASS, 3 excluidas por los problemas de plataforma descritos abajo.
-- Regresión general Windows encontró tres pruebas preexistentes incompatibles:
-  dos comprueban permisos POSIX 0600 y una exige separador `/` en una ruta Windows.
-  No se debilitaron. La ejecución posterior en Linux aprobó las tres.
-- **CI Linux: 342 pruebas Python PASS**, 9 del puente PASS, motor 168/898 PASS y
-  9 guardas PASS. [Ejecución acreditada](https://github.com/andrespadvaz-netizen/missingmcp/actions/runs/34917837655),
-  código SHA `2dfe8d03d4d2cf0a40fc5d1e17223b963cfb882b`.
-- Pruebas A–P están cubiertas localmente para contrato, identidad, autenticación,
-  reintentos, estados, persistencia, respuesta íntegra y secretos. Budget real,
-  librería real y regreso al cliente **todavía no acreditados**.
-- No hubo nueva corrida pagada ni costo real de Gateway medido.
-- Riesgo residual: una corrida manual fuera del Gateway no toma su bloqueo; durante
-  la validación deben evitarse ejecuciones manuales concurrentes del motor.
-- Revisión de permanencia: cuatro semanas después de la acreditación del primer cliente;
-  retirar si no reduce operación técnica de Andrés o si su mantenimiento supera valor probado.
+- CI Linux del código desplegado `85cf8b6`: **345 pruebas Python PASS**, 9 del puente
+  PASS, motor 168 tests / 898 assertions PASS y 9 guardas PASS.
+  [Ejecución acreditada](https://github.com/andrespadvaz-netizen/missingmcp/actions/runs/34928446993).
+- Ningún archivo de `metis-orchestrator-prototype` modificado. Biblioteca Google v5.
+- Simple real COMPLETED / LOCAL: Gateway `ffdcb44f-59e9-4f37-b5c7-1a880fbb0b89`,
+  motor `96dcbd0d-0c0d-43b8-a93d-9119206d211a`, costo conocido US$0.032585,
+  una intervención, cero herramientas. Respuesta completa recibida en Claude.
+- CROSS_AUDIT real COMPLETED: Gateway `07b1f464-08b1-4c52-b7e6-02b7ba6eef74`,
+  motor `266df533-d272-476a-9655-7c960309c271`, costo conocido US$0.36720625,
+  9/9 intervenciones, 21/32 llamadas a herramientas, cero reintentos de lectura.
+  Handoff ANTHROPIC → OPENAI reconciliado; respuesta final de 3436 caracteres
+  conservada en el resultado de la herramienta. Auditoría bloqueante: rechaza
+  20 lecturas y confirma 15; cuarto turno sólo de cierre. Sin cambios externos.
+- Persistencia e idempotencia reales: repetir el primer create con misma clave y
+  argumentos después de un redespliegue devolvió mismo ID, fecha y resultado;
+  ninguna nueva ejecución del motor.
+- El cliente inicialmente terminaba antes de recibir CROSS_AUDIT. Se añadió espera
+  de hasta 20 segundos por consulta de estado, conservando el mismo ID. La prueba
+  natural posterior no acredita esa mejora de extremo a extremo: se interrumpió.
+- Incidente pendiente, secuencia 4: Gateway `5e151e04-02f3-42b1-8464-b5b8370a27ad`,
+  clave `METIS_GATEWAY_AUDIT_20260914_02`, FAILED / ENGINE_INTERRUPTED,
+  `cost_known=false`, `cost_usd=null`, sin ID del motor ni respuesta final,
+  `requires_review=true`, Gateway pausado. Google conserva el mismo error en su
+  recibo DONE. Su historial mostraba Running para el inicio 14-sep 22:23:21 México,
+  incluso con duración superior a siete minutos. Cloud logs y Cloud errors no
+  están disponibles en esa vista. Esto no permite atribuir una causa concreta.
+- Costos conocidos de esta aceptación: **US$0.39979125 más el costo desconocido
+  de la secuencia 4**. No presentar el subtotal como costo total.
+- El ledger del motor guarda contadores agregados; no acredita por sí solo el
+  costo de una llamada cuya respuesta pudo perderse.
+- No hubo repetición automática de la solicitud fallida. No se levantó la pausa,
+  no se modificaron límites y no se creó el tag final del Gateway.
+- Pendiente: reconciliar secuencia 4 con evidencia de resultado/costo, diagnosticar
+  la interrupción, acreditar flujo natural completo y volver a evaluar DoD A–P.
+- Revisión de permanencia: cuatro semanas después de acreditar el primer cliente;
+  retirar si no reduce operación técnica de Andrés o su mantenimiento supera valor.
 
 ## Fuentes
 
@@ -199,6 +218,37 @@ Motor v5 y otros despliegues Google permanecen intactos.
 
 | Tema | Fecha | Modelo | Proyecto | Estado | Link |
 |---|---|---|---|---|---|
-| Gateway v1: infraestructura verificada, código y pruebas; aprobación del puente Google pendiente | 2026-09-14 | ChatGPT | Metis | En curso | https://github.com/andrespadvaz-netizen/missingmcp/tree/metis/orchestration-gateway-v1 |
+| Gateway v1: simple y CROSS_AUDIT aprobados; pausa por ejecución con costo incierto | 2026-09-14 | ChatGPT | Metis | En curso | https://github.com/andrespadvaz-netizen/missingmcp/tree/metis/orchestration-gateway-v1 |
 
 No hay decisión canónica ni acreditación nueva registrada. Este texto documenta progreso.
+
+
+## Conciliación del incidente 4 — 14 septiembre, 23:25 México
+
+Se exportó OpenAI por minuto para 15-sep UTC: 1440 filas; sólo cuatro solicitudes,
+una a las 04:18 y tres a las 04:19. Ninguna desde las 04:23. Anthropic registra
+`req_011Cf4b2ZzVN6kukcNnHX2Rn` a 04:23:58.784 UTC: éxito, Opus 5, entrada 2450,
+salida 2405, caché cero, nivel estándar, 32.987 segundos. Andrés confirmó que no
+hubo otro uso de las claves en la ventana 22:23–22:25 México.
+
+La estimación verificable es `(2450*5 + 2405*25)/1000000 = US$0.072375`, según
+[tarifa oficial](https://platform.claude.com/docs/en/about-claude/pricing).
+La facturación diaria de Anthropic todavía mostraba cero; no es una factura final.
+Google cambió el estado de la ejecución a UNKNOWN: no puede determinar su desenlace.
+El motor no había sumado el gasto: diario0.39979125, mensual5.1390775.
+
+Se agregó una operación manual limitada al recibo, fecha, contadores y evidencia
+de este incidente. Persiste intención antes del ajuste, comprueba ambos contadores
+y admite recuperación tras interrupción sin volver a sumar. Un estado parcial o
+conflictivo conserva el bloqueo. No se expone en MCP ni en doPost. El motor v5 no
+cambia; sólo se ajustan sus contadores operativos mediante Ledger.addSpend.
+
+El Gateway puede consultar un recibo revisado mientras está pausado; nunca vuelve
+a ejecutar el motor. Sólo libera la pausa con evidencia identificada por hash,
+ID y secuencia coincidentes y ledger verificado. Conserva el fallo original cifrado,
+el estado FAILED y la ausencia de respuesta final. Una conciliación no convierte
+la solicitud en éxito. Pruebas específicas:31 Python y12 puente PASS.
+
+Evidencia local íntegra: `.localdata/reconciliation-seq4.json` (excluida de Git),
+SHA256 `8ebe9f1018bb9766dd073ec8bbadd70f681bae9bb3f0353f38a6eba40f806571`.
+No incluye claves secretas ni el corpus recuperado.
