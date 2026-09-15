@@ -88,6 +88,19 @@ function engineRun(origin,audit=false,block=false){
 for(const origin of ['OPENAI','ANTHROPIC']) test('Real engine plans from '+origin+' without effects',()=>{
   const {result,backend}=engineRun(origin);assert.equal(result.status,'COMPLETED',JSON.stringify(result));assert.equal(result.write_plan.length,1);assert.equal(result.write_plan[0].action.context,'TEST');assert(backend.calls.every(x=>x.method==='get'));
 });
+test('Final planning turn retains snapshots from every prior productive batch',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_3');const backend=asana();
+  const producer=c.Fixtures.scriptedProvider('OPENAI',[]);let turn=0,firstSnapshot;
+  producer.completeWithTools=(req)=>{
+    turn++;
+    if(turn===2)firstSnapshot=req.prompt.match(/"snapshot_id":"([^"]+)"/)[1];
+    if(turn<=3)return producer.normalizeResponse({tool_requests:[{name:'productive.inspect',arguments:{destination:'tasks',...(turn>1?{object_id:'task'}:{})}}]});
+    assert(req.prompt.includes(firstSnapshot),'The final turn must retain the first batch, not only the latest one');
+    return producer.normalizeResponse({tool_requests:[{name:'productive.propose',arguments:{snapshot_id:firstSnapshot,operation:'create',payload:{title:'Final turn note',text:'TEST'}}}]});
+  };
+  const result=c.Orchestrator.run('Contexto: TEST\nCrea una tarea de prueba.',{current_model:'OPENAI',providers:{OPENAI:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
+  assert.equal(result.status,'COMPLETED',JSON.stringify(result));assert.equal(result.write_plan.length,1);assert.equal(turn,4);assert(backend.calls.every(x=>x.method==='get'));
+});
 test('Auditor receives concrete plan without proposing writes',()=>{const {result,auditor}=engineRun('OPENAI',true);assert.equal(result.status,'COMPLETED',JSON.stringify(result));assert.equal(result.write_plan.length,1);assert(auditor.calls[0].prompt.includes('Synthetic engine note'));assert(!auditor.calls[0].tools.includes('productive.propose'));});
 test('Material audit block prevents actual plan release',()=>{const {result,backend}=engineRun('OPENAI',true,true);assert.equal(result.status,'REQUIRES_ANDRES');assert.equal(result.write_plan.length,0);assert(backend.calls.every(x=>x.method==='get'));});
 test('Notion protects a paragraph inside a canonical ancestor',()=>{
