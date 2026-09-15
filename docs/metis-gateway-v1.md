@@ -147,7 +147,10 @@ Motor v5 y otros despliegues Google permanecen intactos.
 - Regresión Python en Windows: 339 PASS, 3 excluidas por los problemas de plataforma descritos abajo.
 - Regresión general Windows encontró tres pruebas preexistentes incompatibles:
   dos comprueban permisos POSIX 0600 y una exige separador `/` en una ruta Windows.
-  Deben ejecutarse en Linux antes de promover a producción; no se debilitaron.
+  No se debilitaron. La ejecución posterior en Linux aprobó las tres.
+- **CI Linux: 342 pruebas Python PASS**, 9 del puente PASS, motor 168/898 PASS y
+  9 guardas PASS. [Ejecución acreditada](https://github.com/andrespadvaz-netizen/missingmcp/actions/runs/34917837655),
+  código SHA `2dfe8d03d4d2cf0a40fc5d1e17223b963cfb882b`.
 - Pruebas A–P están cubiertas localmente para contrato, identidad, autenticación,
   reintentos, estados, persistencia, respuesta íntegra y secretos. Budget real,
   librería real y regreso al cliente **todavía no acreditados**.
@@ -165,3 +168,11 @@ Motor v5 y otros despliegues Google permanecen intactos.
 - [Google: límites](https://developers.google.com/apps-script/guides/services/quotas)
 - [Google: Execution API](https://developers.google.com/apps-script/api/how-tos/execute)
 - [Google: crear proyecto](https://developers.google.com/apps-script/api/reference/rest/v1/projects/create)
+
+## Fila de Chat Log propuesta — todavía no registrada
+
+| Tema | Fecha | Modelo | Proyecto | Estado | Link |
+|---|---|---|---|---|---|
+| Gateway v1: infraestructura verificada, código y pruebas; aprobación del puente Google pendiente | 2026-09-14 | ChatGPT | Metis | En curso | https://github.com/andrespadvaz-netizen/missingmcp/tree/metis/orchestration-gateway-v1 |
+
+No hay decisión canónica ni acreditación nueva registrada. Este texto documenta progreso.
