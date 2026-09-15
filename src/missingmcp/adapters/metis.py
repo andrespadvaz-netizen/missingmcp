@@ -12,6 +12,8 @@ POLL_WAIT_SECONDS = 20
 TOOLS = [
     {"name":"metis_create_execution", "description":
      "Submit Andrés's natural-language request to Metis. The engine determines context and routing. "
+     "Preserve the user's substantive wording, including requests to audit or independently review, "
+     "context, constraints and qualifications. Do not summarize away the requested action. "
      "Returns immediately; use metis_get_execution until terminal. Keep the same idempotency_key "
      "for retries of the same request. Never resubmit a pending request with a new key. "
      "Model calls can incur cost within the existing engine limits; no real external writes are enabled.",
