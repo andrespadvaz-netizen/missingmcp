@@ -35,6 +35,28 @@ class Bridge:
         return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                                  "fingerprint": row["fingerprint"], "write": write}, row)
 
+    async def call_lens_context(self, request: str):
+        """Signed, read-only Lens retrieval. It never enters the durable spend queue."""
+        if not isinstance(request, str) or not request.strip() or len(request.encode("utf-8")) > 3_500:
+            raise ValueError("invalid_lens_context_request")
+        payload = json.dumps(
+            {"action": "lens_context", "request": request, "timestamp": int(time.time())},
+            separators=(",", ":"), ensure_ascii=False)
+        signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        token = private_transport.set(True)
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.post(self.url, json={"payload": payload, "signature": signature})
+                response.raise_for_status()
+                if len(response.content) > 80_000:
+                    raise ValueError("lens_context_response_too_large")
+                data = response.json()
+        finally:
+            private_transport.reset(token)
+        if not isinstance(data, dict):
+            raise ValueError("invalid_lens_context_response")
+        return data
+
     async def _call(self, envelope, row):
         payload = json.dumps({**envelope, "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
