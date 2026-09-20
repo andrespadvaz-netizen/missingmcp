@@ -68,16 +68,18 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     metis = [env.get(name, "") for name in
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
-    if any(metis) or metis_lens_context_key:
+    if any(metis):
         import re
         if (not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0])
-                or any(len(x) < 32 for x in metis[1:])
-                or len(metis_lens_context_key) < 32):
-            raise ValueError(
-                "Metis requires an Apps Script /exec URL and three distinct secrets of at least 32 characters")
-        if (metis[1] == metis[2] or metis_lens_context_key in metis[1:]
-                or secret in metis[1:] or secret == metis_lens_context_key):
-            raise ValueError("Metis signing, operator, Lens context and storage secrets must be distinct")
+                or any(len(x) < 32 for x in metis[1:])):
+            raise ValueError("Metis requires an Apps Script /exec URL and two secrets of at least 32 characters")
+        if metis[1] == metis[2] or secret in metis[1:]:
+            raise ValueError("Metis signing, operator and storage secrets must be distinct")
+    if metis_lens_context_key:
+        if len(metis_lens_context_key) < 32:
+            raise ValueError("METIS_LENS_CONTEXT_KEY must be at least 32 characters")
+        if metis_lens_context_key in metis[1:] or secret == metis_lens_context_key:
+            raise ValueError("Lens context secret must be distinct from existing Metis secrets")
     return Config(
         gateway_secret=secret,
         public_url=public_url,
