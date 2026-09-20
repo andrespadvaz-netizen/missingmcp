@@ -1,4 +1,9 @@
-# Prototipo Nivel 0–2 de orquestación inter-modelo (Metis)
+# Motor de orquestación inter-modelo (Metis)
+
+> Esta rama incorpora el candidato de escrituras productivas LEVEL_3. Su alcance,
+> permisos, límites y activación se describen en [Productive writes v2](../docs/PRODUCTIVE_WRITES.md).
+> La documentación que sigue describe el prototipo LEVEL_0–2 original; sus
+> afirmaciones de ausencia de escritura corresponden a esos niveles y al baseline v1.
 
 Implementación de la especificación técnica *"Prototipo Nivel 0–2 de orquestación
 inter-modelo"*. Runtime congelado: **Google Apps Script**, proyecto aislado,

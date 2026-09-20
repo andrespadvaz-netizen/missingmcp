@@ -17,7 +17,8 @@ var Config = (function () {
   var LEVELS = {
     LEVEL_0: 'LEVEL_0', // simulación pura: Retrieval servido por fixtures
     LEVEL_1: 'LEVEL_1', // lectura real de sólo lectura contra fuentes competentes
-    LEVEL_2: 'LEVEL_2'  // + construcción/validación de planes; toda escritura simulada
+    LEVEL_2: 'LEVEL_2', // + construcción/validación de planes; toda escritura simulada
+    LEVEL_3: 'LEVEL_3'  // política productiva explícita + aplicación desde puente durable
   };
 
   /**
@@ -254,6 +255,17 @@ var Config = (function () {
    * Sin partición declarada para (contexto, fuente) NO se lee esa fuente.
    */
   function partitionFor(context, source) {
+    if (RUN_LEVEL === LEVELS.LEVEL_3 && ProductivePolicy.enabled()) {
+      var policy=ProductivePolicy.config(), provider=String(source).toUpperCase();
+      var roots=Object.keys(policy.destinations).map(function(k){return policy.destinations[k];})
+        .filter(function(d){return d.context===context && d.provider===provider;}).map(function(d){return d.root_id;});
+      if (provider==='ASANA') { return roots.length ? {project_gids:roots} : null; }
+      if (provider==='DRIVE') { return roots.length ? {folder_ids:roots} : null; }
+      // No parent fallback or reuse of the broad legacy registry. Additional
+      // read-only sources must be explicitly partitioned in the same policy.
+      var reads=policy.read_partitions && policy.read_partitions[context];
+      return reads && reads[String(source).toLowerCase()] ? reads[String(source).toLowerCase()] : null;
+    }
     var all = _partitionsOverride !== null ? _partitionsOverride : _readJson('SOURCE_PARTITIONS');
     if (!all || !all[context]) { return null; }
     var key = String(source).toLowerCase();
@@ -296,7 +308,7 @@ var Config = (function () {
   // -------------------------------------------------------------- helpers
   function levelAllowsRealReads(level) {
     var l = level || RUN_LEVEL;
-    return l === LEVELS.LEVEL_1 || l === LEVELS.LEVEL_2;
+    return l === LEVELS.LEVEL_1 || l === LEVELS.LEVEL_2 || l === LEVELS.LEVEL_3;
   }
 
   /**
@@ -315,24 +327,32 @@ var Config = (function () {
    */
   function levelAllowsModelCalls(level) {
     var l = level || RUN_LEVEL;
-    return l === LEVELS.LEVEL_2;
+    return l === LEVELS.LEVEL_2 || l === LEVELS.LEVEL_3;
   }
 
   function levelAllowsPlanConstruction(level) {
     var l = level || RUN_LEVEL;
-    return l === LEVELS.LEVEL_2 || l === LEVELS.LEVEL_0;
+    return l === LEVELS.LEVEL_2 || l === LEVELS.LEVEL_0 || l === LEVELS.LEVEL_3;
   }
 
   function contextNames() {
-    return Object.keys(CONTEXTS);
+    return Object.keys(contexts());
+  }
+
+  function contexts() {
+    if (RUN_LEVEL !== LEVELS.LEVEL_3 || !ProductivePolicy.enabled()) { return CONTEXTS; }
+    var map = {}, configured = ProductivePolicy.config().contexts;
+    Object.keys(CONTEXTS).forEach(function(k){map[k]=CONTEXTS[k];});
+    Object.keys(configured).forEach(function(k){map[k]=configured[k];});
+    return map;
   }
 
   function primaryFor(context) {
-    return CONTEXTS[context] ? CONTEXTS[context].primary : null;
+    return contexts()[context] ? contexts()[context].primary : null;
   }
 
   function notionProjectFor(context) {
-    return CONTEXTS[context] ? CONTEXTS[context].notion_project : null;
+    return contexts()[context] ? contexts()[context].notion_project : null;
   }
 
   /**
@@ -423,6 +443,7 @@ var Config = (function () {
     levelAllowsModelCalls: levelAllowsModelCalls,
     levelAllowsPlanConstruction: levelAllowsPlanConstruction,
     contextNames: contextNames,
+    contexts: contexts,
     primaryFor: primaryFor,
     notionProjectFor: notionProjectFor,
     secret: secret,

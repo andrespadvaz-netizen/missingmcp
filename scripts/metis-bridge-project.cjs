@@ -29,6 +29,7 @@ async function main() {
   if(state.scriptId===engine) throw new Error('Refusing to modify baseline engine');
   const files=[{name:'appsscript',type:'JSON',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','appsscript.json'),'utf8')},
     {name:'Bridge',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8')},
+    {name:'WriteBridge',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','WriteBridge.gs'),'utf8')},
     {name:'Diagnostics',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','Diagnostics.gs'),'utf8')},
     {name:'ConnectionCopy',type:'SERVER_JS',source:fs.readFileSync(path.join(root,'metis-gateway-bridge','ConnectionCopy.gs'),'utf8')}];
   await api('/'+state.scriptId+'/content','PUT',{files});
@@ -39,7 +40,7 @@ async function main() {
   if(process.argv.includes('--update-deployment')) {
     if(!state.deployment?.deploymentId) throw new Error('No existing deployment');
     const current=await api('/'+state.scriptId+'/deployments/'+state.deployment.deploymentId);
-    const version=await api('/'+state.scriptId+'/versions','POST',{description:'Restore cached result gzip content type; engine v5 unchanged'});
+    const version=await api('/'+state.scriptId+'/versions','POST',{description:'Productive write receipts; reviewed engine library v9'});
     state.deployment=await api('/'+state.scriptId+'/deployments/'+state.deployment.deploymentId,'PUT',{
       deploymentConfig:{...current.deploymentConfig,versionNumber:version.versionNumber}});
     state.versionNumber=version.versionNumber;

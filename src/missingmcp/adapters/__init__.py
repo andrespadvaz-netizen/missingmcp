@@ -22,6 +22,7 @@ def build_adapters(config) -> dict:
         from .whoop import WhoopAdapter
         adapters["whoop"] = WhoopAdapter(config)
     if config.metis_bridge_url:
-        from .metis import MetisAdapter
+        from .metis import MetisAdapter, MetisChatGPTAdapter
         adapters["metis"] = MetisAdapter(config)
+        adapters["metis-chatgpt"] = MetisChatGPTAdapter(config, shared=adapters["metis"])
     return adapters

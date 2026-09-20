@@ -235,6 +235,8 @@ def test_http_auth_isolation_and_malformed_request(tmp_path):
     store.upsert_account(conn,'metis','metis-operator',__import__('hashlib').sha256(('o'*32).encode()).hexdigest(),SECRET)
     store.create_access_token(conn,store.hash_token('valid'),'metis','metis-operator','client')
     store.create_access_token(conn,store.hash_token('other'),'garmin','metis-operator','client')
+    store.upsert_account(conn,'metis-chatgpt','metis-operator',__import__('hashlib').sha256(('o'*32).encode()).hexdigest(),SECRET)
+    store.create_access_token(conn,store.hash_token('openai-valid'),'metis-chatgpt','metis-operator','openai-client')
     # No lifespan: this test must never contact the remote bridge.
     client = TestClient(app)
     body={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'metis_create_execution','arguments':REQUEST}}
@@ -246,6 +248,14 @@ def test_http_auth_isolation_and_malformed_request(tmp_path):
     assert bad.status_code == 200 and bad.json()['error']['code'] == -32602
     assert client.get('/metis').status_code == 200
     assert client.get('/.well-known/oauth-protected-resource/metis/mcp').status_code == 200
+    assert client.post('/metis-chatgpt/mcp',json=body,headers={'Authorization':'Bearer valid'}).status_code == 401
+    assert client.post('/metis/mcp',json=body,headers={'Authorization':'Bearer openai-valid'}).status_code == 401
+    openai_body={**body,'params':{**body['params'],'arguments':{**REQUEST,'idempotency_key':'openai-request-0001'}}}
+    good_openai=client.post('/metis-chatgpt/mcp',json=openai_body,headers={'Authorization':'Bearer openai-valid'})
+    assert good_openai.status_code == 200 and not good_openai.json()['result']['isError']
+    assert conn.execute("SELECT origin_model FROM metis_executions WHERE idem='openai-request-0001'").fetchone()[0] == 'OPENAI'
+    assert client.get('/metis-chatgpt').status_code == 200
+    assert client.get('/.well-known/oauth-protected-resource/metis-chatgpt/mcp').status_code == 200
     conn.close()
 
 

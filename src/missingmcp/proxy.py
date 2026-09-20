@@ -148,13 +148,13 @@ async def handle_mcp(request, method, adapter, conn, manager, config, secret, ra
         return _reauth_required(config, adapter)
 
     # Metis requests/results and client-supplied metadata stay off telemetry.
-    tool = "metis-request" if adapter.name == "metis" else _mcp_tool(body)
+    tool = "metis-request" if adapter.name in {"metis", "metis-chatgpt"} else _mcp_tool(body)
     if tool:
         try:
             store.record_usage(conn, adapter.name, key, tool)
         except Exception:  # noqa: BLE001 - usage metrics must never break a request
             pass
-    ph_event = None if adapter.name == "metis" else _mcp_event(body, adapter.name)
+    ph_event = None if adapter.name in {"metis", "metis-chatgpt"} else _mcp_event(body, adapter.name)
 
     if is_local(adapter.forward):
         try:
@@ -163,7 +163,7 @@ async def handle_mcp(request, method, adapter, conn, manager, config, secret, ra
             log_error("local-forward-auth-stale", adapter=adapter.name, account=key)
             return _reauth_required(config, adapter)
         except Exception as e:  # noqa: BLE001 - a local forward must never leak a raw 500
-            if adapter.name == "metis":
+            if adapter.name in {"metis", "metis-chatgpt"}:
                 log_error("local-forward-error", adapter="metis")
             else:
                 log_exc("local-forward-error", e, adapter=adapter.name, account=key, tool=tool)
