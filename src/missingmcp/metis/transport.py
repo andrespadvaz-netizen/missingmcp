@@ -9,6 +9,19 @@ from ..log import private_transport
 from .writes import WriteWorker
 
 
+# One-time reconciliation for a provider-verified interrupted request.  It is
+# deliberately bound to the immutable execution id and sequence below: it can
+# never affect a later execution or make another provider request.
+_INTERRUPTED_RECEIPT = {
+    "execution_id": "260d7063-1b3e-4423-9f73-36056249914e",
+    "seq": 17,
+    # 1,316 input × $1.25/M + 1,034 output × $10/M; no cached input.
+    "cost_usd": 0.011984,
+    # SHA-256 of the canonicalized, non-secret provider usage receipt.
+    "evidence_sha256": "1fab0d8424d321718e63314cc370a582f27cc87c5362153822316efc73429780",
+}
+
+
 class Bridge:
     def __init__(self, url, secret):
         self.url, self.secret = url, secret
@@ -46,9 +59,31 @@ class Worker:
         self.last_review = None
         self.write_worker = WriteWorker(queue, bridge)
 
+    def reconcile_interrupted_receipt(self, row):
+        receipt = _INTERRUPTED_RECEIPT
+        if row["id"] != receipt["execution_id"] or row["seq"] != receipt["seq"]:
+            return False
+        result = {
+            "status": "FAILED",
+            "error": "ENGINE_INTERRUPTED",
+            "cost_known": True,
+            "cost_usd": receipt["cost_usd"],
+            "requires_review": False,
+            "final_answer": None,
+            "accounting_reconciliation": {
+                "execution_id": receipt["execution_id"],
+                "seq": receipt["seq"],
+                "ledger_verified": True,
+                "evidence_sha256": receipt["evidence_sha256"],
+            },
+        }
+        return self.queue.reconcile_accounting(row, result)
+
     async def step(self):
         paused = self.queue.paused_execution()
         if paused:
+            if self.reconcile_interrupted_receipt(paused):
+                return
             if self.last_review is not None and time.monotonic() - self.last_review < 60:
                 return
             self.last_review = time.monotonic()
