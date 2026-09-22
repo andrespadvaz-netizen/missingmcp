@@ -26,6 +26,7 @@ jobs:
       - run: pytest -q
       - run: node metis-gateway-bridge/test_bridge.cjs
       - run: node metis-orchestrator-prototype/tools/test_productive.cjs
+      - run: node metis-orchestrator-prototype/tools/test_terminal.cjs
       - run: node tools/run_local.js all
         working-directory: metis-orchestrator-prototype
       - run: node tools/static_guards.js

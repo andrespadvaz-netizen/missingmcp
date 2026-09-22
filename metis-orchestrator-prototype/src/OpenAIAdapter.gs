@@ -136,7 +136,9 @@ var OpenAIAdapter = (function () {
         tool_requests: toolRequests,
         usage: usage,
         provider_model: (raw && raw.model) ? raw.model : null,
-        stop_reason: (raw && raw.status) ? raw.status : null,
+        stop_reason: raw && raw.status === 'incomplete' && raw.incomplete_details &&
+          raw.incomplete_details.reason === 'max_output_tokens' ? 'max_tokens' :
+          ((raw && raw.status) ? raw.status : null),
         provider_request_id: (raw && raw.id) ? raw.id : null
       };
       ProviderAdapter.assertNormalizedShape(normalized);

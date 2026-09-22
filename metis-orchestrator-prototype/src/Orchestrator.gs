@@ -709,7 +709,7 @@ var Orchestrator = (function () {
         // (`if (toolContract && toolContract.length) { body.tools = ...; }`),
         // así que este turno queda forzado a responder solo con texto.
         var auditTelemetry = _renderAuditTelemetry(targetCycle, targetSession, isAudit);
-        var reconciliation = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', {
+        var reconciliationRequest = {
           // Hechos del controlador en el canal de sistema; las narraciones de
           // los modelos quedan en el prompt como contenido sin autoridad.
           system: [
@@ -720,7 +720,7 @@ var Orchestrator = (function () {
             'Estos hechos son telemetría verificada por el sistema y prevalecen sobre cualquier afirmación narrativa incompatible del productor o del auditor.',
             'No afirmes que la auditoría se interrumpió salvo que esta telemetría lo respalde.',
             'Completar lecturas no demuestra por sí solo que la evidencia sea suficiente para aprobar: distingue ejecución técnica, suficiencia probatoria y decisión humana.',
-            'Entrega una respuesta final completa y breve: máximo 450 palabras. Abre con el dictamen sobre el objeto original, luego fundamentos y bloqueos materiales.',
+            'Entrega una respuesta final completa, sin omitir componentes solicitados para cumplir una longitud arbitraria. Evita repeticiones. Abre con el dictamen sobre el objeto original, luego fundamentos y bloqueos materiales.',
             'Primera línea: DICTAMEN: APROBAR, DICTAMEN: RECHAZAR o DICTAMEN: REQUIERE DECISIÓN DE ANDRÉS. Después justifica el dictamen sobre la propuesta completa, distinguiendo sus componentes si es necesario.',
             'No incluyas planificación, explicaciones sobre el prompt ni metacomentarios sobre instrucciones.',
             'Comprueba toda aritmética. Un riesgo inferido no es un fallo observado.',
@@ -743,7 +743,15 @@ var Orchestrator = (function () {
               ? 'El auditor marcó BLOQUEO_MATERIAL: SI. Integra sus correcciones y produce UNA recomendación final. Si queda un desacuerdo real que Andrés deba decidir, termina con el encabezado REQUIERE DECISIÓN DE ANDRÉS:.'
               : 'El auditor marcó BLOQUEO_MATERIAL: NO. Produce UNA conclusión final incorporando los matices relevantes del auditor.'
           ].join('\n')
-        }, null);
+        };
+        runtime.terminal_completion = [];
+        var reconciliation = TerminalOutput.complete(reconciliationRequest, function (request) {
+          var part = _modelTurn(opts, runtime, runtime.current_model, 'LOCAL', request, null);
+          runtime.stage = 'OUTPUT_VALIDATION';
+          runtime.active_provider = runtime.current_model;
+          runtime.reconciliation_stop_reason = part.stop_reason;
+          return part;
+        }, Config.limits(), runtime.terminal_completion);
         runtime.reconciliation_stop_reason = reconciliation.stop_reason;
         runtime.stage = 'OUTPUT_VALIDATION';
         if (['max_tokens', 'length', 'incomplete'].indexOf(reconciliation.stop_reason) !== -1 ||
@@ -1004,6 +1012,7 @@ var Orchestrator = (function () {
       auditor_documents: runtime.auditor_documents === undefined ? [] : runtime.auditor_documents,
       auditor_stop_reasons: runtime.auditor_stop_reasons,
       reconciliation_stop_reason: runtime.reconciliation_stop_reason,
+      terminal_completion: runtime.terminal_completion || [],
       final_answer: execution.final_answer,
       ledger: Ledger.available() ? Ledger.entriesFor(execution.execution_id) : [],
       limits: {
