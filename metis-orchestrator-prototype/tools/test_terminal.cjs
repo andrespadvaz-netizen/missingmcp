@@ -1,6 +1,8 @@
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const c=vm.createContext({Number,JSON,Errors:{configError:s=>Error(s),schemaError:s=>Error(s)}});
 vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/TerminalOutput.gs'),'utf8'),c);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/ProviderAdapter.gs'),'utf8'),c);
+vm.runInContext(fs.readFileSync(path.join(__dirname,'../src/OpenAIAdapter.gs'),'utf8'),c);
 const request={system:'POLICY',prompt:'OPERATOR_REQUEST\nPRODUCER\nAUDIT'};
 const partial='DICTAMEN: RECHAZAR\n'+'Análisis con evidencia. '.repeat(20);
 const response=(text,stop_reason,tool_requests=[])=>({text,stop_reason,tool_requests,provider_request_id:'synthetic'});
@@ -26,4 +28,8 @@ test('no progress rejected',()=>{let calls=0;assert.throws(()=>c.TerminalOutput.
 test('budget or intervention gate stops recovery without swallowing error',()=>{let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{if(++calls===1)return response(partial,'length');throw Error('BUDGET_EXCEEDED');},{MAX_TERMINAL_CONTINUATIONS:2},[]),/BUDGET_EXCEEDED/);});
 test('disabled recovery does not invoke again',()=>{let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return response(partial,'length');},{MAX_TERMINAL_CONTINUATIONS:0},[]));assert.equal(calls,1);});
 test('invalid policy rejected before invocation',()=>assert.throws(()=>c.TerminalOutput.complete(request,()=>assert.fail('called'),{MAX_TERMINAL_CONTINUATIONS:Infinity},[])));
+for(const reason of ['max_output_tokens','content_filter',undefined])test('OpenAI incomplete reason '+reason,()=>{
+  const result=c.OpenAIAdapter.create().normalizeResponse({status:'incomplete',incomplete_details:reason?{reason}:undefined,output:[]});
+  assert.equal(result.stop_reason,reason==='max_output_tokens'?'max_tokens':'incomplete');
+});
 console.log(passed+' terminal completion tests passed; no network');
