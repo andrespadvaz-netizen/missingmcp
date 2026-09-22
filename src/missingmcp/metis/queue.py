@@ -10,6 +10,8 @@ from ..store import encrypt, decrypt
 from . import writes
 
 TERMINAL = {"COMPLETED", "FAILED", "REQUIRES_ANDRES"}
+MAX_REQUEST_BYTES = 128_000
+MAX_ENVELOPE_BYTES = 1_048_576
 KEY = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
@@ -21,8 +23,8 @@ def validate(args):
     if not isinstance(args, dict) or set(args) not in ({"request", "idempotency_key"}, {"request", "idempotency_key", "context"}):
         raise RequestError("Use request, idempotency_key and optional context only.")
     text, key = args["request"], args["idempotency_key"]
-    if not isinstance(text, str) or not text.strip() or len(text.encode()) > 16000:
-        raise RequestError("request must contain 1–16000 UTF-8 bytes.")
+    if not isinstance(text, str) or not text.strip() or len(text.encode()) > MAX_REQUEST_BYTES:
+        raise RequestError(f"request must contain 1–{MAX_REQUEST_BYTES} UTF-8 bytes.")
     if not isinstance(key, str) or not KEY.fullmatch(key):
         raise RequestError("idempotency_key must contain 16–128 letters, digits, _ or -.")
     if "context" in args:
@@ -40,8 +42,8 @@ def validate(args):
         # The authenticated client asserts context, not authority. Engine policy still validates it.
         # Carry provenance in the encrypted request, covered by existing fingerprint/signature.
         text = f"Contexto: {project}\nProcedencia del contexto declarada por el cliente: {context['source']}\n\n{text}"
-        if len(text.encode()) > 16000:
-            raise RequestError("request plus context exceeds 16000 UTF-8 bytes; no content was truncated.")
+        if len(text.encode()) > MAX_REQUEST_BYTES:
+            raise RequestError(f"request plus context exceeds {MAX_REQUEST_BYTES} UTF-8 bytes; no content was truncated.")
     return text, key
 
 

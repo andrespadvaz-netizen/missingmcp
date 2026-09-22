@@ -40,6 +40,28 @@ function fixture() {
   return {context,data,request,calls:()=>calls,level:()=>level};
 }
 function test(name, fn) {fn(); tests++; console.log('PASS '+name);}
+test('Full artifact survives signed transport and retries without truncation',()=>{
+  const f=fixture();
+  const text='Contexto: ANDREA\n'+Array.from({length:42},(_,i)=>`Slide ${i+1}: ${'áé漢🙂'.repeat(130)}`).join('\n');
+  let received;
+  f.context.Engine.Orchestrator.run=request=>{received=request;return {status:'COMPLETED',limits:{cost_known:true,estimated_cost_usd:0},terminal_completion:[{attempt:1,stop_reason:'completed'}]};};
+  const payload={request:text,fingerprint:crypto.createHash('sha256').update(text).digest('hex')};
+  assert.ok(Buffer.byteLength(text)>16000);
+  const r=f.request(1,'run',payload);
+  assert.equal(r.state,'DONE');assert.equal(received,text);
+  assert.equal(r.result.terminal_completion[0].stop_reason,'completed');
+  assert.equal(f.request(1,'run',payload).state,'DONE');
+});
+test('Bridge enforces UTF-8 limit before spending and accepts escaped boundary',()=>{
+  for(const text of ['é'.repeat(64000), '\u0001'.repeat(128000)]) {
+    const f=fixture();
+    const r=f.request(1,'run',{request:text,fingerprint:crypto.createHash('sha256').update(text).digest('hex')});
+    assert.equal(r.state,'DONE');assert.equal(f.calls(),1);
+  }
+  const f=fixture(), text='é'.repeat(64001);
+  assert.equal(f.request(1,'run',{request:text}).state,'INVALID_REQUEST');
+  assert.equal(f.calls(),0);assert.equal(f.data.receipt,undefined);
+});
 test('Authenticated run; exact full answer, engine ID, route, cost, restored level',()=>{
   const f=fixture(), r=f.request();
   assert.equal(r.state,'DONE');assert.equal(r.result.engine_execution_id,'engine-1');

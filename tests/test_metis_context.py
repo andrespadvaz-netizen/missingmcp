@@ -1,5 +1,5 @@
 import pytest
-from missingmcp.metis.queue import validate, RequestError, Queue
+from missingmcp.metis.queue import validate, RequestError, Queue, MAX_REQUEST_BYTES
 
 
 def args():
@@ -35,8 +35,33 @@ def test_retrieved_instruction_is_not_context_authority():
 
 def test_full_payload_limit_is_checked_without_truncation():
     value = args()
-    value['request'] = 'x'*16000
+    value['request'] = 'x'*MAX_REQUEST_BYTES
     with pytest.raises(RequestError, match='no content was truncated'): validate(value)
+
+
+def test_full_unicode_artifact_survives_context_and_queue(tmp_path):
+    value = args()
+    value['request'] = '\n'.join(f'Lámina {i}: ' + 'áéíóú ' * 180 for i in range(1, 43))
+    assert len(value['request'].encode()) > 16000
+    compiled, _ = validate(value)
+    assert compiled.endswith(value['request'])
+    queue = Queue(str(tmp_path/'artifact.db'), 'test-secret-'*4)
+    try:
+        first = queue.create('operator', value)
+        assert queue.create('operator', value) == first
+        value['request'] += '\nCambio en la lámina 42'
+        with pytest.raises(RequestError, match='conflict'):
+            queue.create('operator', value)
+    finally:
+        queue.close()
+
+
+def test_utf8_byte_boundary():
+    value = {'request': 'é'*(MAX_REQUEST_BYTES//2), 'idempotency_key':'byte-boundary-0001'}
+    assert validate(value)[0] == value['request']
+    value['request'] += 'é'
+    with pytest.raises(RequestError):
+        validate(value)
 
 
 def test_idempotency_binds_context_and_provenance(tmp_path):

@@ -4,7 +4,7 @@ Candidate based on 8aabb521cc8eaca560ccd74193e3e2097131179c. The tag metis-orche
 
 ## Reported incident and evidence limits
 
-The operator reports two failed submissions from Claude: conversation context omitted from the first, and terminal reconciliation truncated after cross-audit in the second. The exact submitted payloads, execution IDs and full 18-slide deck have not yet been obtained. Attribution to a specific client or deployed version remains provisional. Code inspection establishes that ContextResolver reads the complete request and that the prior reconciliation had no recovery path.
+The operator reports two failed submissions from Claude: conversation context omitted from the first, and terminal reconciliation truncated after cross-audit in the second. The original 18-slide version was overwritten. The operator supplied its 42-slide successor, now privately preserved with SHA-256 as the new acceptance reference. Exact historical payloads and execution IDs remain unavailable; this is a new acceptance run, not an exact historical reproduction. Attribution to a specific client or deployed version remains provisional.
 
 ## Candidate changes
 
@@ -14,13 +14,15 @@ Terminal reconciliation may continue after a known length stop, at most MAX_TERM
 
 Each continuation must repeat the exact last 160 characters of the accumulated text before appending. Only that exact prefix is removed; mismatch, no progress, exhausted allowance or assembly above 100,000 characters fails closed. Stop reasons, request IDs and lengths are exposed in terminal_completion, without partial contents. This checks the text seam, not semantic correctness; real-client acceptance and independent review remain required. The previous arbitrary 450-word instruction is removed; the case must not be reduced to fit it.
 
-## Unresolved transport boundary
+## Bounded transport for the supplied artifact
 
-The ingress still limits the entire request plus envelope to 16,000 UTF-8 bytes. It rejects oversize input without truncation. This is not proof the full deck is represented. Before changing the transport, obtain the original deck and submitted request, verify all 18 slides and any relevant visual evidence, and determine whether references can be retrieved by the existing adapters. Do not silently convert a deck into a short summary or claim a text-only audit covers unseen graphics. Any necessary attachment transport is a separate evidenced change within this operational objective.
+The supplied deck contains 42 slides and five charts. Its slide text alone is 51,124 UTF-8 bytes, exceeding the former 16,000-byte ingress cap. The candidate now permits 128,000 UTF-8 bytes including the constructed context header, and 1 MiB JSON envelopes at the gateway and bridge. JSON Schema maxLength is a character bound; the server additionally enforces bytes. Unicode and escaped control-character boundary tests cover signed transport. Oversize requests are rejected before dispatch without truncation; signatures, encryption, idempotency, spend limits and write permissions are unchanged. Continuation telemetry is retained in the bridge result.
+
+This does not add native PowerPoint ingestion or establish visual completeness. Private extraction currently preserves slide text, chart caches and cover/closing image labels. Table relationships and visual evidence must still be checked before real acceptance. The client must transmit the full relevant artifact, never substitute a short summary or claim a text-only audit covers unseen graphics.
 
 ## Required real acceptance
 
-1. Preserve the exact full deck and privately record its hash/version and all 18 slides.
+1. Preserve the supplied full deck and privately record its hash/version and all 42 slides (done); validate extraction coverage before submission.
 2. In Claude, establish the project in an earlier turn and then request the complete audit without repeating the project.
 3. Capture the actual tool arguments, engine context and original request to prove continuity.
 4. Prove the full artifact enters the audit; no manual scope reduction.

@@ -6,7 +6,7 @@
 function doPost(e) {
   try {
     var raw = e && e.postData && e.postData.contents;
-    if (!raw || raw.length > 150000) { return json_({error: 'invalid_request'}); }
+    if (!raw || raw.length > 1048576 || Utilities.newBlob(raw).getBytes().length > 1048576) { return json_({error: 'invalid_request'}); }
     var envelope = JSON.parse(raw);
     var secret = PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET');
     if (!secret || secret.length < 32 || typeof envelope.payload !== 'string' || typeof envelope.signature !== 'string') {
@@ -55,7 +55,7 @@ function dispatch_(p) {
       if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) {
         return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
       }
-      if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 16000) {
+      if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 128000) {
         return {id:p.id, seq:p.seq, state:'INVALID_REQUEST'};
       }
       var hash = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, p.request, Utilities.Charset.UTF_8)
@@ -90,6 +90,7 @@ function dispatch_(p) {
         limits:result.limits, handoff:result.handoff, audit:result.audit,
         degradation:result.degradation, blocks:result.blocks,
         reconciliation_stop_reason:result.reconciliation_stop_reason,
+        terminal_completion:result.terminal_completion || [],
         requires_review:result.limits.cost_known !== true,
         engine_version:9,
         resolved_context:result.resolved_context,

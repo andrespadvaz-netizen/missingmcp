@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 from .base import LoginError, LoginOk, SessionExpired
-from ..metis.queue import Queue, RequestError, TERMINAL
+from ..metis.queue import Queue, RequestError, TERMINAL, MAX_REQUEST_BYTES, MAX_ENVELOPE_BYTES
 from ..metis.transport import Bridge, Worker
 
 POLL_WAIT_SECONDS = 20
@@ -34,7 +34,7 @@ TOOLS = [
      "changes through routine writes. APPLYING is pending: continue polling. Only verified write_receipts "
      "prove a write completed. An uncertain result is not permission to retry under another key.",
      "inputSchema":{"type":"object","additionalProperties":False,
-                    "properties":{"request":{"type":"string","maxLength":16000,
+                    "properties":{"request":{"type":"string","maxLength":MAX_REQUEST_BYTES,
                         "description":"Self-contained user request, with the established project and necessary current-conversation facts carried forward. Preserve action and constraints. Resolve available context yourself; ask only for genuine ambiguity. Freeze this exact text for idempotent retries."},
                                   "idempotency_key":{"type":"string","minLength":16,"maxLength":128},
                                   "context":{"type":"object","additionalProperties":False,
@@ -99,7 +99,7 @@ class MetisAdapter:
             raise SessionExpired()
         def response(value, status=200):
             return status, {"Content-Type":"application/json", "Cache-Control":"no-store"}, json.dumps(value, ensure_ascii=False).encode()
-        if len(body) > 40000:
+        if len(body) > MAX_ENVELOPE_BYTES:
             return response({"error":"too_large"}, 413)
         try:
             req = json.loads(body)
