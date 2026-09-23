@@ -138,6 +138,29 @@ var ProviderAdapter = (function () {
       throw Errors.priceUnknown('CORRIDA', 'el costo acumulado dejó de ser conocido');
     }
 
+    if (request.completion_recovery) {
+      // No tools, no external actions, no unbounded replay. UTF-8 bytes are a
+      // deliberately conservative input-token envelope plus framing allowance.
+      // This is a cost preflight, not a distributed reservation across runs.
+      var model = request.model || Config.PROVIDERS[provider.name].model;
+      var price = Config.priceFor(provider.name, model);
+      if (!price) throw Errors.priceUnknown(provider.name, model);
+      if (toolContract || !Number.isInteger(request.max_output_tokens) || request.max_output_tokens <= 0 || request.max_output_tokens > 16384) {
+        throw Errors.configError('Invalid bounded completion recovery');
+      }
+      var inputBound = unescape(encodeURIComponent(JSON.stringify({system:request.system, prompt:request.prompt}))).length + 1024;
+      var bound = inputBound / 1000 * price.input_per_1k + request.max_output_tokens / 1000 * price.output_per_1k;
+      if (runtime.cost_usd + bound > limitesPrevios.MAX_RUN_BUDGET_USD) {
+        throw Errors.limitExceeded('COMPLETION_RECOVERY_BUDGET', runtime.cost_usd + bound);
+      }
+      ['DAILY', 'MONTHLY'].forEach(function(scope) {
+        if (Ledger.spend(scope) + bound > limitesPrevios['MAX_' + scope + '_BUDGET_USD']) {
+          throw Errors.limitExceeded('MAX_' + scope + '_BUDGET_USD', Ledger.spend(scope) + bound);
+        }
+      });
+      if (runtime.active_provider_attempt) runtime.active_provider_attempt.recovery_cost_bound_usd = bound;
+    }
+
     // Guardas previas de los adaptadores. El código solo NO demuestra la fase:
     // CONFIG también puede surgir al leer precios después de recibir respuesta.
     // La evidencia de despacho de los adaptadores reales prevalece sobre esta lista.
@@ -204,6 +227,10 @@ var ProviderAdapter = (function () {
     // el contrato normalizado.
     if (runtime.active_provider_attempt) {
       runtime.active_provider_attempt.provider_model = normalized.provider_model;
+      runtime.active_provider_attempt.provider_request_id = normalized.provider_request_id;
+      runtime.active_provider_attempt.stop_reason = normalized.stop_reason;
+      runtime.active_provider_attempt.output_chars = normalized.text.length;
+      runtime.active_provider_attempt.usage = normalized.usage;
     }
 
     // Una respuesta sin bloque de uso deja el contador ciego igual que un

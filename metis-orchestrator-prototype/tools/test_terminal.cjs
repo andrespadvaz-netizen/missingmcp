@@ -33,3 +33,28 @@ for(const reason of ['max_output_tokens','content_filter',undefined])test('OpenA
   assert.equal(result.stop_reason,reason==='max_output_tokens'?'max_tokens':'incomplete');
 });
 console.log(passed+' terminal completion tests passed; no network');
+
+test('empty length output retries once with measured larger allowance',()=>{
+ let calls=0;const trace=[];
+ const result=c.TerminalOutput.complete(request,r=>{
+   if(++calls===1)return {...response('','max_tokens'),usage:{output_tokens:4096}};
+   assert.equal(r.max_output_tokens,8192);assert.equal(r.completion_recovery,true);
+   assert.equal(r.prompt,request.prompt);assert.equal(r.system,request.system);
+   return response('Complete response','end_turn');
+ },{MAX_TERMINAL_CONTINUATIONS:2},trace);
+ assert.equal(result.text,'Complete response');assert.equal(calls,2);
+ assert.equal(trace[0].recovery,'EMPTY_LENGTH_RESTART');
+});
+test('repeated empty cutoff cannot loop',()=>{
+ let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return {...response('','max_tokens'),usage:{output_tokens:4096}};},{MAX_TERMINAL_CONTINUATIONS:3},[]),/empty/);assert.equal(calls,2);
+});
+test('missing usage cannot trigger speculative empty retry',()=>{
+ let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return response('','max_tokens');},{MAX_TERMINAL_CONTINUATIONS:2},[]),/empty/);assert.equal(calls,1);
+});
+test('recovery budget preflight refuses before provider dispatch',()=>{
+ c.Config={assertBudgetsConfigured(){},limits:()=>({MAX_RUN_BUDGET_USD:1,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:10}),PROVIDERS:{ANTHROPIC:{model:'configured'}},priceFor:()=>({input_per_1k:0.005,output_per_1k:0.025})};
+ c.Ledger={assertAggregateBudget(){},spend:()=>0};
+ c.Errors.limitExceeded=(code)=>Error(code);c.Errors.priceUnknown=()=>Error('price');
+ assert.throws(()=>c.ProviderAdapter.callBudgeted({name:'ANTHROPIC',complete:()=>assert.fail('provider must not run')},{...request,prompt:'x'.repeat(100000),max_output_tokens:8192,completion_recovery:true},null,{cost_usd:0.5,cost_known:true}),/COMPLETION_RECOVERY_BUDGET/);
+});
+console.log(passed+' total terminal/recovery tests passed; no network');

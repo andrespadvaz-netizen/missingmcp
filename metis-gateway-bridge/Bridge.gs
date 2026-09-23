@@ -91,6 +91,8 @@ function dispatch_(p) {
         degradation:result.degradation, blocks:result.blocks,
         reconciliation_stop_reason:result.reconciliation_stop_reason,
         terminal_completion:result.terminal_completion || [],
+        model_completion:result.model_completion || [],
+        provider_provenance:result.provider_provenance || [],
         requires_review:result.limits.cost_known !== true,
         engine_version:9,
         resolved_context:result.resolved_context,
