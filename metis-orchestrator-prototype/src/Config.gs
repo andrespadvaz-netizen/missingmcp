@@ -85,7 +85,7 @@ var Config = (function () {
       model: 'claude-opus-5',
       version_header: '2023-06-01',
       secret_key: 'ANTHROPIC_API_KEY',
-      max_tokens: 4096
+      max_tokens: 16384
     }
   };
 
@@ -414,9 +414,19 @@ var Config = (function () {
 
   function runLevel() { return RUN_LEVEL; }
 
+  // Output capacity is separate from money ceilings, which remain external.
+  function outputTokenLimit(request) {
+    var value = request.max_output_tokens === undefined ? 16384 : request.max_output_tokens;
+    if (!Number.isInteger(value) || value < 1 || value > 16384) {
+      throw Errors.configError('Output allowance must be an integer from 1 to 16384');
+    }
+    return value;
+  }
+
   return {
     LEVELS: LEVELS,
     runLevel: runLevel,
+    outputTokenLimit: outputTokenLimit,
     _setRunLevel: _setRunLevel,
     _setPartitions: _setPartitions,
     _setLimits: _setLimits,

@@ -9,3 +9,8 @@ Unknown stops, unknown usage/prices, repeated empty output, invalid seams and bu
 Sources consulted: https://developers.openai.com/api/docs/guides/reasoning and https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost (23 September 2026). Both describe output allowances shared with reasoning and possible cutoff before visible text; the specific failed run's hidden reasoning consumption was not observed.
 
 Validation:176 engine cases/941 assertions;19 terminal/recovery tests;26 productive tests;20 bridge tests;59 targeted Python tests;9 static guards passed locally.
+
+## Authorized capacity — 25 September 2026
+The operator explicitly authorized USD 2 per run and 16,384 output tokens per call. Model identities, effort and daily/monthly ceilings remain unchanged. Both adapters now send an explicit output ceiling, reject invalid or larger requested ceilings, and retain smaller probe limits. The spending gateway preflights each real call (including full tool definitions) against remaining run/day/month budgets using declared rates and a conservative UTF-8 input envelope. Actual usage is still accounted after each response. This does not constitute a distributed aggregate reservation.
+
+Local validation:179 engine cases /957 assertions,26 productive checks and9 static guards passed. No new paid execution yet. Production configuration remains pending renewed Google identity verification; authorization of the new budget is already complete.

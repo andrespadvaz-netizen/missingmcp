@@ -91,10 +91,11 @@ var ProviderAdapter = (function () {
    * agujero, porque el gasto ocurre una capa más adentro y allí ya está
    * bloqueado.
    *
-   * Limitación inherente y declarada: el costo real sólo se conoce DESPUÉS de
-   * la respuesta, así que el tope por corrida no puede impedir que una única
-   * llamada lo rebase; impide la siguiente y detiene la corrida. Por eso el
-   * techo de tokens de salida importa tanto en el primer ensayo.
+   * Preflight adicional: los adaptadores reales construyen un body acotado y
+   * verifican una cota conservadora de costo antes de despachar, con tarifa
+   * declarada, bytes UTF-8 de entrada más margen y techo de salida explícito.
+   * El costo efectivo se contabiliza también al volver. No es una reserva
+   * distribuida: otros procesos concurrentes pueden consumir el agregado.
    *
    * `runtime` es el acumulador del llamador: { cost_usd, cost_known }.
    *
@@ -138,27 +139,34 @@ var ProviderAdapter = (function () {
       throw Errors.priceUnknown('CORRIDA', 'el costo acumulado dejó de ser conocido');
     }
 
-    if (request.completion_recovery) {
-      // No tools, no external actions, no unbounded replay. UTF-8 bytes are a
+    var liveRequestBody = typeof provider.buildRequest === 'function' && Config.levelAllowsModelCalls()
+      ? provider.buildRequest(request, toolContract) : null;
+    if (request.completion_recovery || liveRequestBody) {
+      // Recovery is tool-free; initial requests include the complete tool schema. UTF-8 bytes are a
       // deliberately conservative input-token envelope plus framing allowance.
       // This is a cost preflight, not a distributed reservation across runs.
       var model = request.model || Config.PROVIDERS[provider.name].model;
       var price = Config.priceFor(provider.name, model);
-      if (!price) throw Errors.priceUnknown(provider.name, model);
-      if (toolContract || !Number.isInteger(request.max_output_tokens) || request.max_output_tokens <= 0 || request.max_output_tokens > 16384) {
+      if (!price || !Number.isFinite(price.input_per_1k) || !Number.isFinite(price.output_per_1k) || price.input_per_1k < 0 || price.output_per_1k < 0) throw Errors.priceUnknown(provider.name, model);
+      var outputLimit = liveRequestBody ? (liveRequestBody.max_output_tokens || liveRequestBody.max_tokens) : request.max_output_tokens;
+      if ((request.completion_recovery && toolContract) || !Number.isInteger(outputLimit) || outputLimit <= 0 || outputLimit > 16384) {
         throw Errors.configError('Invalid bounded completion recovery');
       }
-      var inputBound = unescape(encodeURIComponent(JSON.stringify({system:request.system, prompt:request.prompt}))).length + 1024;
-      var bound = inputBound / 1000 * price.input_per_1k + request.max_output_tokens / 1000 * price.output_per_1k;
+      var inputBound = unescape(encodeURIComponent(JSON.stringify(liveRequestBody || {system:request.system, prompt:request.prompt}))).length + 1024;
+      var bound = inputBound / 1000 * price.input_per_1k + outputLimit / 1000 * price.output_per_1k;
       if (runtime.cost_usd + bound > limitesPrevios.MAX_RUN_BUDGET_USD) {
-        throw Errors.limitExceeded('COMPLETION_RECOVERY_BUDGET', runtime.cost_usd + bound);
+        throw Errors.limitExceeded(request.completion_recovery ? 'COMPLETION_RECOVERY_BUDGET' : 'MODEL_CALL_BUDGET', runtime.cost_usd + bound);
       }
       ['DAILY', 'MONTHLY'].forEach(function(scope) {
         if (Ledger.spend(scope) + bound > limitesPrevios['MAX_' + scope + '_BUDGET_USD']) {
           throw Errors.limitExceeded('MAX_' + scope + '_BUDGET_USD', Ledger.spend(scope) + bound);
         }
       });
-      if (runtime.active_provider_attempt) runtime.active_provider_attempt.recovery_cost_bound_usd = bound;
+      if (runtime.active_provider_attempt) {
+        runtime.active_provider_attempt.call_cost_bound_usd = bound;
+        runtime.active_provider_attempt.max_output_tokens = outputLimit;
+        if (request.completion_recovery) runtime.active_provider_attempt.recovery_cost_bound_usd = bound;
+      }
     }
 
     // Guardas previas de los adaptadores. El código solo NO demuestra la fase:

@@ -38,7 +38,7 @@ var OpenAIAdapter = (function () {
           { role: 'user', content: [{ type: 'input_text', text: request.prompt }] }
         ]
       };
-      if (request.max_output_tokens) { body.max_output_tokens = request.max_output_tokens; }
+      body.max_output_tokens = Config.outputTokenLimit(request);
       if (toolContract && toolContract.length) { body.tools = this.toolsFor(toolContract); }
       return body;
     }
