@@ -23,7 +23,7 @@ function registerUnitProveedoresReales() {
         // Sustituye servicios completos: ninguna propiedad ni credencial real.
         PropertiesService = { getScriptProperties: function () {
           return { getProperty: function (key) {
-            return key === 'METIS_PRICING' ? '{invalid' : 'fixture-only';
+            return key === 'METIS_PRICING' ? (calls === 0 ? JSON.stringify(PRECIOS) : '{invalid') : 'fixture-only';
           } };
         } };
         UrlFetchApp = { fetch: function () {
@@ -62,6 +62,28 @@ function registerUnitProveedoresReales() {
     OPENAI: { 'gpt-5': { input_per_1k: 0.00125, output_per_1k: 0.01 } },
     ANTHROPIC: { 'claude-opus-5': { input_per_1k: 0.005, output_per_1k: 0.025 } }
   };
+
+  TestRunner.unit('Capacidad autorizada', 'ambos proveedores tienen tope de 16384 y respetan una petición menor', function(t) {
+    var request={system:'s',prompt:'p'};
+    t.equals(OpenAIAdapter.create().buildRequest(request,null).max_output_tokens,16384,'OpenAI acotado');
+    t.equals(AnthropicAdapter.create().buildRequest(request,null).max_tokens,16384,'Anthropic acotado');
+    t.equals(Config.outputTokenLimit({max_output_tokens:16}),16,'sondas conservan su límite menor');
+    [0,-1,16385,Infinity,1.5].forEach(function(value){
+      t.throwsCode(Errors.CODES.CONFIG,function(){Config.outputTokenLimit({max_output_tokens:value});},'rechaza límite inválido '+value);
+    });
+  });
+  [OpenAIAdapter,AnthropicAdapter].forEach(function(factory){
+    TestRunner.unit('Presupuesto prospectivo',factory.create().name+' no despacha cuando la llamada no cabe',function(t){
+      Config._setRunLevel(Config.LEVELS.LEVEL_2);
+      Config._setPricing(PRECIOS);
+      Config._setLimits({MAX_RUN_BUDGET_USD:0.1,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:25});
+      var runtime={cost_usd:0,cost_known:true,active_provider_attempt:{invoked_provider:null}};
+      t.throwsCode(Errors.CODES.LIMIT_EXCEEDED,function(){ProviderAdapter.callBudgeted(factory.create(),{system:'s',prompt:'p'},null,runtime);},'frena antes de red');
+      t.equals(runtime.cost_usd,0,'no gasto');
+      t.equals(runtime.cost_known,true,'contador sigue conocido');
+      t.equals(runtime.active_provider_attempt.invoked_provider,null,'nunca invocado');
+    });
+  });
 
   TestRunner.unit('Proveedores', 'en LEVEL_0 y LEVEL_1 no se invoca ningún modelo', function (t) {
     var niveles = [Config.LEVELS.LEVEL_0, Config.LEVELS.LEVEL_1];

@@ -31,7 +31,7 @@ var AnthropicAdapter = (function () {
     buildRequest(request, toolContract) {
       var body = {
         model: request.model ? request.model : Config.PROVIDERS.ANTHROPIC.model,
-        max_tokens: request.max_output_tokens ? request.max_output_tokens : Config.PROVIDERS.ANTHROPIC.max_tokens,
+        max_tokens: Config.outputTokenLimit(request),
         system: request.system,
         messages: [{ role: 'user', content: [{ type: 'text', text: request.prompt }] }]
       };

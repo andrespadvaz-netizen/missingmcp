@@ -85,7 +85,7 @@ var Config = (function () {
       model: 'claude-opus-5',
       version_header: '2023-06-01',
       secret_key: 'ANTHROPIC_API_KEY',
-      max_tokens: 4096
+      max_tokens: 16384
     }
   };
 
@@ -165,6 +165,8 @@ var Config = (function () {
     MAX_READ_TURNS_PER_CYCLE: 3,
     // Productor (4) + auditor (4) + reconciliación (1).
     MAX_MODEL_INTERVENTIONS: 9,
+    // Uses remaining interventions and existing money caps; never increases them.
+    MAX_TERMINAL_CONTINUATIONS: 2,
     // Cap por turno, sólo para lecturas. Es distinto del fusible global:
     // aumentar MAX_TOOL_CALLS no resolvió la causa observada del lote excesivo.
     MAX_TOOL_CALLS_PER_TURN: 5,
@@ -412,9 +414,19 @@ var Config = (function () {
 
   function runLevel() { return RUN_LEVEL; }
 
+  // Output capacity is separate from money ceilings, which remain external.
+  function outputTokenLimit(request) {
+    var value = request.max_output_tokens === undefined ? 16384 : request.max_output_tokens;
+    if (!Number.isInteger(value) || value < 1 || value > 16384) {
+      throw Errors.configError('Output allowance must be an integer from 1 to 16384');
+    }
+    return value;
+  }
+
   return {
     LEVELS: LEVELS,
     runLevel: runLevel,
+    outputTokenLimit: outputTokenLimit,
     _setRunLevel: _setRunLevel,
     _setPartitions: _setPartitions,
     _setLimits: _setLimits,

@@ -40,6 +40,28 @@ function fixture() {
   return {context,data,request,calls:()=>calls,level:()=>level};
 }
 function test(name, fn) {fn(); tests++; console.log('PASS '+name);}
+test('Full artifact survives signed transport and retries without truncation',()=>{
+  const f=fixture();
+  const text='Contexto: ANDREA\n'+Array.from({length:42},(_,i)=>`Slide ${i+1}: ${'áé漢🙂'.repeat(130)}`).join('\n');
+  let received;
+  f.context.Engine.Orchestrator.run=request=>{received=request;return {status:'COMPLETED',limits:{cost_known:true,estimated_cost_usd:0},terminal_completion:[{attempt:1,stop_reason:'completed'}]};};
+  const payload={request:text,fingerprint:crypto.createHash('sha256').update(text).digest('hex')};
+  assert.ok(Buffer.byteLength(text)>16000);
+  const r=f.request(1,'run',payload);
+  assert.equal(r.state,'DONE');assert.equal(received,text);
+  assert.equal(r.result.terminal_completion[0].stop_reason,'completed');
+  assert.equal(f.request(1,'run',payload).state,'DONE');
+});
+test('Bridge enforces UTF-8 limit before spending and accepts escaped boundary',()=>{
+  for(const text of ['é'.repeat(64000), '\u0001'.repeat(128000)]) {
+    const f=fixture();
+    const r=f.request(1,'run',{request:text,fingerprint:crypto.createHash('sha256').update(text).digest('hex')});
+    assert.equal(r.state,'DONE');assert.equal(f.calls(),1);
+  }
+  const f=fixture(), text='é'.repeat(64001);
+  assert.equal(f.request(1,'run',{request:text}).state,'INVALID_REQUEST');
+  assert.equal(f.calls(),0);assert.equal(f.data.receipt,undefined);
+});
 test('Authenticated run; exact full answer, engine ID, route, cost, restored level',()=>{
   const f=fixture(), r=f.request();
   assert.equal(r.state,'DONE');assert.equal(r.result.engine_execution_id,'engine-1');
@@ -64,6 +86,40 @@ test('Terminated engine is technical failure, no automatic restart',()=>{
   const f=fixture();f.request();let receipt=JSON.parse(f.data.receipt);receipt.state='RUNNING';
   f.data.receipt=JSON.stringify(receipt);assert.equal(f.request(1,'status').result.error,'ENGINE_INTERRUPTED');
   f.request();assert.equal(f.calls(),1);
+});
+test('Durable execution advances one paid provider call per status without duplicate accounting',()=>{
+  const f=fixture();let paid=0, accounted=0;const executionIds=[];
+  const base={name:'ANTHROPIC',buildRequest:()=>({max_tokens:100}),
+    complete:()=>{paid++;return {text:'turn '+paid,tool_requests:[],usage:{estimated_cost_usd:.1},stop_reason:'completed',provider_model:'test',provider_request_id:'req-'+paid};},
+    completeWithTools:function(r){return this.complete(r);},normalizeResponse:x=>x,redactProviderError:e=>e};
+  f.context.Engine.AnthropicAdapter.create=()=>base;
+  f.context.Engine.OpenAIAdapter.create=()=>base;
+  f.context.Engine.Orchestrator.run=(request,opts)=>{
+    executionIds.push(opts.execution_id);let cost=0;
+    try {
+      for(let i=0;i<3;i++) {
+        const value=opts.providers.ANTHROPIC.complete({prompt:request});
+        const replayed=opts.provider_replay.isReplay(value);
+        cost+=value.usage.estimated_cost_usd;
+        if(!replayed)accounted++;
+        opts.provider_replay.onAccounted(value,replayed);
+      }
+    } catch(e) {
+      if(e.code==='CONFIG' && /DURABLE_YIELD/.test(e.message)) {
+        return {status:'FAILED',blocks:[{code:'CONFIG',detail:'DURABLE_YIELD'}],limits:{cost_known:true,estimated_cost_usd:cost}};
+      }
+      throw e;
+    }
+    return {status:'COMPLETED',execution_id:opts.execution_id,route:'CROSS_AUDIT',final_answer:'complete',
+      blocks:[],limits:{cost_known:true,estimated_cost_usd:cost}};
+  };
+  assert.equal(f.request().state,'RUNNING');
+  assert.equal(f.request(1,'status').state,'RUNNING');
+  const done=f.request(1,'status');
+  assert.equal(done.state,'DONE');assert.equal(done.result.status,'COMPLETED');
+  assert.equal(paid,3);assert.equal(accounted,3);
+  assert.deepEqual(executionIds,[f.request().id,f.request().id,f.request().id]);
+  assert.equal(f.request(1,'status').state,'DONE');assert.equal(paid,3);
 });
 test('Engine human decision and budget failure retained, not substituted',()=>{
   for (const status of ['REQUIRES_ANDRES','FAILED']) {

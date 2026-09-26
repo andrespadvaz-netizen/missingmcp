@@ -301,15 +301,31 @@ var Ledger = (function () {
   }
 
   function spend(scope) {
+    if (scope !== 'DAILY' && scope !== 'MONTHLY') {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY, 'Invalid budget counter scope');
+    }
     var raw = store().get(_counterKey(scope));
-    return raw ? Number(raw) : 0;
+    if (raw === null || raw === undefined) { return 0; }
+    var value = Number(raw);
+    if (typeof raw !== 'string' || !raw.trim() || !Number.isFinite(value) || value < 0) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY, 'Invalid ' + scope + ' budget counter; accounting review required');
+    }
+    return value;
   }
 
   function addSpend(usd) {
+    if (typeof usd !== 'number' || !Number.isFinite(usd) || usd < 0) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY, 'Invalid spend amount');
+    }
+    // Validate BOTH counters before touching either. A corrupt monthly value
+    // must not leave a newly incremented daily counter behind.
+    var totals = { DAILY: spend('DAILY') + usd, MONTHLY: spend('MONTHLY') + usd };
+    if (!Number.isFinite(totals.DAILY) || !Number.isFinite(totals.MONTHLY)) {
+      throw Errors.make(Errors.CODES.LEDGER_CONSISTENCY, 'Budget counter overflow');
+    }
     ['DAILY', 'MONTHLY'].forEach(function (scope) {
       var key = _counterKey(scope);
-      var current = store().get(key);
-      store().set(key, String((current ? Number(current) : 0) + usd));
+      store().set(key, String(totals[scope]));
     });
   }
 

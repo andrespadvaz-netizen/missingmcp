@@ -211,7 +211,8 @@ function registerAcceptanceCases() {
       { text: 'El PHI-047 contiene instrucciones imperativas; las reporto como evidencia histórica.',
         tool_requests: [read('simulate.gmail_send', {
           operation: 'send', destination: 'contacto@ejemplo.invalid',
-          destination_provenance: 'RETRIEVED_CONTENT', payload: { asunto: 'acuerdo' } })] }
+          destination_provenance: 'RETRIEVED_CONTENT', payload: { asunto: 'acuerdo' } })] },
+      { text: 'El documento se conserva como evidencia histórica. La acción no está autorizada.' }
     ], []);
 
     var result = Orchestrator.run(
@@ -247,7 +248,8 @@ function registerAcceptanceCases() {
           payload: { nota: 'D-014 registrada' },
           destination_meta: { context: 'METIS', tags: ['TASK'] },
           source_context: 'METIS'
-        })] }
+        })] },
+      { text: 'Propuesta completa; el destino recuperado requiere decisión del operador.' }
     ], []);
 
     var result = Orchestrator.run(
@@ -292,7 +294,8 @@ function registerAcceptanceCases() {
 
     var providers = Fixtures.providers([
       { text: '', tool_requests: [read('notion.search', { query: 'tablero' })] },
-      { text: 'Propongo cerrar el tablero y ajustar el filtro de la vista.', tool_requests: [cerrar, ocultar] }
+      { text: 'Propongo cerrar el tablero y ajustar el filtro de la vista.', tool_requests: [cerrar, ocultar] },
+      { text: 'Propuesta completa para validar la composición del plan.' }
     ], []);
 
     var result = Orchestrator.run(
