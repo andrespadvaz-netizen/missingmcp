@@ -133,7 +133,8 @@ function dispatch_(p) {
         model_completion:result.model_completion || [],
         provider_provenance:result.provider_provenance || [],
         requires_review:result.limits.cost_known !== true,
-        engine_version:9,
+        engine_version:17,
+        engine_release:9,
         resolved_context:result.resolved_context,
         write_plan:result.write_plan || [],
         write_plan_verified:productive && result.status === 'COMPLETED' && !!result.action_plan && result.action_plan.valid === true
@@ -261,7 +262,7 @@ function cached_(props, receipt) {
 
 /** Read-only capability probe: no credential values and no provider calls. */
 function inspectBridge() {
-  return {engine_version:9, level:Engine.Config.runLevel(),
+  return {engine_version:17, engine_release:9, level:Engine.Config.runLevel(),
     productive_enabled:PropertiesService.getScriptProperties().getProperty('GATEWAY_PRODUCTIVE_ENABLED')==='true',
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};

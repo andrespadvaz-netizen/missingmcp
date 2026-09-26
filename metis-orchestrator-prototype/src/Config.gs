@@ -85,7 +85,10 @@ var Config = (function () {
       model: 'claude-opus-5',
       version_header: '2023-06-01',
       secret_key: 'ANTHROPIC_API_KEY',
-      max_tokens: 16384
+      max_tokens: 16384,
+      // Matches the operator-facing Claude client setting used for acceptance.
+      // Opus 5 otherwise defaults to adaptive thinking at high effort.
+      effort: 'medium'
     }
   };
 

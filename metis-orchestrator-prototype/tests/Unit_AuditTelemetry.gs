@@ -108,6 +108,8 @@ function registerUnitAuditTelemetry() {
       t.includes(result.final_answer, example.text, 'entrega la conclusión real sin sustituirla');
       t.includes(providers.OPENAI.calls[1].system, 'No le pidas volver a elegir un valor que ya indicó',
         'no vuelve a pedir una preferencia expresada por el operador');
+      t.includes(providers.OPENAI.calls[0].system, 'Reserva capacidad suficiente para una respuesta visible completa',
+        'cada etapa protege la salida visible sin cambiar modelo ni effort');
     });
   });
 
