@@ -126,6 +126,33 @@ function registerUnitLedger() {
   });
 
 
+  TestRunner.unit('Ledger', 'corrupt budget counters fail closed without partial updates', function (t) {
+    Ledger.addSpend(0.25);
+    var st = Fixtures.ledgerStore();
+    var monthly = st.keys().filter(function(k){return k.indexOf(Config.LEDGER.COUNTER_PREFIX + 'MONTHLY_') === 0;})[0];
+    ['NaN', 'Infinity', '-1', '', '  ', 'invalid'].forEach(function(raw) {
+      st.set(monthly, raw);
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.assertAggregateBudget(); }, 'invalid aggregate blocks: ' + raw);
+      var calls = 0;
+      var provider = {name:'ANTHROPIC',complete:function(){calls++;}};
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){
+        ProviderAdapter.callBudgeted(provider, {system:'policy',prompt:'request'}, null, {cost_usd:0,cost_known:true});
+      }, 'paid-call gateway rejects corrupt aggregate');
+      t.equals(calls, 0, 'no provider invocation');
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.addSpend(0.5); }, 'no update over corrupt monthly');
+      t.equals(Ledger.spend('DAILY'), 0.25, 'daily counter unchanged');
+      t.equals(st.get(monthly), raw, 'corrupt evidence preserved for review');
+    });
+    st.set(monthly, '0.25');
+    [NaN, Infinity, -1, '0.1', null].forEach(function(value) {
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.addSpend(value); }, 'invalid charge blocked');
+    });
+    t.equals(Ledger.spend('MONTHLY'), 0.25, 'invalid charge cannot corrupt counters');
+    Ledger.addSpend(0.5);
+    t.equals(Ledger.spend('DAILY'), 0.75, 'valid daily addition');
+    t.equals(Ledger.spend('MONTHLY'), 0.75, 'valid monthly addition');
+  });
+
   TestRunner.unit('Ledger', 'el registro de handoffs se persiste y no lleva sustancia', function (t) {
     var handoff = {
       handoff_id: 'h-1', execution_id: 'exec-ledger',
