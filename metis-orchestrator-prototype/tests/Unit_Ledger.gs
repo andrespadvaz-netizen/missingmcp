@@ -125,6 +125,34 @@ function registerUnitLedger() {
     }, 'alcanzar el techo diario detiene la corrida');
   });
 
+  TestRunner.unit('Ledger', 'replay durable reconstruye costo sin cobrar dos veces', function (t) {
+    var normalized = {
+      text:'respuesta', tool_requests:[],
+      usage:{input_tokens:10,output_tokens:5,estimated_cost_usd:0.25},
+      stop_reason:'completed',provider_model:'fixture',provider_request_id:'req-durable'
+    };
+    var provider = {
+      name:'ANTHROPIC',
+      complete:function(){return normalized;},
+      completeWithTools:function(){return normalized;},
+      normalizeResponse:function(x){return x;},
+      redactProviderError:function(e){return e;}
+    };
+    var replayed = false;
+    var accounted = 0;
+    var runtime = {cost_usd:0,cost_known:true,provider_replay:{
+      isReplay:function(){return replayed;},
+      onAccounted:function(_,wasReplay){accounted++;t.equals(wasReplay,replayed,'hook recibe procedencia correcta');}
+    }};
+    var before = Ledger.spend('DAILY');
+    ProviderAdapter.callBudgeted(provider,{system:'s',prompt:'p'},null,runtime);
+    replayed = true;
+    ProviderAdapter.callBudgeted(provider,{system:'s',prompt:'p'},null,runtime);
+    t.equals(runtime.cost_usd,0.5,'el total de corrida se reconstruye con ambas etapas');
+    t.equals(Ledger.spend('DAILY')-before,0.25,'el agregado cobra la respuesta una sola vez');
+    t.equals(accounted,2,'el hook observa llamada nueva y replay');
+  });
+
 
   TestRunner.unit('Ledger', 'corrupt budget counters fail closed without partial updates', function (t) {
     Ledger.addSpend(0.25);

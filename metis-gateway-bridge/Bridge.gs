@@ -37,21 +37,35 @@ function dispatch_(p) {
   if (!lock.tryLock(100)) { return {id: p.id, seq: p.seq, state: 'BUSY'}; }
   try {
     var receipt = JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+    var resuming = false;
     if (p.seq < receipt.seq) { return {id:p.id, seq:p.seq, state:'GONE'}; }
     if (p.seq === receipt.seq) {
       if (p.id !== receipt.id || p.fingerprint !== receipt.fingerprint) {
         return {id:p.id, seq:p.seq, state:'CONFLICT'};
       }
-      if (receipt.state === 'RUNNING') {
-        // Acquiring this lock proves the prior executor ended (including timeout).
-        finish_(props, receipt, {status:'FAILED', error:'ENGINE_INTERRUPTED',
-          cost_usd:null, cost_known:false, engine_execution_id:null,
-          final_answer:null, requires_review:true});
+      if (receipt.state === 'CHECKPOINT') {
+        if (p.action !== 'status') {
+          return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
+        }
+        var durable = loadDurable_(props, receipt);
+        p.request = durable.request;
+        p.origin_model = durable.origin_model;
+        receipt.state = 'RUNNING';
+        props.setProperty('receipt', JSON.stringify(receipt));
+        resuming = true;
       }
-      return cached_(props, receipt);
+      if (receipt.state === 'RUNNING') {
+        if (!resuming) {
+          // Acquiring this lock proves the prior executor ended (including timeout).
+          finish_(props, receipt, {status:'FAILED', error:'ENGINE_INTERRUPTED',
+            cost_usd:null, cost_known:false, engine_execution_id:null,
+            final_answer:null, requires_review:true});
+        }
+      }
+      if (!resuming) { return cached_(props, receipt); }
     }
-    if (p.seq !== receipt.seq + 1) { return {id:p.id, seq:p.seq, state:'SEQUENCE_GAP'}; }
-    if (p.action === 'run') {
+    if (!resuming && p.seq !== receipt.seq + 1) { return {id:p.id, seq:p.seq, state:'SEQUENCE_GAP'}; }
+    if (!resuming && p.action === 'run') {
       if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) {
         return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
       }
@@ -63,25 +77,50 @@ function dispatch_(p) {
       if (hash !== p.fingerprint) { return {id:p.id, seq:p.seq, state:'CONFLICT'}; }
     }
     // Commit spend receipt BEFORE the engine. Never erase or decrement seq.
-    receipt = {seq:p.seq, id:p.id, fingerprint:p.fingerprint, state:'RUNNING', chunks:0};
-    props.setProperty('receipt', JSON.stringify(receipt));
-    if (p.action === 'status') {
+    if (!resuming) {
+      receipt = {seq:p.seq, id:p.id, fingerprint:p.fingerprint, state:'RUNNING', chunks:0, durable_chunks:0};
+      props.setProperty('receipt', JSON.stringify(receipt));
+    }
+    if (!resuming && p.action === 'status') {
       // Close an undelivered dispatch. Any delayed run now observes this tombstone.
       finish_(props, receipt, {status:'FAILED', error:'DISPATCH_NOT_DELIVERED',
         cost_usd:0, cost_known:true, engine_execution_id:null, final_answer:null});
       return cached_(props, receipt);
+    }
+    if (!resuming) {
+      clearDurable_(props, receipt);
+      storeDurable_(props, receipt, {request:p.request, origin_model:p.origin_model || 'ANTHROPIC', calls:[]});
     }
     var previous = Engine.Config.runLevel();
     try {
       if (previous !== Engine.Config.LEVELS.LEVEL_0) { throw new Error('unexpected_level'); }
       var productive = props.getProperty('GATEWAY_PRODUCTIVE_ENABLED') === 'true';
       Engine.Config._setRunLevel(productive ? 'LEVEL_3' : Engine.Config.LEVELS.LEVEL_2);
+      var durableState = loadDurable_(props, receipt);
+      if (durableState.calls.some(function(c){return c.state === 'STARTED';})) {
+        finish_(props, receipt, {status:'FAILED', error:'DURABLE_PROVIDER_UNCERTAIN',
+          cost_usd:null, cost_known:false, engine_execution_id:null,
+          final_answer:null, requires_review:true});
+        return cached_(props, receipt);
+      }
+      var replay = durableReplay_(props, receipt, durableState);
       var result = Engine.Orchestrator.run(p.request, {
+        execution_id: p.id,
         // First client is Claude. Identity is server-declared, never client-selected.
         current_model: p.origin_model || 'ANTHROPIC',
         mandate: {source:'FIXED_POLICY',requests_execution:productive},
-        providers: {OPENAI:Engine.OpenAIAdapter.create(), ANTHROPIC:Engine.AnthropicAdapter.create()}
+        providers: {
+          OPENAI:replay.wrap(Engine.OpenAIAdapter.create()),
+          ANTHROPIC:replay.wrap(Engine.AnthropicAdapter.create())
+        },
+        provider_replay: replay.hooks
       });
+      if (isDurableYield_(result)) {
+        receipt.state = 'CHECKPOINT';
+        receipt.next_call = durableState.calls.length + 1;
+        props.setProperty('receipt', JSON.stringify(receipt));
+        return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
+      }
       var output = {
         status: ['COMPLETED','FAILED','REQUIRES_ANDRES'].indexOf(result.status) >= 0 ? result.status : 'REQUIRES_ANDRES',
         engine_status:result.status, engine_execution_id:result.execution_id,
@@ -100,12 +139,100 @@ function dispatch_(p) {
         write_plan_verified:productive && result.status === 'COMPLETED' && !!result.action_plan && result.action_plan.valid === true
       };
       finish_(props, receipt, output);
+      clearDurable_(props, receipt);
     } catch (_) {
       finish_(props, receipt, {status:'FAILED', error:'ENGINE_OR_PERSISTENCE_FAILURE',
         cost_usd:null, cost_known:false, engine_execution_id:null, final_answer:null, requires_review:true});
     } finally { Engine.Config._setRunLevel(previous); }
     return cached_(props, receipt);
   } finally { lock.releaseLock(); }
+}
+
+function isDurableYield_(result) {
+  return !!(result && result.blocks && result.blocks.some(function(b) {
+    return b && b.code === 'CONFIG' && String(b.detail || '').indexOf('DURABLE_YIELD') !== -1;
+  }));
+}
+
+/**
+ * Replays accounted provider results and permits exactly one new paid call in
+ * each bridge invocation. An intent is durable before network dispatch; the
+ * response becomes replayable only after ProviderAdapter has charged Ledger.
+ */
+function durableReplay_(props, receipt, state) {
+  var cursor = 0;
+  var newCalls = 0;
+  var lastWasReplay = false;
+  var pendingIndex = null;
+
+  function save() { storeDurable_(props, receipt, state); }
+  function invoke(base, method, args) {
+    var index = cursor++;
+    var prior = state.calls[index];
+    if (prior && prior.state === 'ACCOUNTED') {
+      lastWasReplay = true;
+      return JSON.parse(JSON.stringify(prior.response));
+    }
+    if (prior || newCalls >= 1) {
+      var y = new Error('DURABLE_YIELD'); y.code = 'CONFIG'; throw y;
+    }
+    state.calls.push({state:'STARTED', provider:base.name || null, method:method});
+    pendingIndex = index;
+    newCalls++;
+    lastWasReplay = false;
+    save();
+    return base[method].apply(base, args);
+  }
+
+  function wrap(base) {
+    return {
+      name: base.name,
+      buildRequest: function(request, tools) {
+        var prior = state.calls[cursor];
+        return prior && prior.state === 'ACCOUNTED' ? null :
+          (typeof base.buildRequest === 'function' ? base.buildRequest(request, tools) : null);
+      },
+      complete: function(request) { return invoke(base, 'complete', [request]); },
+      completeWithTools: function(request, tools) { return invoke(base, 'completeWithTools', [request, tools]); },
+      normalizeResponse: function(raw) { return base.normalizeResponse(raw); },
+      redactProviderError: function(error) { return base.redactProviderError(error); }
+    };
+  }
+
+  return {
+    wrap: wrap,
+    hooks: {
+      isReplay: function() { return lastWasReplay; },
+      onAccounted: function(normalized, replayed) {
+        if (replayed) { return; }
+        state.calls[pendingIndex] = {state:'ACCOUNTED', response:normalized};
+        pendingIndex = null;
+        save();
+      }
+    }
+  };
+}
+
+function storeDurable_(props, receipt, state) {
+  var packed = Utilities.base64Encode(Utilities.gzip(Utilities.newBlob(JSON.stringify(state))).getBytes());
+  if (packed.length > 360000) { throw new Error('DURABLE_STORAGE_CAPACITY'); }
+  var chunks = Math.ceil(packed.length / 8000);
+  for (var i=0; i<chunks; i++) { props.setProperty('durable_'+i, packed.slice(i*8000,(i+1)*8000)); }
+  for (var j=chunks; j<(receipt.durable_chunks || 0); j++) { props.deleteProperty('durable_'+j); }
+  receipt.durable_chunks = chunks;
+  props.setProperty('receipt', JSON.stringify(receipt));
+}
+
+function loadDurable_(props, receipt) {
+  var packed = '';
+  for (var i=0; i<(receipt.durable_chunks || 0); i++) { packed += props.getProperty('durable_'+i) || ''; }
+  if (!packed) { throw new Error('DURABLE_STATE_MISSING'); }
+  return JSON.parse(Utilities.ungzip(Utilities.newBlob(Utilities.base64Decode(packed), 'application/x-gzip')).getDataAsString('UTF-8'));
+}
+
+function clearDurable_(props, receipt) {
+  for (var i=0; i<(receipt.durable_chunks || 0); i++) { props.deleteProperty('durable_'+i); }
+  receipt.durable_chunks = 0;
 }
 
 function finish_(props, receipt, result) {

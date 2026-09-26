@@ -90,7 +90,11 @@ var Orchestrator = (function () {
       active_provider: null,
       degradation: null,
       provider_provenance: [],
-      active_provider_attempt: null
+      active_provider_attempt: null,
+      // Optional transport-owned journal. It lets the bridge replay an
+      // already-accounted provider response without charging the aggregate
+      // ledger twice, and persist a new response only after accounting.
+      provider_replay: options.provider_replay || null
     };
   }
 
@@ -462,6 +466,7 @@ var Orchestrator = (function () {
   function run(operatorRequest, options) {
     var opts = options || {};
     var execution = Schemas.newExecution(operatorRequest);
+    if (opts.execution_id) { execution.execution_id = opts.execution_id; }
     var runtime = _newRuntime(opts);
     HandoffBuilder.resetRegistry();
     var session = null;

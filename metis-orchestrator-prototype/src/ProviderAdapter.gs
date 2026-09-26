@@ -257,7 +257,14 @@ var ProviderAdapter = (function () {
       var cost = normalized.usage.estimated_cost_usd;
       if (typeof cost === 'number') {
         runtime.cost_usd += cost;
-        Ledger.addSpend(cost);
+        var replayed = !!(runtime.provider_replay &&
+          typeof runtime.provider_replay.isReplay === 'function' &&
+          runtime.provider_replay.isReplay(normalized));
+        if (!replayed) { Ledger.addSpend(cost); }
+        if (runtime.provider_replay &&
+            typeof runtime.provider_replay.onAccounted === 'function') {
+          runtime.provider_replay.onAccounted(normalized, replayed);
+        }
         var limits = Config.limits();
         if (typeof limits.MAX_RUN_BUDGET_USD === 'number' &&
             runtime.cost_usd > limits.MAX_RUN_BUDGET_USD) {
