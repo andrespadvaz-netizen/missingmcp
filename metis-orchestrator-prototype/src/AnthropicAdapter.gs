@@ -29,11 +29,15 @@ var AnthropicAdapter = (function () {
     }
 
     buildRequest(request, toolContract) {
+      var effort = request.effort ? request.effort : Config.PROVIDERS.ANTHROPIC.effort;
+      if (['low', 'medium', 'high', 'max'].indexOf(effort) === -1) {
+        throw Errors.configError('Anthropic effort must be low, medium, high or max');
+      }
       var body = {
         model: request.model ? request.model : Config.PROVIDERS.ANTHROPIC.model,
         max_tokens: Config.outputTokenLimit(request),
         thinking: { type: 'adaptive' },
-        output_config: { effort: Config.PROVIDERS.ANTHROPIC.effort },
+        output_config: { effort: effort },
         system: request.system,
         messages: [{ role: 'user', content: [{ type: 'text', text: request.prompt }] }]
       };

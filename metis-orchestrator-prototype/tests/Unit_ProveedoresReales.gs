@@ -70,6 +70,11 @@ function registerUnitProveedoresReales() {
     t.equals(anthropicBody.max_tokens,16384,'Anthropic acotado');
     t.deepEquals(anthropicBody.thinking,{type:'adaptive'},'thinking adaptativo declarado');
     t.equals(anthropicBody.output_config.effort,'medium','effort coincide con el cliente de aceptación');
+    t.equals(AnthropicAdapter.create().buildRequest({system:'s',prompt:'p',effort:'low'},null).output_config.effort,
+      'low','la recuperación puede bajar sólo el esfuerzo de su llamada');
+    t.throwsCode(Errors.CODES.CONFIG,function(){
+      AnthropicAdapter.create().buildRequest({system:'s',prompt:'p',effort:'invalid'},null);
+    },'rechaza effort no permitido');
     t.equals(Config.outputTokenLimit({max_output_tokens:16}),16,'sondas conservan su límite menor');
     [0,-1,16385,Infinity,1.5].forEach(function(value){
       t.throwsCode(Errors.CODES.CONFIG,function(){Config.outputTokenLimit({max_output_tokens:value});},'rechaza límite inválido '+value);

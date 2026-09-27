@@ -34,16 +34,17 @@ for(const reason of ['max_output_tokens','content_filter',undefined])test('OpenA
 });
 console.log(passed+' terminal completion tests passed; no network');
 
-test('empty length output retries once with measured larger allowance',()=>{
+test('empty length output retries once at low effort with the same bounded allowance',()=>{
  let calls=0;const trace=[];
  const result=c.TerminalOutput.complete(request,r=>{
-   if(++calls===1)return {...response('','max_tokens'),usage:{output_tokens:4096}};
-   assert.equal(r.max_output_tokens,8192);assert.equal(r.completion_recovery,true);
-   assert.equal(r.prompt,request.prompt);assert.equal(r.system,request.system);
+   if(++calls===1)return {...response('','max_tokens'),usage:{output_tokens:16384}};
+   assert.equal(r.max_output_tokens,16384);assert.equal(r.completion_recovery,true);
+   assert.equal(r.effort,'low');assert.equal(r.prompt,request.prompt);
+   assert.ok(r.system.startsWith(request.system));assert.match(r.system,/respuesta visible/);
    return response('Complete response','end_turn');
  },{MAX_TERMINAL_CONTINUATIONS:2},trace);
  assert.equal(result.text,'Complete response');assert.equal(calls,2);
- assert.equal(trace[0].recovery,'EMPTY_LENGTH_RESTART');
+ assert.equal(trace[0].recovery,'EMPTY_REASONING_RESTART_LOW_EFFORT');
 });
 test('repeated empty cutoff cannot loop',()=>{
  let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return {...response('','max_tokens'),usage:{output_tokens:4096}};},{MAX_TERMINAL_CONTINUATIONS:3},[]),/empty/);assert.equal(calls,2);

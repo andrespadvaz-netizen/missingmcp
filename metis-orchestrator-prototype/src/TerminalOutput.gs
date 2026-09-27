@@ -15,18 +15,24 @@ var TerminalOutput = (function () {
         throw Errors.schemaError('Terminal output must contain text and no tool requests');
       }
       if (!result.text.trim()) {
-        // No visible prefix exists to resume. A single bounded restart may use
-        // twice the OBSERVED output allowance; it is not an anchored continuation.
-        // The spending gateway preflights this controller-marked recovery.
+        // No visible prefix exists to resume. Opus can spend the complete output
+        // allowance on adaptive thinking before emitting a text block. Retry once
+        // with the same bounded allowance and low effort so the visible answer has
+        // room; this is a restart, not an anchored continuation.
         if (attempt !== 0 || ['max_tokens','length'].indexOf(result.stop_reason) === -1 || !cap ||
             !result.usage || !Number.isInteger(result.usage.output_tokens) || result.usage.output_tokens <= 0 ||
-            result.usage.output_tokens > 8192) {
+            result.usage.output_tokens > 16384) {
           throw Errors.schemaError('Terminal output empty; no safe bounded recovery');
         }
-        pending = {system:request.system, prompt:request.prompt,
-          max_output_tokens:2 * result.usage.output_tokens, completion_recovery:true};
+        pending = {
+          system: request.system + '\nRECUPERACION TERMINAL: produce la respuesta visible completa y concisa; ' +
+            'no agotes el presupuesto en razonamiento interno.',
+          prompt:request.prompt,
+          max_output_tokens:result.usage.output_tokens,
+          effort:'low', completion_recovery:true
+        };
         if (request.model) pending.model = request.model;
-        trace[trace.length - 1].recovery = 'EMPTY_LENGTH_RESTART';
+        trace[trace.length - 1].recovery = 'EMPTY_REASONING_RESTART_LOW_EFFORT';
         continue;
       }
       var addition = result.text;
