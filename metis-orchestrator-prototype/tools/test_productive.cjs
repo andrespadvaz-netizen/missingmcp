@@ -166,4 +166,12 @@ test('Lens capsule is read-only, partition-scoped, and never borrows another ses
   assert.equal(isolated.status,'NO_CONTEXT');assert.equal(isolated.resolved_context,null);
   assert.equal(Config.runLevel(),'LEVEL_1');
 });
+test('Shared source containers fail closed before a Lens read',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_1');
+  const partitions=clone(c.Fixtures.PARTITIONS);
+  partitions.ANDREA.notion.decision_data_sources=['shared-decisions'];
+  partitions.METIS.notion.decision_data_sources=['shared-decisions'];
+  Config._setPartitions(partitions);
+  assert.throws(()=>LC.capsule('Contexto: Andrea\n¿Qué trabajé hoy?',null),/Partición compartida/);
+});
 console.log(`${tests} productive policy/adapter/engine tests passed; no network used.`);

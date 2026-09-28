@@ -242,6 +242,38 @@ var Config = (function () {
   var _partitionsOverride = null;
 
   /**
+   * Every source container belongs to exactly one context.  This is checked
+   * before a read, not inferred from the provider response afterwards.  A
+   * shared system registry must remain unavailable until a separately reviewed
+   * CANON exception is implemented; a Script Property alone cannot authorize
+   * cross-context access.
+   */
+  function assertPartitionsIsolated(all) {
+    if (!all) { return true; }
+    var seen = {};
+    var fields = {
+      notion: ['data_sources', 'decision_data_sources'],
+      asana: ['project_gids'], drive: ['folder_ids'], calendar: ['calendar_ids']
+    };
+    Object.keys(all).forEach(function(context) {
+      var bySource = all[context] || {};
+      Object.keys(fields).forEach(function(source) {
+        var partition = bySource[source] || {};
+        fields[source].forEach(function(field) {
+          (partition[field] || []).forEach(function(id) {
+            var key = source + ':' + field + ':' + String(id);
+            if (seen[key] && seen[key] !== context) {
+              throw Errors.configError('Partición compartida sin excepción CANON: ' + source + '/' + field);
+            }
+            seen[key] = context;
+          });
+        });
+      });
+    });
+    return true;
+  }
+
+  /**
    * Partición de fuentes por contexto (spec §6.3: lectura acotada al contexto).
    * Los ids son del entorno, no del código: se declaran en la Script Property
    * `METIS_SOURCE_PARTITIONS`. Forma:
@@ -267,6 +299,7 @@ var Config = (function () {
       return reads && reads[String(source).toLowerCase()] ? reads[String(source).toLowerCase()] : null;
     }
     var all = _partitionsOverride !== null ? _partitionsOverride : _readJson('SOURCE_PARTITIONS');
+    assertPartitionsIsolated(all);
     if (!all || !all[context]) { return null; }
     var key = String(source).toLowerCase();
     return all[context][key] ? all[context][key] : null;
@@ -437,6 +470,7 @@ var Config = (function () {
     LEDGER: LEDGER,
     SOURCE_COMPETENCE: SOURCE_COMPETENCE,
     partitionFor: partitionFor,
+    assertPartitionsIsolated: assertPartitionsIsolated,
     declaredPartitionContexts: declaredPartitionContexts,
     priceFor: priceFor,
     levelAllowsRealReads: levelAllowsRealReads,

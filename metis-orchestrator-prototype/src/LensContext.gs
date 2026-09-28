@@ -64,6 +64,10 @@ var LensContext = (function () {
         var result = ToolBroker.invoke(session, tool, args[tool]);
         sources[result.source || tool] = result.coverage === true ? 'COVERED' : 'UNAVAILABLE';
       } catch (e) {
+        // A bad partition is a system configuration failure, not a missing
+        // source.  Propagating it prevents a superficially successful capsule
+        // from hiding a cross-context configuration defect.
+        if (Errors.is(e, Errors.CODES.CONFIG)) { throw e; }
         // Missing partitions and source failures are deliberately represented as
         // unavailable rather than replaced by a broader, unsafe read.
         var source = tool.split('.')[0].toUpperCase();
