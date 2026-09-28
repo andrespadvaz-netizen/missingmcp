@@ -95,13 +95,6 @@ function dispatch_(p) {
     var previousLimits = Engine.Config.limits();
     try {
       if (previous !== Engine.Config.LEVELS.LEVEL_0) { throw new Error('unexpected_level'); }
-      // Temporary acceptance limits expressly authorized by the operator on
-      // 2026-09-27. They remain bounded and are restored after every invocation.
-      var acceptanceLimits = JSON.parse(JSON.stringify(previousLimits));
-      acceptanceLimits.MAX_RUN_BUDGET_USD = 10;
-      acceptanceLimits.MAX_DAILY_BUDGET_USD = 25;
-      acceptanceLimits.MAX_MONTHLY_BUDGET_USD = 50;
-      Engine.Config._setLimits(acceptanceLimits);
       var productive = props.getProperty('GATEWAY_PRODUCTIVE_ENABLED') === 'true';
       Engine.Config._setRunLevel(productive ? 'LEVEL_3' : Engine.Config.LEVELS.LEVEL_2);
       var durableState = loadDurable_(props, receipt);
