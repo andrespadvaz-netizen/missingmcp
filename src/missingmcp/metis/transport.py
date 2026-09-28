@@ -59,7 +59,7 @@ class Bridge:
                 data = response.json()
         finally:
             private_transport.reset(token)
-        if not isinstance(data, dict):
+        if not valid_lens_capsule(data):
             raise ValueError("invalid_lens_context_response")
         return data
 
@@ -79,6 +79,37 @@ class Bridge:
         if not isinstance(data, dict) or data.get("id") != row["id"] or data.get("seq") != row["seq"]:
             raise ValueError("bridge_correlation_mismatch")
         return data
+
+
+def valid_lens_capsule(data: object) -> bool:
+    """Reject malformed or cross-context Lens evidence at the gateway boundary.
+
+    The Bridge signature authenticates the sender; it does not make an
+    accidentally corrupted response safe to render.  Lens only accepts the
+    narrow capsule shape and every returned document must attest to the one
+    context selected for that capsule.
+    """
+    if not isinstance(data, dict):
+        return False
+    status = data.get("status")
+    if status in {"NO_CONTEXT", "REQUIRES_CONTEXT", "UNAVAILABLE", "INVALID_REQUEST"}:
+        return data.get("documents", []) == []
+    if status != "OK":
+        return False
+    context = data.get("resolved_context")
+    if not isinstance(context, str) or not context:
+        return False
+    if data.get("continuity_context") != context:
+        return False
+    documents = data.get("documents")
+    sources = data.get("sources")
+    if not isinstance(documents, list) or len(documents) > 24 or not isinstance(sources, dict):
+        return False
+    for doc in documents:
+        if not isinstance(doc, dict) or doc.get("context") != context:
+            return False
+    return all(isinstance(key, str) and value in {"COVERED", "UNAVAILABLE"}
+               for key, value in sources.items())
 
 
 class Worker:

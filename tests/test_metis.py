@@ -4,7 +4,7 @@ import httpx
 import pytest
 from missingmcp.config import load_config
 from missingmcp.metis.queue import Queue, RequestError
-from missingmcp.metis.transport import Worker
+from missingmcp.metis.transport import Worker, valid_lens_capsule
 from missingmcp.adapters.metis import MetisAdapter
 from missingmcp.adapters.base import LoginError, SessionExpired
 
@@ -38,6 +38,17 @@ async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, 
 
 SECRET = 'storage-secret-' * 4
 REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001'}
+
+
+def test_lens_capsule_rejects_cross_context_or_corrupt_bridge_output():
+    good = {'status':'OK', 'resolved_context':'ANDREA', 'continuity_context':'ANDREA',
+            'documents':[{'id':'a', 'context':'ANDREA'}], 'sources':{'NOTION':'COVERED'}}
+    assert valid_lens_capsule(good)
+    assert not valid_lens_capsule({**good, 'documents':[{'id':'f', 'context':'FINAL_FINAL'}]})
+    assert not valid_lens_capsule({**good, 'continuity_context':'FINAL_FINAL'})
+    assert not valid_lens_capsule({**good, 'documents':[{'context':'ANDREA'}] * 25})
+    assert valid_lens_capsule({'status':'NO_CONTEXT', 'documents':[]})
+    assert not valid_lens_capsule({'status':'NO_CONTEXT', 'documents':[{'context':'ANDREA'}]})
 
 
 @pytest.fixture
