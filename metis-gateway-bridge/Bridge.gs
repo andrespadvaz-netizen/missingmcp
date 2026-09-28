@@ -19,12 +19,40 @@ function doPost(e) {
     if (mismatch) { return json_({error: 'unauthorized'}); }
     var p = JSON.parse(envelope.payload);
     if (!Number.isSafeInteger(p.timestamp) || Math.abs(Date.now()/1000-p.timestamp) > 90 ||
-        !Number.isSafeInteger(p.seq) || p.seq < 1 || !/^[a-f0-9-]{36}$/.test(p.id) ||
-        !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','status','write','write_status'].indexOf(p.action) < 0) {
+        (p.action !== 'lens_context' && (!Number.isSafeInteger(p.seq) || p.seq < 1 ||
+        !/^[a-f0-9-]{36}$/.test(p.id) || !/^[a-f0-9]{64}$/.test(p.fingerprint) ||
+        ['run','status','write','write_status'].indexOf(p.action) < 0))) {
       return json_({error: 'invalid_request'});
     }
+    if (p.action === 'lens_context') { return json_(dispatchLensContext_(p)); }
     return json_(p.action === 'write' || p.action === 'write_status' ? dispatchWrite_(p) : dispatch_(p));
   } catch (_) { return json_({error: 'bridge_failure'}); }
+}
+
+/** A Lens session is explicit and opaque; no global "last context" exists. */
+function dispatchLensContext_(p) {
+  if (typeof p.request !== 'string' || !p.request.trim() ||
+      Utilities.newBlob(p.request).getBytes().length > 3500 ||
+      (p.session_id !== undefined && !/^[A-Za-z0-9_-]{16,128}$/.test(p.session_id))) {
+    return {status: 'INVALID_REQUEST'};
+  }
+  var props = PropertiesService.getScriptProperties();
+  var key = p.session_id ? 'lens_context_' + p.session_id : null;
+  var previous = key ? props.getProperty(key) : null;
+  var level = Engine.Config.runLevel();
+  try {
+    if (level !== Engine.Config.LEVELS.LEVEL_0) { return {status: 'UNAVAILABLE'}; }
+    Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
+    var result = Engine.LensContext.capsule(p.request, previous);
+    if (key && result && result.status === 'OK' && result.continuity_context) {
+      props.setProperty(key, result.continuity_context);
+    }
+    return result;
+  } catch (_) {
+    return {status: 'UNAVAILABLE'};
+  } finally {
+    Engine.Config._setRunLevel(level);
+  }
 }
 
 function json_(value) {

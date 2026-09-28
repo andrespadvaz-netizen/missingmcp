@@ -172,7 +172,8 @@ var ToolBroker = (function () {
       var stored = {
         source: doc.source, id: doc.id, title: doc.title, context: doc.context,
         kind: doc.kind, epistemic_status: ref.epistemic_status,
-        snippet: wantsSubstance ? (doc.snippet === undefined ? null : doc.snippet) : null
+        snippet: wantsSubstance ? (doc.snippet === undefined ? null : doc.snippet) : null,
+        updated_at: doc.updated_at || null, starts_at: doc.starts_at || null
       };
       session.documents.push(stored);
 

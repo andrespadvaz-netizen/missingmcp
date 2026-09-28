@@ -68,6 +68,7 @@ var CalendarReadAdapter = (function () {
       epistemic_status: RetrievalPolicy.epistemicFor('EVENT'),
       snippet: null,
       calendar_id: calendarId,
+      updated_at: event.getStartTime().toISOString(),
       starts_at: event.getStartTime().toISOString(),
       ends_at: event.getEndTime().toISOString()
     };

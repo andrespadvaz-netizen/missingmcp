@@ -9,7 +9,7 @@ const c=vm.createContext({console,Date,JSON,Math,isFinite,isNaN,encodeURICompone
     computeDigest:(_,s)=>Array.from(crypto.createHash('sha256').update(s).digest())}});
 const src=path.join(__dirname,'../src');
 for(const f of fs.readdirSync(src).filter(f=>f.endsWith('.gs')).sort()) vm.runInContext(fs.readFileSync(path.join(src,f),'utf8'),c,{filename:f});
-const {Config,ProductivePolicy:P,ProductiveAdapter:A,Schemas:S,ContextResolver:R}=c;
+const {Config,ProductivePolicy:P,ProductiveAdapter:A,Schemas:S,ContextResolver:R,LensContext:LC}=c;
 const clone=x=>JSON.parse(JSON.stringify(x));
 const ctx={primary:'ANTHROPIC',notion_project:'Synthetic',signals:['synthetic']};
 const policy={enabled:true,version:1,authorization_ref:'synthetic-authorization',revision:'one',protected_ids:['protected'],
@@ -154,5 +154,16 @@ test('Repeated inspections cannot finish as a completed write',()=>{
   const result=c.Orchestrator.run('Contexto: TEST\nCrea una tarea.',{current_model:'ANTHROPIC',providers:{ANTHROPIC:producer},mandate:{source:'LIVE_OPERATOR',requests_execution:true}});
   assert.notEqual(result.status,'COMPLETED');assert.equal(result.write_plan.length,0);
   assert(backend.calls.every(x=>x.method==='get'));
+});
+test('Lens capsule is read-only, partition-scoped, and never borrows another session context',()=>{
+  c.Fixtures.resetAll();Config._setRunLevel('LEVEL_1');
+  const andrea=LC.capsule('Contexto: Andrea\n¿Qué trabajé hoy?',null);
+  assert.equal(andrea.status,'OK');assert.equal(andrea.resolved_context,'ANDREA');
+  assert(andrea.documents.length>0);assert(andrea.documents.every(d=>d.context==='ANDREA'));
+  const continued=LC.capsule('¿Qué trabajé hoy?','ANDREA');
+  assert.equal(continued.status,'OK');assert.equal(continued.resolved_context,'ANDREA');assert.equal(continued.continued,true);
+  const isolated=LC.capsule('¿Qué trabajé hoy?',null);
+  assert.equal(isolated.status,'NO_CONTEXT');assert.equal(isolated.resolved_context,null);
+  assert.equal(Config.runLevel(),'LEVEL_1');
 });
 console.log(`${tests} productive policy/adapter/engine tests passed; no network used.`);

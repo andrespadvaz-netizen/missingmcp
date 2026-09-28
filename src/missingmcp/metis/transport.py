@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 import httpx
 from ..log import private_transport
@@ -35,12 +36,17 @@ class Bridge:
         return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                                  "fingerprint": row["fingerprint"], "write": write}, row)
 
-    async def call_lens_context(self, request: str):
+    async def call_lens_context(self, request: str, session_id: str | None = None):
         """Signed, read-only Lens retrieval. It never enters the durable spend queue."""
         if not isinstance(request, str) or not request.strip() or len(request.encode("utf-8")) > 3_500:
             raise ValueError("invalid_lens_context_request")
+        envelope = {"action": "lens_context", "request": request, "timestamp": int(time.time())}
+        if session_id is not None:
+            if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", session_id):
+                raise ValueError("invalid_lens_context_session")
+            envelope["session_id"] = session_id
         payload = json.dumps(
-            {"action": "lens_context", "request": request, "timestamp": int(time.time())},
+            envelope,
             separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)

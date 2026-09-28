@@ -20,9 +20,10 @@ function fixture() {
       computeDigest:(a,p)=>[...crypto.createHash('sha256').update(p).digest()],
       newBlob:blob, gzip:b=>blob(zlib.gzipSync(b.getBytes()),'application/x-gzip'), ungzip:b=>{assert.equal(b.contentType,'application/x-gzip');return blob(zlib.gunzipSync(b.getBytes()));},
       base64Encode:b=>Buffer.from(b).toString('base64'),base64Decode:s=>Buffer.from(s,'base64')},
-    Engine:{Config:{runLevel:()=>level,LEVELS:{LEVEL_0:'LEVEL_0',LEVEL_2:'LEVEL_2'},
+    Engine:{Config:{runLevel:()=>level,LEVELS:{LEVEL_0:'LEVEL_0',LEVEL_1:'LEVEL_1',LEVEL_2:'LEVEL_2'},
       _setRunLevel:x=>{level=x;},hasSecret:()=>true},
       OpenAIAdapter:{create:()=>({})},AnthropicAdapter:{create:()=>({})},
+      LensContext:{capsule:(request,previous)=>{const context=/andrea/i.test(request)?'ANDREA':previous;if(!context)return {status:'NO_CONTEXT',resolved_context:null,continuity_context:null,documents:[],sources:{}};return {status:'OK',resolved_context:context,continuity_context:context,continued:!!previous,documents:[],sources:{}};}},
       Orchestrator:{run:()=>{calls++;return {status:'COMPLETED',execution_id:'engine-1',route:'CROSS_AUDIT',
         final_answer:'Texto íntegro 漢🙂'.repeat(5000),limits:{estimated_cost_usd:.2,cost_known:true},
         handoff:{reconciled:true},audit:{blocks_materially:false},degradation:null};}}},
@@ -83,6 +84,15 @@ test('Pin remains immutable and bridge contains no log/trigger/provider endpoint
   assert.equal(manifest.dependencies.libraries[0].version,'9');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
+});
+test('Lens context runs read-only, restores LEVEL_0, and keeps continuity session-scoped',()=>{
+  const f=fixture();
+  const first=f.request(1,'lens_context',{request:'Contexto: Andrea\n¿Qué trabajé hoy?',session_id:'lens_session_0001'});
+  assert.equal(first.status,'OK');assert.equal(first.resolved_context,'ANDREA');assert.equal(f.level(),'LEVEL_0');
+  const next=f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:'lens_session_0001'});
+  assert.equal(next.continued,true);assert.equal(next.resolved_context,'ANDREA');
+  const isolated=f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:'lens_session_0002'});
+  assert.equal(isolated.status,'NO_CONTEXT');assert.equal(isolated.resolved_context,null);
 });
 console.log(`${tests} bridge checks passed`);
 
