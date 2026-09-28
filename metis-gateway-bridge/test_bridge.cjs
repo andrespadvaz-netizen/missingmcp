@@ -23,7 +23,7 @@ function fixture() {
     Engine:{Config:{runLevel:()=>level,LEVELS:{LEVEL_0:'LEVEL_0',LEVEL_1:'LEVEL_1',LEVEL_2:'LEVEL_2'},
       _setRunLevel:x=>{level=x;},hasSecret:()=>true},
       OpenAIAdapter:{create:()=>({})},AnthropicAdapter:{create:()=>({})},
-      LensContext:{capsule:(request,previous)=>{const context=/andrea/i.test(request)?'ANDREA':previous;if(!context)return {status:'NO_CONTEXT',resolved_context:null,continuity_context:null,documents:[],sources:{}};return {status:'OK',resolved_context:context,continuity_context:context,continued:!!previous,documents:[],sources:{}};}},
+      LensContext:{capsule:(request,previous)=>{const context=/andrea/i.test(request)?'ANDREA':previous;if(!context)return {status:'NO_CONTEXT',resolved_context:null,continuity_context:null,documents:[],sources:{}};return {status:'OK',resolved_context:context,continuity_context:context,continued:!!previous,documents:[{context,id:'source-1'}],sources:{NOTION:'COVERED'}};}},
       Orchestrator:{run:()=>{calls++;return {status:'COMPLETED',execution_id:'engine-1',route:'CROSS_AUDIT',
         final_answer:'Texto íntegro 漢🙂'.repeat(5000),limits:{estimated_cost_usd:.2,cost_known:true},
         handoff:{reconciled:true},audit:{blocks_materially:false},degradation:null};}}},
@@ -93,6 +93,15 @@ test('Lens context runs read-only, restores LEVEL_0, and keeps continuity sessio
   assert.equal(next.continued,true);assert.equal(next.resolved_context,'ANDREA');
   const isolated=f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:'lens_session_0002'});
   assert.equal(isolated.status,'NO_CONTEXT');assert.equal(isolated.resolved_context,null);
+});
+test('Lens empty retrieval is unavailable and cannot establish continuity',()=>{
+  const f=fixture(),sid='lens_session_0004';
+  f.context.Engine.LensContext.capsule=()=>({status:'OK',resolved_context:'ANDREA',
+    continuity_context:'ANDREA',documents:[],sources:{NOTION:'UNAVAILABLE'}});
+  const result=f.request(1,'lens_context',{request:'Contexto: Andrea',session_id:sid});
+  assert.equal(result.status,'UNAVAILABLE');assert.equal(result.documents.length,0);
+  assert.equal(result.sources.NOTION,'UNAVAILABLE');assert.equal(f.data['lens_context_'+sid],undefined);
+  assert.equal(f.level(),'LEVEL_0');
 });
 test('Lens continuity expires and rejects legacy unbounded session state',()=>{
   const f=fixture(), sid='lens_session_0003', key='lens_context_'+sid;

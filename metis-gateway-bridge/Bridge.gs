@@ -44,6 +44,12 @@ function dispatchLensContext_(p) {
     if (level !== Engine.Config.LEVELS.LEVEL_0) { return {status: 'UNAVAILABLE'}; }
     Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
     var result = Engine.LensContext.capsule(p.request, previous);
+    // An empty retrieval is not evidence of a working source.  Keep the
+    // gateway's existing failure status so Lens cannot treat it as ready.
+    if (result && result.status === 'OK' &&
+        (!Array.isArray(result.documents) || result.documents.length === 0)) {
+      return {status: 'UNAVAILABLE', documents: [], sources: result.sources || {}};
+    }
     if (key && result && result.status === 'OK' && result.continuity_context) {
       writeLensContinuity_(props, key, result.continuity_context);
     }
