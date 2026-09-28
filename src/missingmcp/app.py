@@ -1,8 +1,10 @@
 from __future__ import annotations
 import asyncio
+import hmac
 import contextlib
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from starlette.applications import Starlette
@@ -161,6 +163,36 @@ def build_app(config: Config) -> Starlette:
 
     async def healthz(request):
         return PlainTextResponse("ok")
+
+    async def metis_lens_context(request):
+        """Private retrieval capsule for Metis Lens: read-only and model-free."""
+        if not config.metis_lens_context_key or "metis" not in adapters:
+            return JSONResponse({"status": "UNAVAILABLE"}, status_code=404)
+        expected = "Bearer " + config.metis_lens_context_key
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+
+        raw = await security.read_body_limited(request, max_bytes=6_000)
+        if raw is None:
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=413)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        text = body.get("request") if isinstance(body, dict) else None
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 3_500:
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        session_id = request.headers.get("x-metis-lens-session")
+        if session_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", session_id):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+
+        try:
+            result = await adapters["metis"].worker.bridge.call_lens_context(text, session_id)
+        except Exception:
+            # The response intentionally carries no upstream diagnostic or source content.
+            return JSONResponse({"status": "UNAVAILABLE"}, status_code=502)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     async def favicon(request):
         # Browsers auto-request /favicon.ico regardless of the <head> link; serve
@@ -382,6 +414,7 @@ def build_app(config: Config) -> Starlette:
         Route("/subscribe", subscribe, methods=["POST"]),
         Route("/suggest", suggest, methods=["POST"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/robots.txt", _text(robots_txt, "text/plain"), methods=["GET"]),
         Route("/sitemap.xml", _text(sitemap_xml, "application/xml"), methods=["GET"]),

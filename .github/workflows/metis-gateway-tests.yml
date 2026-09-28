@@ -1,12 +1,13 @@
 name: Metis Gateway validation
 on:
   push:
-    branches: [metis/orchestration-gateway-v1]
+    branches: [metis/orchestration-gateway-v1, metis/productive-writes-v2]
   pull_request:
     paths:
       - 'src/**'
       - 'tests/**'
       - 'metis-gateway-bridge/**'
+      - 'metis-orchestrator-prototype/**'
       - '.github/workflows/metis-gateway-tests.yml'
 permissions:
   contents: read
@@ -24,6 +25,7 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest -q
       - run: node metis-gateway-bridge/test_bridge.cjs
+      - run: node metis-orchestrator-prototype/tools/test_productive.cjs
       - run: node tools/run_local.js all
         working-directory: metis-orchestrator-prototype
       - run: node tools/static_guards.js

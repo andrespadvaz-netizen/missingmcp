@@ -68,6 +68,10 @@ var CalendarReadAdapter = (function () {
       epistemic_status: RetrievalPolicy.epistemicFor('EVENT'),
       snippet: null,
       calendar_id: calendarId,
+      // CalendarApp's Event API does not expose a trustworthy modification
+      // timestamp.  Do not relabel the scheduled start as an update: Lens
+      // will correctly use starts_at as the recency key for calendar evidence.
+      updated_at: null,
       starts_at: event.getStartTime().toISOString(),
       ends_at: event.getEndTime().toISOString()
     };

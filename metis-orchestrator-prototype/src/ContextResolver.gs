@@ -29,12 +29,25 @@ var ContextResolver = (function () {
     var found = [];
     if (opts.operator_context) {
       // Instrucción expresa del operador: contexto declarado, no inferido.
-      return [opts.operator_context];
+      return Config.contextNames().indexOf(opts.operator_context) >= 0 ? [opts.operator_context] : [];
+    }
+    // An explicit first-line context selects an exact registry entry. Parent
+    // names mentioned inside a subproject's task do not broaden its scope.
+    var explicit = String(operatorRequest).match(/^\s*Contexto:\s*([^\r\n]+)\s*(?:\r?\n|$)/i);
+    if (explicit) {
+      var declared=normalize(explicit[1].trim());
+      function matches(label) {
+        var value=normalize(label);
+        return declared===value || declared.indexOf(value+'.')===0;
+      }
+      var exactKeys=Config.contextNames().filter(matches);
+      if (exactKeys.length) { return exactKeys; }
+      return Config.contextNames().filter(function(name) { return matches(Config.contexts()[name].notion_project); });
     }
     var text = normalize(operatorRequest);
     var names = Config.contextNames();
     for (var i = 0; i < names.length; i++) {
-      var signals = Config.CONTEXTS[names[i]].signals;
+      var signals = Config.contexts()[names[i]].signals;
       for (var j = 0; j < signals.length; j++) {
         if (text.indexOf(normalize(signals[j])) !== -1) {
           if (found.indexOf(names[i]) === -1) { found.push(names[i]); }

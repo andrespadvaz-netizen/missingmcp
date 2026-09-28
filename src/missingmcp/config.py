@@ -48,6 +48,8 @@ class Config:
     metis_bridge_url: str = ""
     metis_bridge_secret: str = ""
     metis_operator_key: str = ""
+    # Dedicated bearer secret for the private, read-only Metis Lens context endpoint.
+    metis_lens_context_key: str = ""
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -65,12 +67,19 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     cmd = env.get("GARMIN_MCP_CMD", "garmin-mcp").split()
     metis = [env.get(name, "") for name in
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
+    metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
     if any(metis):
         import re
-        if not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0]) or any(len(x) < 32 for x in metis[1:]):
+        if (not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0])
+                or any(len(x) < 32 for x in metis[1:])):
             raise ValueError("Metis requires an Apps Script /exec URL and two secrets of at least 32 characters")
         if metis[1] == metis[2] or secret in metis[1:]:
             raise ValueError("Metis signing, operator and storage secrets must be distinct")
+    if metis_lens_context_key:
+        if len(metis_lens_context_key) < 32:
+            raise ValueError("METIS_LENS_CONTEXT_KEY must be at least 32 characters")
+        if metis_lens_context_key in metis[1:] or secret == metis_lens_context_key:
+            raise ValueError("Lens context secret must be distinct from existing Metis secrets")
     return Config(
         gateway_secret=secret,
         public_url=public_url,
@@ -81,6 +90,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_bridge_url=metis[0],
         metis_bridge_secret=metis[1],
         metis_operator_key=metis[2],
+        metis_lens_context_key=metis_lens_context_key,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),
         worker_idle_ttl=int(env.get("WORKER_IDLE_TTL", "900")),

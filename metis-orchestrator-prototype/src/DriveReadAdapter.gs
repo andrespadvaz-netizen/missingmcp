@@ -83,6 +83,7 @@ var DriveReadAdapter = (function () {
       kind: 'FILE',
       epistemic_status: RetrievalPolicy.epistemicFor('FILE'),
       snippet: snippet === undefined ? null : snippet,
+      updated_at: file.getLastUpdated ? file.getLastUpdated().toISOString() : null,
       url: file.getUrl ? file.getUrl() : null
     };
   }

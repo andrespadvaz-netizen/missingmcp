@@ -33,7 +33,7 @@ var AsanaReadAdapter = (function () {
     return JSON.parse(response.getContentText());
   }
 
-  var FIELDS = 'name,notes,completed,due_on,permalink_url,projects.name,projects.gid';
+  var FIELDS = 'name,notes,completed,due_on,modified_at,permalink_url,projects.name,projects.gid';
 
   /** Tope defensivo de páginas por listado. Ver `collectPages`. */
   var MAX_PAGES = 20;
@@ -212,6 +212,7 @@ var AsanaReadAdapter = (function () {
       epistemic_status: RetrievalPolicy.epistemicFor('TASK'),
       snippet: snippet === undefined ? null : snippet,
       url: task.permalink_url ? task.permalink_url : null,
+      updated_at: task.modified_at ? task.modified_at : null,
       completed: task.completed === true,
       due_on: task.due_on ? task.due_on : null
     };

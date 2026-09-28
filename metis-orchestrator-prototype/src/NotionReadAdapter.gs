@@ -479,6 +479,7 @@ var NotionReadAdapter = (function () {
       kind: kind,
       epistemic_status: RetrievalPolicy.epistemicFor(kind),
       snippet: snippet === undefined ? null : snippet,
+      updated_at: page.last_edited_time ? page.last_edited_time : null,
       url: page.url ? page.url : null,
       decision: isDecisionRow(page) ? toDecision(page) : null
     };

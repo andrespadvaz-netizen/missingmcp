@@ -3,9 +3,24 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 import httpx
 from ..log import private_transport
+from .writes import WriteWorker
+
+
+# One-time reconciliation for a provider-verified interrupted request.  It is
+# deliberately bound to the immutable execution id and sequence below: it can
+# never affect a later execution or make another provider request.
+_INTERRUPTED_RECEIPT = {
+    "execution_id": "260d7063-1b3e-4423-9f73-36056249914e",
+    "seq": 17,
+    # 1,316 input × $1.25/M + 1,034 output × $10/M; no cached input.
+    "cost_usd": 0.011984,
+    # SHA-256 of the canonicalized, non-secret provider usage receipt.
+    "evidence_sha256": "1fab0d8424d321718e63314cc370a582f27cc87c5362153822316efc73429780",
+}
 
 
 class Bridge:
@@ -13,9 +28,43 @@ class Bridge:
         self.url, self.secret = url, secret
 
     async def call(self, action, row, request=None):
-        payload = json.dumps({"action": action, "seq": row["seq"], "id": row["id"],
+        return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                               "fingerprint": row["fingerprint"], "request": request,
-                              "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
+                              "origin_model": row["origin_model"] if "origin_model" in row.keys() else "ANTHROPIC"}, row)
+
+    async def call_write(self, action, row, write):
+        return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
+                                 "fingerprint": row["fingerprint"], "write": write}, row)
+
+    async def call_lens_context(self, request: str, session_id: str | None = None):
+        """Signed, read-only Lens retrieval. It never enters the durable spend queue."""
+        if not isinstance(request, str) or not request.strip() or len(request.encode("utf-8")) > 3_500:
+            raise ValueError("invalid_lens_context_request")
+        envelope = {"action": "lens_context", "request": request, "timestamp": int(time.time())}
+        if session_id is not None:
+            if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", session_id):
+                raise ValueError("invalid_lens_context_session")
+            envelope["session_id"] = session_id
+        payload = json.dumps(
+            envelope,
+            separators=(",", ":"), ensure_ascii=False)
+        signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        token = private_transport.set(True)
+        try:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.post(self.url, json={"payload": payload, "signature": signature})
+                response.raise_for_status()
+                if len(response.content) > 80_000:
+                    raise ValueError("lens_context_response_too_large")
+                data = response.json()
+        finally:
+            private_transport.reset(token)
+        if not valid_lens_capsule(data):
+            raise ValueError("invalid_lens_context_response")
+        return data
+
+    async def _call(self, envelope, row):
+        payload = json.dumps({**envelope, "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
         try:
@@ -32,14 +81,68 @@ class Bridge:
         return data
 
 
+def valid_lens_capsule(data: object) -> bool:
+    """Reject malformed or cross-context Lens evidence at the gateway boundary.
+
+    The Bridge signature authenticates the sender; it does not make an
+    accidentally corrupted response safe to render.  Lens only accepts the
+    narrow capsule shape and every returned document must attest to the one
+    context selected for that capsule.
+    """
+    if not isinstance(data, dict):
+        return False
+    status = data.get("status")
+    if status in {"NO_CONTEXT", "REQUIRES_CONTEXT", "UNAVAILABLE", "INVALID_REQUEST"}:
+        return data.get("documents", []) == []
+    if status != "OK":
+        return False
+    context = data.get("resolved_context")
+    if not isinstance(context, str) or not context:
+        return False
+    if data.get("continuity_context") != context:
+        return False
+    documents = data.get("documents")
+    sources = data.get("sources")
+    if not isinstance(documents, list) or len(documents) > 24 or not isinstance(sources, dict):
+        return False
+    for doc in documents:
+        if not isinstance(doc, dict) or doc.get("context") != context:
+            return False
+    return all(isinstance(key, str) and value in {"COVERED", "UNAVAILABLE"}
+               for key, value in sources.items())
+
+
 class Worker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
         self.last_review = None
+        self.write_worker = WriteWorker(queue, bridge)
+
+    def reconcile_interrupted_receipt(self, row):
+        receipt = _INTERRUPTED_RECEIPT
+        if row["id"] != receipt["execution_id"] or row["seq"] != receipt["seq"]:
+            return False
+        result = {
+            "status": "FAILED",
+            "error": "ENGINE_INTERRUPTED",
+            "cost_known": True,
+            "cost_usd": receipt["cost_usd"],
+            "requires_review": False,
+            "final_answer": None,
+            "accounting_reconciliation": {
+                "execution_id": receipt["execution_id"],
+                "seq": receipt["seq"],
+                "ledger_verified": True,
+                "evidence_sha256": receipt["evidence_sha256"],
+            },
+        }
+        return self.queue.reconcile_accounting(row, result)
 
     async def step(self):
         paused = self.queue.paused_execution()
         if paused:
+            if self.reconcile_interrupted_receipt(paused):
+                return
             if self.last_review is not None and time.monotonic() - self.last_review < 60:
                 return
             self.last_review = time.monotonic()
@@ -51,8 +154,12 @@ class Worker:
             except (httpx.HTTPError, ValueError, TypeError):
                 pass
             return
+        await self.write_worker.reconcile_known_object()
         row = self.queue.next()
         if not row:
+            return
+        if row["status"] == "APPLYING":
+            await self.write_worker.step(row)
             return
         if row["status"] == "QUEUED" and self.queue.claim(row):
             # From this commit onward a transport failure NEVER causes another run.

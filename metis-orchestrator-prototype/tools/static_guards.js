@@ -96,7 +96,8 @@ guard('G1', 'cero triggers', () => {
   const fails = [];
   for (const f of files.concat(testFiles)) {
     const scriptCode = f.name === 'ValidationEndpoint.gs'
-      ? f.code.replace(/ScriptApp\.getService\(\)\.getUrl\(\)/g, '') : f.code;
+      ? f.code.replace(/ScriptApp\.getService\(\)\.getUrl\(\)/g, '')
+      : f.name === 'ProductiveAdapter.gs' ? f.code.replace(/ScriptApp\.getOAuthToken\(\)/g, '') : f.code;
     if (/\bScriptApp\b/.test(scriptCode)) { fails.push(f.name + ': referencia ejecutable a ScriptApp'); }
     if (/\bnewTrigger\b/.test(f.code)) { fails.push(f.name + ': newTrigger'); }
     const triggerFns = /\bfunction\s+(onOpen|onEdit|onInstall|onFormSubmit|onChange|doGet|doPost)\s*\(/g;
@@ -110,7 +111,7 @@ guard('G1', 'cero triggers', () => {
 });
 
 // -------------------------------------------------------------------- G2
-guard('G2', 'cero superficies de escritura productiva', () => {
+guard('G2', 'sin escrituras por servicios genéricos de Google', () => {
   const fails = [];
   const driveWrite = /DriveApp[\s\S]{0,80}?\.(createFile|createFolder|setTrashed|removeFile|addFile|setContent|setName|setSharing|setOwner)/;
   const calendarWrite = /CalendarApp[\s\S]{0,80}?\.(createEvent|createAllDayEvent|createCalendar|deleteEvent|setTitle|setTime)/;
@@ -133,9 +134,14 @@ guard('G2', 'cero superficies de escritura productiva', () => {
 });
 
 // -------------------------------------------------------------------- G3
-guard('G3', 'ningún verbo HTTP de mutación', () => {
+guard('G3', 'mutaciones sólo en el actuador productivo explícito', () => {
   const fails = [];
   for (const f of files) {
+    if (f.name === 'ProductiveAdapter.gs') {
+      if (/['"]delete['"]/.test(f.raw)) fails.push(f.name + ': DELETE prohibido');
+      if (!f.raw.includes('ProductivePolicy.enabled()') || !f.raw.includes('ProductivePolicy.check(a)')) fails.push(f.name + ': faltan guardas productivas');
+      continue;
+    }
     const m = f.raw.match(/method:\s*'([a-z]+)'/g) || [];
     for (const hit of m) {
       const verb = hit.match(/'([a-z]+)'/)[1];
@@ -149,7 +155,7 @@ guard('G3', 'ningún verbo HTTP de mutación', () => {
 
 // -------------------------------------------------------------------- G4
 guard('G4', 'UrlFetchApp sólo en los adaptadores autorizados', () => {
-  const allowed = ['NotionReadAdapter.gs', 'AsanaReadAdapter.gs', 'OpenAIAdapter.gs', 'AnthropicAdapter.gs'];
+  const allowed = ['NotionReadAdapter.gs', 'AsanaReadAdapter.gs', 'OpenAIAdapter.gs', 'AnthropicAdapter.gs', 'ProductiveAdapter.gs'];
   const fails = [];
   for (const f of files) {
     if (/\bUrlFetchApp\b/.test(f.code) && allowed.indexOf(f.name) === -1) {
@@ -172,11 +178,11 @@ guard('G5', 'SimulatedWriteAdapter no toca ninguna superficie externa', () => {
 });
 
 // -------------------------------------------------------------------- G6
-guard('G6', 'appsscript.json declara sólo scopes de lectura', () => {
+guard('G6', 'scopes explícitos: Drive productivo, Calendar sólo lectura, sin Gmail ni triggers', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'appsscript.json'), 'utf8'));
   const expected = [
     'https://www.googleapis.com/auth/script.external_request',
-    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/calendar.readonly'
   ].sort();
   const actual = (manifest.oauthScopes || []).slice().sort();
@@ -189,7 +195,7 @@ guard('G6', 'appsscript.json declara sólo scopes de lectura', () => {
   }
   for (const scope of actual) {
     if (/gmail|scriptapp/.test(scope)) { fails.push('scope peligroso: ' + scope); }
-    if (/auth\/(drive|calendar)$/.test(scope)) { fails.push('scope de escritura: ' + scope); }
+    if (/auth\/calendar$/.test(scope)) { fails.push('scope de escritura de calendario: ' + scope); }
   }
   return fails;
 });
