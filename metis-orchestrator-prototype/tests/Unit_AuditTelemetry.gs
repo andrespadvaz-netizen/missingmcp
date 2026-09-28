@@ -1,4 +1,20 @@
 /** Regresiones de telemetría factual entre auditoría y reconciliación. */
+TestRunner.unit('Recuperación terminal OpenAI', 'reinicia con esfuerzo bajo cuando el proveedor reporta cero uso y salida vacía', function(t) {
+  var calls = [];
+  var responses = [
+    {text:'',tool_requests:[],usage:{input_tokens:0,output_tokens:0,estimated_cost_usd:0},provider_model:'gpt-5',stop_reason:'max_tokens',provider_request_id:'r0'},
+    {text:'Auditoría completa.',tool_requests:[],usage:{input_tokens:10,output_tokens:5,estimated_cost_usd:0.01},provider_model:'gpt-5',stop_reason:'completed',provider_request_id:'r1'}
+  ];
+  var result = TerminalOutput.complete({system:'s',prompt:'p',max_output_tokens:16384}, function(request) {
+    calls.push(request);
+    return responses.shift();
+  }, {MAX_TERMINAL_CONTINUATIONS:2}, []);
+  t.equals(result.text,'Auditoría completa.','recupera texto visible');
+  t.equals(calls.length,2,'hace un solo reinicio');
+  t.equals(calls[1].effort,'low','reduce el esfuerzo');
+  t.equals(calls[1].max_output_tokens,16384,'conserva un límite acotado aunque el uso reportado sea cero');
+});
+
 function registerUnitAuditTelemetry() {
   ['producer','auditor'].forEach(function(stage) {
     ['max_tokens','incomplete'].forEach(function(reason) {

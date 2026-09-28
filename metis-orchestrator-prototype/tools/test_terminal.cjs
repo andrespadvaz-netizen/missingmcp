@@ -49,6 +49,16 @@ test('empty length output retries once at low effort with the same bounded allow
 test('repeated empty cutoff cannot loop',()=>{
  let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return {...response('','max_tokens'),usage:{output_tokens:4096}};},{MAX_TERMINAL_CONTINUATIONS:3},[]),/empty/);assert.equal(calls,2);
 });
+test('zero-token OpenAI incomplete response retries once with bounded low effort',()=>{
+ let calls=0;
+ const bounded={...request,max_output_tokens:16384};
+ const result=c.TerminalOutput.complete(bounded,r=>{
+   if(++calls===1)return {...response('','max_tokens'),usage:{input_tokens:0,output_tokens:0,estimated_cost_usd:0}};
+   assert.equal(r.max_output_tokens,16384);assert.equal(r.effort,'low');
+   return response('Auditoría completa.','completed');
+ },{MAX_TERMINAL_CONTINUATIONS:2},[]);
+ assert.equal(result.text,'Auditoría completa.');assert.equal(calls,2);
+});
 test('missing usage cannot trigger speculative empty retry',()=>{
  let calls=0;assert.throws(()=>c.TerminalOutput.complete(request,()=>{calls++;return response('','max_tokens');},{MAX_TERMINAL_CONTINUATIONS:2},[]),/empty/);assert.equal(calls,1);
 });

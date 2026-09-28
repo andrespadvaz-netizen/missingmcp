@@ -66,6 +66,11 @@ function registerUnitProveedoresReales() {
   TestRunner.unit('Capacidad autorizada', 'ambos proveedores tienen tope de 16384 y respetan una petición menor', function(t) {
     var request={system:'s',prompt:'p'};
     t.equals(OpenAIAdapter.create().buildRequest(request,null).max_output_tokens,16384,'OpenAI acotado');
+    t.deepEquals(OpenAIAdapter.create().buildRequest({system:'s',prompt:'p',effort:'low'},null).reasoning,
+      {effort:'low'},'OpenAI recibe el esfuerzo bajo de recuperación');
+    t.throwsCode(Errors.CODES.CONFIG,function(){
+      OpenAIAdapter.create().buildRequest({system:'s',prompt:'p',effort:'invalid'},null);
+    },'OpenAI rechaza effort no permitido');
     var anthropicBody=AnthropicAdapter.create().buildRequest(request,null);
     t.equals(anthropicBody.max_tokens,16384,'Anthropic acotado');
     t.deepEquals(anthropicBody.thinking,{type:'adaptive'},'thinking adaptativo declarado');

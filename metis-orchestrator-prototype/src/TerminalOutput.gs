@@ -20,15 +20,16 @@ var TerminalOutput = (function () {
         // with the same bounded allowance and low effort so the visible answer has
         // room; this is a restart, not an anchored continuation.
         if (attempt !== 0 || ['max_tokens','length'].indexOf(result.stop_reason) === -1 || !cap ||
-            !result.usage || !Number.isInteger(result.usage.output_tokens) || result.usage.output_tokens <= 0 ||
+            !result.usage || !Number.isInteger(result.usage.output_tokens) || result.usage.output_tokens < 0 ||
             result.usage.output_tokens > 16384) {
           throw Errors.schemaError('Terminal output empty; no safe bounded recovery');
         }
+        var restartLimit = result.usage.output_tokens || request.max_output_tokens || 16384;
         pending = {
           system: request.system + '\nRECUPERACION TERMINAL: produce la respuesta visible completa y concisa; ' +
             'no agotes el presupuesto en razonamiento interno.',
           prompt:request.prompt,
-          max_output_tokens:result.usage.output_tokens,
+          max_output_tokens:restartLimit,
           effort:'low', completion_recovery:true
         };
         if (request.model) pending.model = request.model;

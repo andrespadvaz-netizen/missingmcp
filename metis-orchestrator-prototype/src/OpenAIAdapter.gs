@@ -39,6 +39,12 @@ var OpenAIAdapter = (function () {
         ]
       };
       body.max_output_tokens = Config.outputTokenLimit(request);
+      if (request.effort) {
+        if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].indexOf(request.effort) === -1) {
+          throw Errors.configError('OpenAI reasoning effort is not supported');
+        }
+        body.reasoning = { effort: request.effort };
+      }
       if (toolContract && toolContract.length) { body.tools = this.toolsFor(toolContract); }
       return body;
     }
