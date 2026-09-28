@@ -1,5 +1,89 @@
 /** Regresiones de telemetría factual entre auditoría y reconciliación. */
+TestRunner.unit('Recuperación terminal OpenAI', 'reinicia con esfuerzo bajo cuando el proveedor reporta cero uso y salida vacía', function(t) {
+  var calls = [];
+  var responses = [
+    {text:'',tool_requests:[],usage:{input_tokens:0,output_tokens:0,estimated_cost_usd:0},provider_model:'gpt-5',stop_reason:'max_tokens',provider_request_id:'r0'},
+    {text:'Auditoría completa.',tool_requests:[],usage:{input_tokens:10,output_tokens:5,estimated_cost_usd:0.01},provider_model:'gpt-5',stop_reason:'completed',provider_request_id:'r1'}
+  ];
+  var result = TerminalOutput.complete({system:'s',prompt:'p',max_output_tokens:16384}, function(request) {
+    calls.push(request);
+    return responses.shift();
+  }, {MAX_TERMINAL_CONTINUATIONS:2}, []);
+  t.equals(result.text,'Auditoría completa.','recupera texto visible');
+  t.equals(calls.length,2,'hace un solo reinicio');
+  t.equals(calls[1].effort,'low','reduce el esfuerzo');
+  t.equals(calls[1].max_output_tokens,16384,'conserva un límite acotado aunque el uso reportado sea cero');
+});
+
 function registerUnitAuditTelemetry() {
+  ['producer','auditor'].forEach(function(stage) {
+    ['max_tokens','incomplete'].forEach(function(reason) {
+      TestRunner.unit('Completitud por etapa', stage + ' incompleto nunca se acredita', function(t) {
+        var limits = Config.limits(); limits.MAX_TERMINAL_CONTINUATIONS = 0; Config._setLimits(limits);
+        var providers = Fixtures.providers([
+          {text:'Análisis parcial.',stop_reason:stage === 'producer' ? reason : 'end_turn'},
+          {text:'No debe reconciliar.',stop_reason:'end_turn'}
+        ], [{text:'BLOQUEO_MATERIAL: NO\nParcial.',stop_reason:reason}]);
+        var result = Orchestrator.run('Audita Metis completo.', {current_model:'OPENAI',operator_context:'METIS',intent:'audit',providers:providers});
+        t.equals(result.status,'FAILED','falla explícitamente');
+        t.equals(result.audit,null,'no acredita auditoría');
+        t.equals(providers.OPENAI.calls.length,1,'no reconcilia');
+        t.equals(providers.ANTHROPIC.calls.length,stage === 'producer' ? 0 : 1,'no propaga productor cortado');
+        t.equals(result.provider_provenance[result.provider_provenance.length-1].stop_reason,reason,'conserva causa');
+      });
+    });
+  });
+  TestRunner.unit('Completitud por etapa','recupera auditor parcial dentro del mismo ciclo',function(t) {
+    Config._setPricing({ANTHROPIC:{'claude-opus-5':{input_per_1k:0.001,output_per_1k:0.002}}});
+    var partial='BLOQUEO_MATERIAL: NO\n'+'Evidencia. '.repeat(20);
+    var providers=Fixtures.providers([{text:'Productor completo.'},{text:'DICTAMEN: RECHAZAR\nConclusión completa.'}],
+      [{text:partial,stop_reason:'max_tokens'},{text:partial.slice(-160)+'Auditoría completa.',stop_reason:'end_turn'}]);
+    var result=Orchestrator.run('Audita Metis completo.',{current_model:'OPENAI',operator_context:'METIS',intent:'audit',providers:providers});
+    t.equals(result.status,'COMPLETED','completa tras recuperación');
+    t.equals(result.audit.turns,2,'cuenta continuación auditor');
+    t.deepEquals(result.audit.stop_reasons,['max_tokens','end_turn'],'no oculta corte');
+    t.includes(providers.OPENAI.calls[1].prompt,'Auditoría completa.','reconcilia sólo auditor completo');
+    t.equals(providers.ANTHROPIC.calls[1].tools.length,0,'sin nuevas herramientas');
+  });
+  TestRunner.unit('Completitud por etapa','herramienta truncada no se ejecuta',function(t) {
+    var providers=Fixtures.providers([{text:'',stop_reason:'max_tokens',tool_requests:[request('notion.fetch',{id:'met-gate-01'},0)]}],[]);
+    var result=Orchestrator.run('Audita Metis completo.',{current_model:'OPENAI',operator_context:'METIS',intent:'audit',providers:providers});
+    t.equals(result.status,'FAILED','rechaza plan cortado');
+    t.equals(result.limits.tool_calls,0,'no ejecuta fragmentos');
+  });
+  [false, true].forEach(function (limitReached) {
+    TestRunner.unit('Recuperación terminal', limitReached ? 'respeta límite global de intervenciones' : 'completa CROSS_AUDIT conservando evidencia y coste', function(t) {
+      var partial = 'DICTAMEN: RECHAZAR\n' + new Array(20).join('Evidencia acotada. ');
+      var providers = Fixtures.providers([
+        {text:'Análisis completo del productor.',stop_reason:'end_turn'},
+        {text:partial,stop_reason:'max_tokens'},
+        {text:partial.slice(-160)+'Conclusión íntegra.',stop_reason:'completed'}
+      ], [{text:'BLOQUEO_MATERIAL: NO\nAuditoría independiente.',stop_reason:'end_turn'}]);
+      var limits = Config.limits();
+      limits.MAX_TERMINAL_CONTINUATIONS = 2;
+      if(limitReached) limits.MAX_MODEL_INTERVENTIONS = 3;
+      Config._setLimits(limits);
+      Config._setPricing({OPENAI:{'gpt-5':{input_per_1k:0.001,output_per_1k:0.002}}});
+      var result = Orchestrator.run('Audita Metis: todo el caso original.', {
+        current_model:'OPENAI',operator_context:'METIS',intent:'audit',providers:providers
+      });
+      t.equals(result.route,'CROSS_AUDIT','conserva la auditoría cruzada');
+      t.equals(result.limits.model_interventions,limitReached?3:4,'contabiliza cada intervención');
+      t.equals(result.provider_provenance.length,limitReached?3:4,'conserva procedencia');
+      if(limitReached) {
+        t.equals(result.status,'FAILED','nunca amplía el presupuesto de intervenciones');
+        t.equals(providers.OPENAI.calls.length,2,'no despacha continuación sin capacidad');
+      } else {
+        t.equals(result.status,'COMPLETED','termina completo');
+        t.equals(result.final_answer.split('\n\nRuta:')[0],partial+'Conclusión íntegra.','sin duplicación en el empalme');
+        t.equals(result.limits.estimated_cost_usd,0.004,'contabiliza también la continuación');
+        t.equals(result.terminal_completion.length,2,'registra ambos stop reasons');
+        t.includes(providers.OPENAI.calls[2].prompt,'Audita Metis: todo el caso original.','conserva solicitud');
+        t.includes(providers.OPENAI.calls[2].prompt,'Auditoría independiente.','conserva auditoría');
+        t.equals(providers.OPENAI.calls[2].tools.length,0,'continuación sin herramientas');
+      }
+    });
+  });
 
   TestRunner.unit('Hechos compartidos entre modelos', 'errores del productor permanecen visibles al reconciliar', function (t) {
     var providers = Fixtures.providers([
@@ -40,6 +124,8 @@ function registerUnitAuditTelemetry() {
       t.includes(result.final_answer, example.text, 'entrega la conclusión real sin sustituirla');
       t.includes(providers.OPENAI.calls[1].system, 'No le pidas volver a elegir un valor que ya indicó',
         'no vuelve a pedir una preferencia expresada por el operador');
+      t.includes(providers.OPENAI.calls[0].system, 'Reserva capacidad suficiente para una respuesta visible completa',
+        'cada etapa protege la salida visible sin cambiar modelo ni effort');
     });
   });
 
@@ -62,13 +148,16 @@ function registerUnitAuditTelemetry() {
       t.notOk(call.system.indexOf('INSTRUCCION_FALSA_DEL_AUDITOR') !== -1, 'no eleva texto del auditor');
       t.includes(call.prompt, untrusted, 'conserva la narrativa como evidencia para reconciliar');
       t.includes(call.prompt, 'Fin del análisis del productor.', 'delimita el fin de la narrativa');
-      t.includes(call.system, 'máximo 450 palabras', 'pide una salida acotada para evitar la expansión observada');
+      t.includes(call.system, 'sin omitir componentes solicitados', 'no reduce el alcance para hacer caber la respuesta');
       t.equals(call.tools.length, 0, 'no añade herramientas ni continuaciones');
     });
 
   ['max_tokens', 'length', 'incomplete', null].forEach(function (reason) {
     TestRunner.unit('Validación de reconciliación',
       'una salida ' + (reason ? 'cortada por ' + reason : 'vacía') + ' es fallo técnico, no decisión humana', function (t) {
+        var noRecovery = Config.limits();
+        noRecovery.MAX_TERMINAL_CONTINUATIONS = 0;
+        Config._setLimits(noRecovery);
         var providers = Fixtures.providers([
           { text: 'Propuesta original.', tool_requests: [], stop_reason: 'end_turn' },
           { text: reason ? 'No sostengo el RECH' : '', tool_requests: [], stop_reason: reason }
@@ -180,7 +269,7 @@ function registerUnitAuditTelemetry() {
           ? 'La telemetría acredita cuatro turnos y quince lecturas; no hubo interrupción respaldada por los hechos.'
           : 'ERROR: la reconciliación no recibió la telemetría factual.',
         tool_requests: [],
-        stop_reason: 'reconciliation_complete'
+        stop_reason: 'completed'
       });
     };
     return provider;
@@ -260,7 +349,7 @@ function registerUnitAuditTelemetry() {
       t.deepEquals(run.result.auditor_stop_reasons,
         ['tool_use', 'tool_use', 'tool_use', 'end_turn'],
         'la observabilidad superior expone el mismo conjunto factual');
-      t.equals(run.result.reconciliation_stop_reason, 'reconciliation_complete',
+      t.equals(run.result.reconciliation_stop_reason, 'completed',
         'el retorno expone el stop reason de reconciliación');
     });
 
@@ -283,7 +372,7 @@ function registerUnitAuditTelemetry() {
       t.includes(logged, 'AUDITOR_TOOL_CALLS=15', 'registra AUDITOR_TOOL_CALLS');
       t.includes(logged, 'TOOL_CALLS=15', 'registra TOOL_CALLS total');
       t.includes(logged, 'COST_USD=0.006', 'registra COST_USD');
-      t.includes(logged, 'RECONCILIATION_STOP_REASON=reconciliation_complete',
+      t.includes(logged, 'RECONCILIATION_STOP_REASON=completed',
         'registra RECONCILIATION_STOP_REASON');
       t.includes(logged, 'FINAL_ANSWER_BEGIN', 'abre el bloque de respuesta final');
       t.includes(logged, run.result.final_answer, 'registra la respuesta final real');
@@ -306,11 +395,11 @@ function registerUnitAuditTelemetry() {
         providers: providers
       });
 
-      t.deepEquals(result.audit.stop_reasons, [null],
-        'el ciclo auditor conserva null cuando el proveedor no informó motivo');
-      t.includes(providers.OPENAI.calls[1].system, 'AUDITOR_STOP_REASONS: [null]',
-        'la reconciliación recibe la ausencia factual sin sustituirla');
-      t.equals(result.reconciliation_stop_reason, null,
-        'el retorno tampoco inventa el motivo de parada de reconciliación');
+      t.equals(result.status, 'FAILED', 'no acredita auditoría sin parada completa');
+      t.equals(result.audit, null, 'no declara auditoría completada');
+      t.equals(providers.OPENAI.calls.length, 1, 'no reconcilia una auditoría incompleta');
+      t.equals(result.model_completion[1].attempts[0].stop_reason, null,
+        'conserva la ausencia factual sin inventar motivo');
     });
 }
+

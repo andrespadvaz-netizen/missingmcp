@@ -371,6 +371,7 @@ var Fixtures = (function () {
     // los declara. El entorno de test declara los suyos, igual que tendría que
     // hacerlo el operador en METIS_LIMITS.
     Config._setLimits(TEST_BUDGETS);
+    Config._setPricing(null);
     installBackends();
   }
 

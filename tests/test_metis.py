@@ -92,7 +92,7 @@ async def test_client_poll_timeout_keeps_pending_and_does_not_dispatch(queue, mo
 
 
 @pytest.mark.parametrize('args', [None, {}, [], {**REQUEST,'model':'OPENAI'},
-    {**REQUEST,'request':' '}, {**REQUEST,'request':'ñ'*8001},
+    {**REQUEST,'request':' '}, {**REQUEST,'request':'ñ'*64001},
     {**REQUEST,'request':42}, {**REQUEST,'idempotency_key':'short'}])
 def test_invalid_payload(queue, args):
     with pytest.raises(RequestError):

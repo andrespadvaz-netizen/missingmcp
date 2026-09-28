@@ -125,6 +125,61 @@ function registerUnitLedger() {
     }, 'alcanzar el techo diario detiene la corrida');
   });
 
+  TestRunner.unit('Ledger', 'replay durable reconstruye costo sin cobrar dos veces', function (t) {
+    var normalized = {
+      text:'respuesta', tool_requests:[],
+      usage:{input_tokens:10,output_tokens:5,estimated_cost_usd:0.25},
+      stop_reason:'completed',provider_model:'fixture',provider_request_id:'req-durable'
+    };
+    var provider = {
+      name:'ANTHROPIC',
+      complete:function(){return normalized;},
+      completeWithTools:function(){return normalized;},
+      normalizeResponse:function(x){return x;},
+      redactProviderError:function(e){return e;}
+    };
+    var replayed = false;
+    var accounted = 0;
+    var runtime = {cost_usd:0,cost_known:true,provider_replay:{
+      isReplay:function(){return replayed;},
+      onAccounted:function(_,wasReplay){accounted++;t.equals(wasReplay,replayed,'hook recibe procedencia correcta');}
+    }};
+    var before = Ledger.spend('DAILY');
+    ProviderAdapter.callBudgeted(provider,{system:'s',prompt:'p'},null,runtime);
+    replayed = true;
+    ProviderAdapter.callBudgeted(provider,{system:'s',prompt:'p'},null,runtime);
+    t.equals(runtime.cost_usd,0.5,'el total de corrida se reconstruye con ambas etapas');
+    t.equals(Ledger.spend('DAILY')-before,0.25,'el agregado cobra la respuesta una sola vez');
+    t.equals(accounted,2,'el hook observa llamada nueva y replay');
+  });
+
+
+  TestRunner.unit('Ledger', 'corrupt budget counters fail closed without partial updates', function (t) {
+    Ledger.addSpend(0.25);
+    var st = Fixtures.ledgerStore();
+    var monthly = st.keys().filter(function(k){return k.indexOf(Config.LEDGER.COUNTER_PREFIX + 'MONTHLY_') === 0;})[0];
+    ['NaN', 'Infinity', '-1', '', '  ', 'invalid'].forEach(function(raw) {
+      st.set(monthly, raw);
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.assertAggregateBudget(); }, 'invalid aggregate blocks: ' + raw);
+      var calls = 0;
+      var provider = {name:'ANTHROPIC',complete:function(){calls++;}};
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){
+        ProviderAdapter.callBudgeted(provider, {system:'policy',prompt:'request'}, null, {cost_usd:0,cost_known:true});
+      }, 'paid-call gateway rejects corrupt aggregate');
+      t.equals(calls, 0, 'no provider invocation');
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.addSpend(0.5); }, 'no update over corrupt monthly');
+      t.equals(Ledger.spend('DAILY'), 0.25, 'daily counter unchanged');
+      t.equals(st.get(monthly), raw, 'corrupt evidence preserved for review');
+    });
+    st.set(monthly, '0.25');
+    [NaN, Infinity, -1, '0.1', null].forEach(function(value) {
+      t.throwsCode(Errors.CODES.LEDGER_CONSISTENCY, function(){ Ledger.addSpend(value); }, 'invalid charge blocked');
+    });
+    t.equals(Ledger.spend('MONTHLY'), 0.25, 'invalid charge cannot corrupt counters');
+    Ledger.addSpend(0.5);
+    t.equals(Ledger.spend('DAILY'), 0.75, 'valid daily addition');
+    t.equals(Ledger.spend('MONTHLY'), 0.75, 'valid monthly addition');
+  });
 
   TestRunner.unit('Ledger', 'el registro de handoffs se persiste y no lleva sustancia', function (t) {
     var handoff = {
