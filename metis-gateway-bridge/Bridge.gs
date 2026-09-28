@@ -92,8 +92,16 @@ function dispatch_(p) {
       storeDurable_(props, receipt, {request:p.request, origin_model:p.origin_model || 'ANTHROPIC', calls:[]});
     }
     var previous = Engine.Config.runLevel();
+    var previousLimits = Engine.Config.limits();
     try {
       if (previous !== Engine.Config.LEVELS.LEVEL_0) { throw new Error('unexpected_level'); }
+      // Temporary acceptance limits expressly authorized by the operator on
+      // 2026-09-27. They remain bounded and are restored after every invocation.
+      var acceptanceLimits = JSON.parse(JSON.stringify(previousLimits));
+      acceptanceLimits.MAX_RUN_BUDGET_USD = 2;
+      acceptanceLimits.MAX_DAILY_BUDGET_USD = 10;
+      acceptanceLimits.MAX_MONTHLY_BUDGET_USD = 25;
+      Engine.Config._setLimits(acceptanceLimits);
       var productive = props.getProperty('GATEWAY_PRODUCTIVE_ENABLED') === 'true';
       Engine.Config._setRunLevel(productive ? 'LEVEL_3' : Engine.Config.LEVELS.LEVEL_2);
       var durableState = loadDurable_(props, receipt);
@@ -144,7 +152,10 @@ function dispatch_(p) {
     } catch (_) {
       finish_(props, receipt, {status:'FAILED', error:'ENGINE_OR_PERSISTENCE_FAILURE',
         cost_usd:null, cost_known:false, engine_execution_id:null, final_answer:null, requires_review:true});
-    } finally { Engine.Config._setRunLevel(previous); }
+    } finally {
+      Engine.Config._setLimits(previousLimits);
+      Engine.Config._setRunLevel(previous);
+    }
     return cached_(props, receipt);
   } finally { lock.releaseLock(); }
 }

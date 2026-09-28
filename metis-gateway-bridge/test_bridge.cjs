@@ -8,6 +8,7 @@ function fixture() {
   const secret = 'test-bridge-secret'.repeat(3);
   const data = {GATEWAY_BRIDGE_SECRET: secret};
   let calls = 0, locked = false, level = 'LEVEL_0';
+  let limits = {MAX_RUN_BUDGET_USD:2,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:25};
   const blob = (x,contentType) => ({contentType,getBytes:()=>Buffer.isBuffer(x)?x:Buffer.from(x), getDataAsString:()=>Buffer.from(x).toString()});
   const props = {getProperty:k=>data[k]??null, setProperty:(k,v)=>{data[k]=v;},
     getProperties:()=>({...data}), deleteProperty:k=>{delete data[k];}};
@@ -20,8 +21,8 @@ function fixture() {
       computeDigest:(a,p)=>[...crypto.createHash('sha256').update(p).digest()],
       newBlob:blob, gzip:b=>blob(zlib.gzipSync(b.getBytes()),'application/x-gzip'), ungzip:b=>{assert.equal(b.contentType,'application/x-gzip');return blob(zlib.gunzipSync(b.getBytes()));},
       base64Encode:b=>Buffer.from(b).toString('base64'),base64Decode:s=>Buffer.from(s,'base64')},
-    Engine:{Config:{runLevel:()=>level,LEVELS:{LEVEL_0:'LEVEL_0',LEVEL_2:'LEVEL_2'},
-      _setRunLevel:x=>{level=x;},hasSecret:()=>true},
+    Engine:{Config:{runLevel:()=>level,limits:()=>({...limits}),LEVELS:{LEVEL_0:'LEVEL_0',LEVEL_2:'LEVEL_2'},
+      _setRunLevel:x=>{level=x;},_setLimits:x=>{limits={...x};},hasSecret:()=>true},
       OpenAIAdapter:{create:()=>({})},AnthropicAdapter:{create:()=>({})},
       Orchestrator:{run:()=>{calls++;return {status:'COMPLETED',execution_id:'engine-1',route:'CROSS_AUDIT',
         final_answer:'Texto íntegro 漢🙂'.repeat(5000),limits:{estimated_cost_usd:.2,cost_known:true},
