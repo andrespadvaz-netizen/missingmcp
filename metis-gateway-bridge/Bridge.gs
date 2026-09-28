@@ -1,4 +1,4 @@
-/** Transport only. Separate project; Engine library pinned to reviewed v9.
+/** Transport only. Separate project; Engine library pinned to reviewed v22.
  * One monotonic receipt survives forever; only the latest result is cached.
  * Railway persists it before sending the next sequence. Old sequences never run.
  * Never log requests, results, exceptions or signing/provider credentials.
@@ -29,7 +29,7 @@ function doPost(e) {
   } catch (_) { return json_({error: 'bridge_failure'}); }
 }
 
-/** A Lens session is explicit and opaque; no global "last context" exists. */
+/** A Lens session is explicit, bounded and opaque; no global "last context" exists. */
 function dispatchLensContext_(p) {
   if (typeof p.request !== 'string' || !p.request.trim() ||
       Utilities.newBlob(p.request).getBytes().length > 3500 ||
@@ -38,14 +38,14 @@ function dispatchLensContext_(p) {
   }
   var props = PropertiesService.getScriptProperties();
   var key = p.session_id ? 'lens_context_' + p.session_id : null;
-  var previous = key ? props.getProperty(key) : null;
+  var previous = key ? readLensContinuity_(props, key) : null;
   var level = Engine.Config.runLevel();
   try {
     if (level !== Engine.Config.LEVELS.LEVEL_0) { return {status: 'UNAVAILABLE'}; }
     Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
     var result = Engine.LensContext.capsule(p.request, previous);
     if (key && result && result.status === 'OK' && result.continuity_context) {
-      props.setProperty(key, result.continuity_context);
+      writeLensContinuity_(props, key, result.continuity_context);
     }
     return result;
   } catch (_) {
@@ -53,6 +53,31 @@ function dispatchLensContext_(p) {
   } finally {
     Engine.Config._setRunLevel(level);
   }
+}
+
+// Context selection is short-lived state, never a durable user profile.  The
+// record format deliberately rejects legacy bare strings: an old, unbounded
+// value cannot silently re-enter a new session after this protection ships.
+var LENS_CONTINUITY_TTL_MS = 2 * 60 * 60 * 1000;
+function readLensContinuity_(props, key) {
+  var raw = props.getProperty(key);
+  if (!raw) { return null; }
+  try {
+    var record = JSON.parse(raw);
+    if (!record || typeof record.context !== 'string' ||
+        !Number.isSafeInteger(record.expires_at) || record.expires_at <= Date.now()) {
+      props.deleteProperty(key);
+      return null;
+    }
+    return record.context;
+  } catch (_) {
+    props.deleteProperty(key);
+    return null;
+  }
+}
+
+function writeLensContinuity_(props, key, context) {
+  props.setProperty(key, JSON.stringify({context: context, expires_at: Date.now() + LENS_CONTINUITY_TTL_MS}));
 }
 
 function json_(value) {
@@ -119,7 +144,7 @@ function dispatch_(p) {
         degradation:result.degradation, blocks:result.blocks,
         reconciliation_stop_reason:result.reconciliation_stop_reason,
         requires_review:result.limits.cost_known !== true,
-        engine_version:9,
+        engine_version:22,
         resolved_context:result.resolved_context,
         write_plan:result.write_plan || [],
         write_plan_verified:productive && result.status === 'COMPLETED' && !!result.action_plan && result.action_plan.valid === true
@@ -159,7 +184,7 @@ function cached_(props, receipt) {
 
 /** Read-only capability probe: no credential values and no provider calls. */
 function inspectBridge() {
-  return {engine_version:9, level:Engine.Config.runLevel(),
+  return {engine_version:22, level:Engine.Config.runLevel(),
     productive_enabled:PropertiesService.getScriptProperties().getProperty('GATEWAY_PRODUCTIVE_ENABLED')==='true',
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};

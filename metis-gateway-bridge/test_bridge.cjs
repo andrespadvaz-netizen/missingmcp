@@ -81,7 +81,7 @@ test('Fail closed on missing secret, invalid signature, stale request and finger
 });
 test('Pin remains immutable and bridge contains no log/trigger/provider endpoint',()=>{
   const manifest=JSON.parse(fs.readFileSync(__dirname+'/appsscript.json'));
-  assert.equal(manifest.dependencies.libraries[0].version,'9');
+  assert.equal(manifest.dependencies.libraries[0].version,'22');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
 });
@@ -93,6 +93,15 @@ test('Lens context runs read-only, restores LEVEL_0, and keeps continuity sessio
   assert.equal(next.continued,true);assert.equal(next.resolved_context,'ANDREA');
   const isolated=f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:'lens_session_0002'});
   assert.equal(isolated.status,'NO_CONTEXT');assert.equal(isolated.resolved_context,null);
+});
+test('Lens continuity expires and rejects legacy unbounded session state',()=>{
+  const f=fixture(), sid='lens_session_0003', key='lens_context_'+sid;
+  f.data[key]='ANDREA';
+  assert.equal(f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:sid}).status,'NO_CONTEXT');
+  f.request(1,'lens_context',{request:'Contexto: Andrea',session_id:sid});
+  const record=JSON.parse(f.data[key]);assert.equal(record.context,'ANDREA');
+  record.expires_at=Date.now()-1;f.data[key]=JSON.stringify(record);
+  assert.equal(f.request(1,'lens_context',{request:'¿Qué trabajé hoy?',session_id:sid}).status,'NO_CONTEXT');
 });
 console.log(`${tests} bridge checks passed`);
 
