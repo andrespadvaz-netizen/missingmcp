@@ -32,10 +32,13 @@ async function main() {
     f.source = source;
   }
   const engine = await api('/'+engineId+'/content');
-  replace(engine.files, 'Orchestrator', fs.readFileSync(path.join(root,'metis-orchestrator-prototype','src','Orchestrator.gs'),'utf8'));
-  replace(engine.files, 'ProviderAdapter', fs.readFileSync(path.join(root,'metis-orchestrator-prototype','src','ProviderAdapter.gs'),'utf8'));
+  const engineSourceDir = path.join(root,'metis-orchestrator-prototype','src');
+  const engineSources = fs.readdirSync(engineSourceDir).filter(name => name.endsWith('.gs'));
+  for (const fileName of engineSources) {
+    replace(engine.files, path.basename(fileName,'.gs'), fs.readFileSync(path.join(engineSourceDir,fileName),'utf8'));
+  }
   await api('/'+engineId+'/content','PUT',{files:engine.files});
-  const engineVersion = await api('/'+engineId+'/versions','POST',{description:'Engine v9 durable provider-call checkpoints; same models and limits'});
+  const engineVersion = await api('/'+engineId+'/versions','POST',{description:'Engine v9; full source synchronization with bounded empty-output recovery'});
 
   const bridge = await api('/'+bridgeId+'/content');
   replace(bridge.files, 'Bridge', fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8'));
@@ -56,7 +59,12 @@ async function main() {
 
   const verifyEngine = await api('/'+engineId+'/content');
   const verifyBridge = await api('/'+bridgeId+'/content');
-  if (verifyEngine.files.find(x=>x.name==='Orchestrator'||x.name.endsWith('/Orchestrator')).source.trim() !== fs.readFileSync(path.join(root,'metis-orchestrator-prototype','src','Orchestrator.gs'),'utf8').trim()) throw new Error('Engine verification failed');
+  for (const fileName of engineSources) {
+    const sourceName = path.basename(fileName,'.gs');
+    const remote = verifyEngine.files.find(x=>x.name===sourceName||x.name.endsWith('/'+sourceName));
+    const local = fs.readFileSync(path.join(engineSourceDir,fileName),'utf8').trim();
+    if (!remote || remote.source.trim() !== local) throw new Error('Engine verification failed for '+sourceName);
+  }
   if (verifyBridge.files.find(x=>x.name==='Bridge'||x.name.endsWith('/Bridge')).source.trim() !== fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8').trim()) throw new Error('Bridge verification failed');
   console.log(JSON.stringify({engine_version:engineVersion.versionNumber,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
 }
