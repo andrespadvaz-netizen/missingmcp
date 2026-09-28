@@ -4,6 +4,7 @@ import hmac
 import contextlib
 import json
 import os
+import re
 import urllib.parse
 from pathlib import Path
 from starlette.applications import Starlette
@@ -182,9 +183,12 @@ def build_app(config: Config) -> Starlette:
         text = body.get("request") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 3_500:
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        lens_session_id = request.headers.get("x-metis-lens-session")
+        if lens_session_id is not None and not re.fullmatch(r"[a-f0-9]{64}", lens_session_id):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
 
         try:
-            result = await adapters["metis"].worker.bridge.call_lens_context(text)
+            result = await adapters["metis"].worker.bridge.call_lens_context(text, lens_session_id)
         except Exception:
             # The response intentionally carries no upstream diagnostic or source content.
             return JSONResponse({"status": "UNAVAILABLE"}, status_code=502)

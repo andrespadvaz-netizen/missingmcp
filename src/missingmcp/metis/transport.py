@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 import httpx
 from ..log import private_transport
@@ -35,12 +36,17 @@ class Bridge:
         return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                                  "fingerprint": row["fingerprint"], "write": write}, row)
 
-    async def call_lens_context(self, request: str):
+    async def call_lens_context(self, request: str, session_id: str | None = None):
         """Signed, read-only Lens retrieval. It never enters the durable spend queue."""
         if not isinstance(request, str) or not request.strip() or len(request.encode("utf-8")) > 3_500:
             raise ValueError("invalid_lens_context_request")
+        if session_id is not None and not isinstance(session_id, str):
+            raise ValueError("invalid_lens_context_session")
+        payload_data = {"action": "lens_context", "request": request, "timestamp": int(time.time())}
+        if session_id is not None:
+            payload_data["session_id"] = session_id
         payload = json.dumps(
-            {"action": "lens_context", "request": request, "timestamp": int(time.time())},
+            payload_data,
             separators=(",", ":"), ensure_ascii=False)
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
@@ -53,9 +59,7 @@ class Bridge:
                 data = response.json()
         finally:
             private_transport.reset(token)
-        if not isinstance(data, dict):
-            raise ValueError("invalid_lens_context_response")
-        return data
+        return _validate_lens_context_response(data)
 
     async def _call(self, envelope, row):
         payload = json.dumps({**envelope, "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
@@ -160,3 +164,24 @@ class Worker:
                 await asyncio.wait_for(stop.wait(), timeout=5)
             except asyncio.TimeoutError:
                 pass
+
+
+def _validate_lens_context_response(data):
+    """Accept only the narrow, read-only Lens capsule contract from Bridge."""
+    statuses = {"READY", "REQUIRES_CONTEXT", "ABSTAIN", "INVALID_REQUEST", "UNAVAILABLE"}
+    if not isinstance(data, dict) or data.get("status") not in statuses:
+        raise ValueError("invalid_lens_context_response")
+    if data["status"] != "READY":
+        return data
+    context = data.get("resolved_context")
+    documents = data.get("documents")
+    if (not isinstance(context, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", context)
+            or not isinstance(documents, list) or len(documents) > 4):
+        raise ValueError("invalid_lens_context_response")
+    for document in documents:
+        if (not isinstance(document, dict) or document.get("context") != context
+                or document.get("source") not in {"NOTION", "ASANA", "DRIVE", "CALENDAR"}
+                or not isinstance(document.get("content"), str)
+                or len(document["content"].encode("utf-8")) > 1_200):
+            raise ValueError("invalid_lens_context_response")
+    return data
