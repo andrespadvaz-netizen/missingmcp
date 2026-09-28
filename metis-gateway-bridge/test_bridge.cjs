@@ -67,7 +67,7 @@ test('Authenticated run; exact full answer, engine ID, route, cost, restored lev
   assert.equal(r.state,'DONE');assert.equal(r.result.engine_execution_id,'engine-1');
   assert.equal(r.result.final_answer,'Texto íntegro 漢🙂'.repeat(5000));
   assert.equal(r.result.route,'CROSS_AUDIT');assert.equal(r.result.cost_usd,.2);
-  assert.equal(r.result.engine_version,20);assert.equal(r.result.engine_release,9);
+  assert.equal(r.result.engine_version,22);assert.equal(r.result.engine_release,9);
   assert.equal(f.level(),'LEVEL_0');assert.equal(f.calls(),1);
 });
 test('Retry after response loss does not repeat paid run',()=>{
