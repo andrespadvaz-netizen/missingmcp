@@ -34,7 +34,10 @@ function registerUnitAuditTelemetry() {
     });
   });
   TestRunner.unit('Completitud por etapa','recupera auditor parcial dentro del mismo ciclo',function(t) {
-    Config._setPricing({ANTHROPIC:{'claude-opus-5':{input_per_1k:0.001,output_per_1k:0.002}}});
+    Config._setPricing({ANTHROPIC:{
+      'claude-opus-5':{input_per_1k:0.001,output_per_1k:0.002},
+      'claude-sonnet-5':{input_per_1k:0.001,output_per_1k:0.002}
+    }});
     var partial='BLOQUEO_MATERIAL: NO\n'+'Evidencia. '.repeat(20);
     var providers=Fixtures.providers([{text:'Productor completo.'},{text:'DICTAMEN: RECHAZAR\nConclusión completa.'}],
       [{text:partial,stop_reason:'max_tokens'},{text:partial.slice(-160)+'Auditoría completa.',stop_reason:'end_turn'}]);

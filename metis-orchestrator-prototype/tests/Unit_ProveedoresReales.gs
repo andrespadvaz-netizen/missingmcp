@@ -60,7 +60,10 @@ function registerUnitProveedoresReales() {
 
   var PRECIOS = {
     OPENAI: { 'gpt-5': { input_per_1k: 0.00125, output_per_1k: 0.01 } },
-    ANTHROPIC: { 'claude-opus-5': { input_per_1k: 0.005, output_per_1k: 0.025 } }
+    ANTHROPIC: {
+      'claude-opus-5': { input_per_1k: 0.005, output_per_1k: 0.025 },
+      'claude-sonnet-5': { input_per_1k: 0.002, output_per_1k: 0.010 }
+    }
   };
 
   TestRunner.unit('Capacidad autorizada', 'ambos proveedores tienen tope de 16384 y respetan una petición menor', function(t) {
@@ -72,6 +75,7 @@ function registerUnitProveedoresReales() {
       OpenAIAdapter.create().buildRequest({system:'s',prompt:'p',effort:'invalid'},null);
     },'OpenAI rechaza effort no permitido');
     var anthropicBody=AnthropicAdapter.create().buildRequest(request,null);
+    t.equals(anthropicBody.model,'claude-sonnet-5','Sonnet 5 es el modelo rutinario');
     t.equals(anthropicBody.max_tokens,16384,'Anthropic acotado');
     t.deepEquals(anthropicBody.thinking,{type:'adaptive'},'thinking adaptativo declarado');
     t.equals(anthropicBody.output_config.effort,'medium','effort coincide con el cliente de aceptación');
