@@ -32,6 +32,15 @@ _INTERRUPTED_RECEIPTS = {
         "basis": "CONSERVATIVE_RUN_BUDGET_RESERVE",
         "evidence_sha256": "11eb05d6d30e7eb8aa5f72a6820ca8223b4ebd9070e5fde15326e1096daa82eb",
     },
+    ("49bea683-e185-4aca-86f6-6d2e6922c2e4", 37): {
+        # The bridge transport exceeded its 390-second boundary and returned
+        # no engine id or usage. Reserve the complete authorized run ceiling;
+        # never retry an execution whose provider outcome is unknown.
+        "cost_usd": 2.0,
+        "error": "TRANSPORT_UNCERTAIN",
+        "basis": "CONSERVATIVE_RUN_BUDGET_RESERVE",
+        "evidence_sha256": "316d6ffecba8f637735246074033080a3d204a4b47d2b59b8810c5d447244268",
+    },
 }
 
 
