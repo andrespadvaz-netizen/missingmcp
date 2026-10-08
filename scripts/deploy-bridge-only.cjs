@@ -30,11 +30,18 @@ async function main() {
   const bridgeFile = bridge.files.find(x => x.name === 'Bridge' || x.name.endsWith('/Bridge'));
   if (!bridgeFile) throw new Error('Missing Bridge');
   bridgeFile.source = fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8');
+  const lensFile = bridge.files.find(x => x.name === 'LensContext' || x.name.endsWith('/LensContext'));
+  const lensSource = fs.readFileSync(path.join(root, 'metis-gateway-bridge', 'LensContext.gs'), 'utf8');
+  if (lensFile) {
+    lensFile.source = lensSource;
+  } else {
+    bridge.files.push({name: 'LensContext', type: 'SERVER_JS', source: lensSource});
+  }
   const manifest = bridge.files.find(x => x.name === 'appsscript' || x.name.endsWith('/appsscript'));
   if (!manifest) throw new Error('Missing bridge manifest');
   const manifestJson = JSON.parse(manifest.source);
   const library = manifestJson.dependencies.libraries.find(x => x.userSymbol === 'Engine');
-  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30','31'].indexOf(String(library.version)) < 0) {
+  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30','31','32'].indexOf(String(library.version)) < 0) {
     throw new Error('Bridge is not pinned to an expected rollback engine; found '+String(library && library.version));
   }
   library.version = '32';
@@ -49,6 +56,8 @@ async function main() {
   const verify = await api('/'+bridgeId+'/content');
   const remote = verify.files.find(x => x.name === 'Bridge' || x.name.endsWith('/Bridge'));
   if (!remote || remote.source.trim() !== bridgeFile.source.trim()) throw new Error('Bridge verification failed');
+  const remoteLens = verify.files.find(x => x.name === 'LensContext' || x.name.endsWith('/LensContext'));
+  if (!remoteLens || remoteLens.source.trim() !== lensSource.trim()) throw new Error('LensContext verification failed');
   console.log(JSON.stringify({engine_version:32,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});

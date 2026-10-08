@@ -18,8 +18,14 @@ function doPost(e) {
     for (var i = 0; i < signature.length; i++) { mismatch |= signature.charCodeAt(i) ^ envelope.signature.charCodeAt(i); }
     if (mismatch) { return json_({error: 'unauthorized'}); }
     var p = JSON.parse(envelope.payload);
-    if (!Number.isSafeInteger(p.timestamp) || Math.abs(Date.now()/1000-p.timestamp) > 90 ||
-        !Number.isSafeInteger(p.seq) || p.seq < 1 || !/^[a-f0-9-]{36}$/.test(p.id) ||
+    if (!Number.isSafeInteger(p.timestamp) || Math.abs(Date.now()/1000-p.timestamp) > 90) {
+      return json_({error: 'invalid_request'});
+    }
+    // Lens is a signed, read-only request.  It must not enter the durable
+    // execution receipt: doing so would consume a productive sequence and
+    // make a harmless retrieval capable of blocking paid work.
+    if (p.action === 'lens_context') { return json_(dispatchLensContext_(p)); }
+    if (!Number.isSafeInteger(p.seq) || p.seq < 1 || !/^[a-f0-9-]{36}$/.test(p.id) ||
         !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','status','write','write_status'].indexOf(p.action) < 0) {
       return json_({error: 'invalid_request'});
     }

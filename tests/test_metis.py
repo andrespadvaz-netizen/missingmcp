@@ -4,7 +4,7 @@ import httpx
 import pytest
 from missingmcp.config import load_config
 from missingmcp.metis.queue import Queue, RequestError
-from missingmcp.metis.transport import Worker
+from missingmcp.metis.transport import Worker, _validate_lens_context_response
 from missingmcp.adapters.metis import MetisAdapter
 from missingmcp.adapters.base import LoginError, SessionExpired
 
@@ -38,6 +38,21 @@ async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, 
 
 SECRET = 'storage-secret-' * 4
 REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001'}
+
+
+def test_lens_gateway_accepts_only_partition_scoped_evidence():
+    good = {'status': 'READY', 'resolved_context': 'ANDREA', 'documents': [
+        {'context': 'ANDREA', 'source': 'DRIVE', 'content': 'evidence'}
+    ]}
+    assert _validate_lens_context_response(good) == good
+    with pytest.raises(ValueError):
+        _validate_lens_context_response({**good, 'documents': [{
+            'context': 'FINAL_FINAL', 'source': 'DRIVE', 'content': 'cross-context'
+        }]})
+    with pytest.raises(ValueError):
+        _validate_lens_context_response({**good, 'documents': [{
+            'context': 'ANDREA', 'source': 'DRIVE', 'content': 'x' * 1201
+        }]})
 
 
 @pytest.fixture
