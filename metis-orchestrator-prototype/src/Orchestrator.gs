@@ -361,11 +361,19 @@ var Orchestrator = (function () {
 
   /** Telemetría factual del auditor, generada por el runtime y no por modelos. */
   function _renderAuditTelemetry(targetCycle, targetSession, isAudit) {
+    var toolErrors = targetSession.tool_errors.map(function (failure) {
+      return {
+        name: failure.name || null,
+        code: failure.code || 'ERROR',
+        message: Errors.redactText(failure.message || '')
+      };
+    });
     return [
       _renderExecutionFacts(targetSession, isAudit),
       'TELEMETRÍA VERIFICADA DE AUDITORÍA (generada por el sistema):',
       'AUDIT_TURNS_COMPLETED: ' + targetCycle.turns,
       'AUDITOR_TOOL_CALLS: ' + targetSession.tool_calls,
+      'AUDITOR_TOOL_ERRORS: ' + JSON.stringify(toolErrors),
       'AUDITOR_RETRIEVED_BY_ITSELF: ' + targetCycle.retrieved,
       'AUDITOR_DOCUMENT_IDS: ' + JSON.stringify(targetSession.documents.map(function (x) { return x.id; })),
       'Una llamada puede devolver cero, uno o varios documentos; un documento puede aparecer en varias llamadas. No existe igualdad esperada entre llamadas, IDs totales e IDs únicos. La repetición no demuestra pérdida de trazabilidad ni ausencia de contenido nuevo: los IDs no describen qué fragmentos se leyeron.',
@@ -708,7 +716,36 @@ var Orchestrator = (function () {
           runtime.auditor_documents = targetSession.documents.map(function (x) { return x.id; });
         }
 
-        var blocksMaterially = /^BLOQUEO_MATERIAL:\s*SI/i.test(String(targetCycle.text || '').trim());
+        var auditorReadFailures = targetSession.tool_errors.slice();
+        // `targetCycle.retrieved` indica que el ciclo intentó una fase de
+        // retrieval; no garantiza que alguna fuente haya devuelto evidencia.
+        // La disponibilidad real se prueba con documentos admitidos.
+        var evidenceUnavailable = auditorReadFailures.length > 0 && targetSession.documents.length === 0;
+        var blocksMaterially = /^BLOQUEO_MATERIAL:\s*SI/i.test(String(targetCycle.text || '').trim()) ||
+          evidenceUnavailable;
+
+        // El cuerpo narrativo del auditor no puede contradecir la telemetría
+        // estructurada. Si todas sus lecturas fallaron, la auditoría puede
+        // terminar técnicamente, pero no acredita una revisión respaldada por
+        // fuentes. El bloqueo y la degradación quedan visibles para clientes y
+        // reportes sin depender de que el modelo los redacte correctamente.
+        if (auditorReadFailures.length > 0) {
+          runtime.blocks.push({
+            code: 'AUDIT_READ_FAILURES',
+            detail: auditorReadFailures.length + ' lectura(s) del auditor fallaron' +
+              (evidenceUnavailable ? '; no recuperó evidencia' : '')
+          });
+          runtime.degradation = {
+            code: 'AUDIT_READ_FAILURES',
+            provider: target,
+            stage: 'TOOL_EXECUTION',
+            cost_status: runtime.cost_known ? 'KNOWN' : 'UNKNOWN',
+            next_action: {
+              applicable: evidenceUnavailable,
+              action: evidenceUnavailable ? 'PROVISION_CONTEXT_READ_PARTITIONS' : null
+            }
+          };
+        }
         runtime.audit = {
           verdict_text: targetCycle.text,
           turns: targetCycle.turns,

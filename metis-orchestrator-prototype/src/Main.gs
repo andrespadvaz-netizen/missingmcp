@@ -150,6 +150,72 @@ function _containerCount(partition) {
     partition.folder_ids || partition.calendar_ids || []).length;
 }
 
+/** Inspección acotada de FINAL_FINAL; nunca devuelve IDs ni secretos. */
+function inspectFinalFinalProvisioning() {
+  var props = PropertiesService.getScriptProperties();
+  var legacyRaw = props.getProperty('METIS_SOURCE_PARTITIONS');
+  var policyRaw = props.getProperty('METIS_PRODUCTIVE_POLICY');
+  var legacy = legacyRaw ? JSON.parse(legacyRaw) : {};
+  var policy = policyRaw ? JSON.parse(policyRaw) : {};
+  var sourceKey = legacy.FINAL_FINAL ? 'FINAL_FINAL' :
+    (legacy['.Final_Final'] ? '.Final_Final' : (legacy['.FINAL_FINAL'] ? '.FINAL_FINAL' : null));
+  var source = sourceKey ? legacy[sourceKey] : {};
+  var reads = policy.read_partitions && policy.read_partitions.FINAL_FINAL || {};
+  function counts(value) {
+    return {
+      notion: value.notion ? _containerCount(value.notion) : 0,
+      asana: value.asana ? _containerCount(value.asana) : 0,
+      drive: value.drive ? _containerCount(value.drive) : 0,
+      calendar: value.calendar ? _containerCount(value.calendar) : 0
+    };
+  }
+  return {
+    legacy_present: !!sourceKey,
+    legacy_key: sourceKey,
+    productive_context_present: !!(policy.contexts && policy.contexts.FINAL_FINAL),
+    legacy_counts: counts(source),
+    productive_read_counts: counts(reads),
+    revision: policy.revision || null
+  };
+}
+
+/** Registra raíces de lectura verificadas; no crea destinos de escritura. */
+function provisionFinalFinalReadPartitions() {
+  var props = PropertiesService.getScriptProperties();
+  var policyRaw = props.getProperty('METIS_PRODUCTIVE_POLICY');
+  if (!policyRaw) { throw new Error('Falta la política productiva.'); }
+  var policy = JSON.parse(policyRaw);
+  // IDs verificados directamente contra cada proveedor el 2026-10-07.
+  // Notion: data source Decisiones Tomadas, filtrado en origen por Proyecto.
+  // Asana: los dos proyectos históricos registrados de .Final_Final.
+  // Drive: raíz 04_FINAL_FINAL. Son sólo raíces de lectura.
+  var source = {
+    notion: {
+      data_sources: ['1436a1fc-159a-4e99-a6d6-0313f5932560'],
+      decision_data_sources: ['1436a1fc-159a-4e99-a6d6-0313f5932560'],
+      project: '.Final_Final'
+    },
+    asana: { project_gids: ['1214790907415092', '1214894116089612'] },
+    drive: { folder_ids: ['14Xr9ek2TCLgvwcxDIiJcFGSlG7bqKnpn'] }
+  };
+  policy.contexts = policy.contexts || {};
+  policy.contexts.FINAL_FINAL = policy.contexts.FINAL_FINAL || {
+    primary: Config.primaryFor('FINAL_FINAL'),
+    notion_project: Config.notionProjectFor('FINAL_FINAL'),
+    signals: Config.CONTEXTS.FINAL_FINAL.signals.slice()
+  };
+  policy.read_partitions = policy.read_partitions || {};
+  policy.read_partitions.FINAL_FINAL = JSON.parse(JSON.stringify(source));
+  var marker = '|final-final-reads-20261007';
+  policy.revision = String(policy.revision || 'policy');
+  if (policy.revision.indexOf(marker) < 0) { policy.revision += marker; }
+  ProductivePolicy._useConfig(policy);
+  try { ProductivePolicy.config(); }
+  finally { ProductivePolicy._useConfig(null); }
+  props.setProperty('METIS_PRODUCTIVE_POLICY', JSON.stringify(policy));
+  return inspectFinalFinalProvisioning();
+}
+
 /** Estados de una comprobación del smoke test. */
 var SMOKE_STATUS = {
   PASS: 'PASS',               // demostrado con al menos un resultado real

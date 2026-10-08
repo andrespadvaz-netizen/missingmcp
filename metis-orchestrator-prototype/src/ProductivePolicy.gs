@@ -31,10 +31,16 @@ var ProductivePolicy = (function () {
       if (!c.contexts[context]) { fail('READ_CONTEXT_UNKNOWN'); }
       var reads=c.read_partitions[context];
       Object.keys(reads).forEach(function(source) {
-        if (source!=='notion' && source!=='calendar') { fail('READ_PARTITION_SOURCE_INVALID'); }
+        if (['notion','asana','drive','calendar'].indexOf(source)<0) { fail('READ_PARTITION_SOURCE_INVALID'); }
         if (source==='notion' && (reads.notion.project!==c.contexts[context].notion_project ||
             !Array.isArray(reads.notion.data_sources) || !reads.notion.data_sources.length ||
             reads.notion.data_sources.some(function(id){return typeof id!=='string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id);}))) { fail('READ_PARTITION_CONTEXT_MISMATCH'); }
+        if (source==='asana' && (!Array.isArray(reads.asana.project_gids) || !reads.asana.project_gids.length ||
+            reads.asana.project_gids.some(function(id){return typeof id!=='string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id);}))) { fail('READ_PARTITION_CONTEXT_MISMATCH'); }
+        if (source==='drive' && (!Array.isArray(reads.drive.folder_ids) || !reads.drive.folder_ids.length ||
+            reads.drive.folder_ids.some(function(id){return typeof id!=='string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id);}))) { fail('READ_PARTITION_CONTEXT_MISMATCH'); }
+        if (source==='calendar' && (!Array.isArray(reads.calendar.calendar_ids) || !reads.calendar.calendar_ids.length ||
+            reads.calendar.calendar_ids.some(function(id){return typeof id!=='string' || !id.trim();}))) { fail('READ_PARTITION_CONTEXT_MISMATCH'); }
       });
     });
     Object.keys(c.destinations).forEach(function (key) {

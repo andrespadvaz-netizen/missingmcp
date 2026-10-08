@@ -106,6 +106,32 @@ function registerUnitAuditTelemetry() {
     t.includes(providers.OPENAI.calls[2].system, 'SESSION_TOOL_ERROR_COUNT: 0', 'distingue la sesión auditora sin errores');
   });
 
+  TestRunner.unit('Telemetría estructurada de lecturas fallidas del auditor',
+    'si el auditor no recupera evidencia, bloquea materialmente y declara degradación', function (t) {
+      var providers = Fixtures.providers([
+        { text: 'Objeto a auditar.', tool_requests: [], stop_reason: 'end_turn' },
+        { text: 'Conclusión reconciliada.', tool_requests: [], stop_reason: 'end_turn' }
+      ], [
+        { text: 'Intento leer una fuente.', tool_requests: [request('notion.fetch', { id: 'sho-01' }, 0)], stop_reason: 'tool_use' },
+        { text: 'BLOQUEO_MATERIAL: NO\nNo pude verificar la fuente.', tool_requests: [], stop_reason: 'end_turn' }
+      ]);
+      var result = Orchestrator.run('Audita Metis con evidencia independiente.', {
+        current_model: 'OPENAI', operator_context: 'METIS', intent: 'audit', providers: providers
+      });
+
+      t.equals(result.audit.blocks_materially, true,
+        'la falta total de evidencia prevalece sobre la etiqueta narrativa NO');
+      t.equals(result.status, 'REQUIRES_ANDRES', 'el cierre no presenta la auditoría como acreditada');
+      t.equals(result.blocks[0].code, 'AUDIT_READ_FAILURES', 'expone el bloqueo operativo');
+      t.equals(result.degradation.code, 'AUDIT_READ_FAILURES', 'expone degradación estructurada');
+      t.equals(result.degradation.next_action.action, 'PROVISION_CONTEXT_READ_PARTITIONS',
+        'indica la corrección técnica necesaria');
+      t.includes(providers.OPENAI.calls[1].system, 'AUDITOR_TOOL_ERRORS:',
+        'la reconciliación recibe los errores observados por el runtime');
+      t.includes(providers.OPENAI.calls[1].system, 'PARTITION_VIOLATION',
+        'el código del error queda visible sin depender del texto del auditor');
+    });
+
   [
     { text: 'DICTAMEN: RECHAZAR\nLa propuesta requiere corregir su justificación técnica.', status: 'COMPLETED' },
     { text: 'DICTAMEN: APROBAR\nAprobación que contradice el bloqueo material.', status: 'REQUIRES_ANDRES' },
