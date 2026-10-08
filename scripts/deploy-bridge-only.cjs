@@ -34,14 +34,14 @@ async function main() {
   if (!manifest) throw new Error('Missing bridge manifest');
   const manifestJson = JSON.parse(manifest.source);
   const library = manifestJson.dependencies.libraries.find(x => x.userSymbol === 'Engine');
-  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30'].indexOf(String(library.version)) < 0) {
+  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30','31'].indexOf(String(library.version)) < 0) {
     throw new Error('Bridge is not pinned to an expected rollback engine; found '+String(library && library.version));
   }
-  library.version = '31';
+  library.version = '32';
   library.developmentMode = false;
   manifest.source = JSON.stringify(manifestJson, null, 2);
   await api('/'+bridgeId+'/content','PUT',{files:bridge.files});
-  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'FINAL_FINAL verifiable empty-container reads; engine 31'});
+  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'All-context verified read partitions; engine 32'});
   const deployment = await api('/'+bridgeId+'/deployments/'+deploymentId);
   await api('/'+bridgeId+'/deployments/'+deploymentId,'PUT',{deploymentConfig:{
     ...deployment.deploymentConfig, versionNumber:bridgeVersion.versionNumber
@@ -49,6 +49,6 @@ async function main() {
   const verify = await api('/'+bridgeId+'/content');
   const remote = verify.files.find(x => x.name === 'Bridge' || x.name.endsWith('/Bridge'));
   if (!remote || remote.source.trim() !== bridgeFile.source.trim()) throw new Error('Bridge verification failed');
-  console.log(JSON.stringify({engine_version:31,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
+  console.log(JSON.stringify({engine_version:32,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});

@@ -216,6 +216,81 @@ function provisionFinalFinalReadPartitions() {
   return inspectFinalFinalProvisioning();
 }
 
+/**
+ * Aprovisiona las particiones de lectura verificadas de todos los contextos.
+ * No crea destinos ni amplía operaciones de escritura. Una fuente sin
+ * contenedor real se omite para conservar el fallo cerrado.
+ */
+function provisionAllContextReadPartitions() {
+  var props = PropertiesService.getScriptProperties();
+  var policyRaw = props.getProperty('METIS_PRODUCTIVE_POLICY');
+  if (!policyRaw) { throw new Error('Falta la política productiva.'); }
+  var policy = JSON.parse(policyRaw);
+  var decisions = '1436a1fc-159a-4e99-a6d6-0313f5932560';
+  var verified = {
+    METIS: {
+      drive: ['1wrJKotfAypUcTZWslOZoVbjFrnVxbrQM'],
+      asana: ['1217972597748939', '1214884123781960', '1218919134468706']
+    },
+    ANDREA: {
+      drive: ['1usegUOMpjazUp6GVcz_mR7Y8eBcLdcbM'],
+      asana: ['1217023664413563', '1217007410775464', '1217342192873566']
+    },
+    SHOKKO: {
+      drive: ['15p0vg8Dgu3zHkLgzn57Ma-_BVknZly73'],
+      asana: ['1217003604032608', '1211143692742280']
+    },
+    VENTURE_QUEST: {
+      drive: ['17t4QRWJePAFhtp1vZlubI2czESfOlQlH'],
+      asana: ['1214790834697550']
+    },
+    ARQUITECTO_INTERIOR: {
+      drive: ['1CYRlEc2vrZil9tWQ-fwJrGwNX52D_raf'],
+      asana: []
+    },
+    PERSONAL: {
+      drive: ['1QJb9MSqFwqBEXygKoPfTchSS37QfrLfm'],
+      asana: []
+    },
+    FINAL_FINAL: {
+      drive: ['14Xr9ek2TCLgvwcxDIiJcFGSlG7bqKnpn'],
+      asana: ['1214790907415092', '1214894116089612']
+    }
+  };
+
+  policy.contexts = policy.contexts || {};
+  policy.read_partitions = policy.read_partitions || {};
+  Object.keys(verified).forEach(function (context) {
+    var base = Config.CONTEXTS[context];
+    policy.contexts[context] = policy.contexts[context] || {
+      primary: base.primary,
+      notion_project: base.notion_project,
+      signals: base.signals.slice()
+    };
+    var reads = {
+      notion: {
+        data_sources: [decisions],
+        decision_data_sources: [decisions],
+        project: base.notion_project
+      },
+      drive: { folder_ids: verified[context].drive.slice() }
+    };
+    if (verified[context].asana.length) {
+      reads.asana = { project_gids: verified[context].asana.slice() };
+    }
+    policy.read_partitions[context] = reads;
+  });
+
+  var marker = '|all-context-reads-20261008';
+  policy.revision = String(policy.revision || 'policy');
+  if (policy.revision.indexOf(marker) < 0) { policy.revision += marker; }
+  ProductivePolicy._useConfig(policy);
+  try { ProductivePolicy.config(); }
+  finally { ProductivePolicy._useConfig(null); }
+  props.setProperty('METIS_PRODUCTIVE_POLICY', JSON.stringify(policy));
+  return checkConfiguration();
+}
+
 /** Estados de una comprobación del smoke test. */
 var SMOKE_STATUS = {
   PASS: 'PASS',               // demostrado con al menos un resultado real
