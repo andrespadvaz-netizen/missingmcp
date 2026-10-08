@@ -96,6 +96,16 @@ var AsanaReadAdapter = (function () {
         var limit = (options && options.page_size) ? options.page_size : 10;
         var out = [];
 
+        // An exact registered project gid verifies the partition container
+        // itself.  Archived or empty projects remain valid read partitions and
+        // must yield a durable receipt without inventing a task.
+        var exact = String(query || '').trim();
+        if (partition.project_gids.indexOf(exact) !== -1) {
+          var project = _request('/projects/' + encodeURIComponent(exact) +
+            '?opt_fields=name,permalink_url,archived');
+          return [_normalizeProject(project.data || {}, options ? options.context : null)];
+        }
+
         for (var p = 0; p < partition.project_gids.length && out.length < limit; p++) {
           var projectGid = partition.project_gids[p];
           // Paginación completa del proyecto: la tarea buscada puede estar más
@@ -214,6 +224,20 @@ var AsanaReadAdapter = (function () {
       url: task.permalink_url ? task.permalink_url : null,
       completed: task.completed === true,
       due_on: task.due_on ? task.due_on : null
+    };
+  }
+
+  function _normalizeProject(project, context) {
+    return {
+      source: 'ASANA',
+      id: project.gid ? String(project.gid) : null,
+      title: project.name ? project.name : null,
+      context: context === undefined ? null : context,
+      kind: 'PROJECT',
+      epistemic_status: RetrievalPolicy.epistemicFor('TASK'),
+      snippet: null,
+      url: project.permalink_url ? project.permalink_url : null,
+      archived: project.archived === true
     };
   }
 

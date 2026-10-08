@@ -36,6 +36,13 @@ var DriveReadAdapter = (function () {
         _assertLevel();
         var partition = _partitionOf(options);
         var limit = (options && options.page_size) ? options.page_size : 10;
+        var exact = String(query || '').trim();
+        // An exact registered root id is a request to verify the partition
+        // container itself.  A root can be valid and empty; requiring a child
+        // file made that real read indistinguishable from missing coverage.
+        if (partition.folder_ids.indexOf(exact) !== -1) {
+          return [_normalizeFolder(DriveApp.getFolderById(exact))];
+        }
         var escaped = String(query || '').replace(/'/g, "\\'");
         var out = [];
         for (var f = 0; f < partition.folder_ids.length && out.length < limit; f++) {
@@ -84,6 +91,19 @@ var DriveReadAdapter = (function () {
       epistemic_status: RetrievalPolicy.epistemicFor('FILE'),
       snippet: snippet === undefined ? null : snippet,
       url: file.getUrl ? file.getUrl() : null
+    };
+  }
+
+  function _normalizeFolder(folder) {
+    return {
+      source: 'DRIVE',
+      id: folder.getId(),
+      title: folder.getName(),
+      context: null,
+      kind: 'FOLDER',
+      epistemic_status: RetrievalPolicy.epistemicFor('FILE'),
+      snippet: null,
+      url: folder.getUrl ? folder.getUrl() : null
     };
   }
 
