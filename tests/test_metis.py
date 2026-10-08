@@ -304,3 +304,35 @@ def test_accounting_review_fails_closed(queue, change):
               'ledger_verified':True,'evidence_sha256':'a'*64}, **change}
     assert not queue.reconcile_accounting(row, reviewed)
     assert queue.paused_execution() is not None
+
+
+@pytest.mark.asyncio
+async def test_operator_reviewed_receipt_unpauses_only_exact_execution(queue):
+    from missingmcp.metis import transport
+
+    first = queue.create('operator', REQUEST)
+    row = queue.next(); queue.claim(row)
+    queue.finish(row, {'status':'FAILED','cost_known':False,'cost_usd':None,
+                       'requires_review':True,'final_answer':None})
+    paused = queue.paused_execution()
+    receipt = {'cost_usd':2.0,'error':'PROVIDER_ERROR',
+               'basis':'CONSERVATIVE_RUN_BUDGET_RESERVE','evidence_sha256':'b'*64}
+    monkey = {(paused['id'], paused['seq']): receipt}
+    original = transport._INTERRUPTED_RECEIPTS
+    transport._INTERRUPTED_RECEIPTS = monkey
+    try:
+        class NoBridge:
+            async def call(self, *args, **kwargs):
+                raise AssertionError('reviewed receipt must not contact the bridge')
+        await Worker(queue, NoBridge()).step()
+    finally:
+        transport._INTERRUPTED_RECEIPTS = original
+    answer = queue.get('operator', first['execution_id'])
+    assert answer['status'] == 'FAILED'
+    assert answer['cost_known'] is True and answer['cost_usd'] == 2.0
+    assert answer['accounting_reconciliation']['execution_id'] == first['execution_id']
+    assert answer['accounting_reconciliation']['seq'] == paused['seq']
+    assert answer['accounting_reconciliation']['evidence_sha256'] == 'b'*64
+    assert answer['accounting_reconciliation']['basis'] == 'CONSERVATIVE_RUN_BUDGET_RESERVE'
+    assert answer['error'] == 'PROVIDER_ERROR'
+    assert answer['gateway_paused'] is False
