@@ -72,7 +72,11 @@ class Bridge:
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            # Apps Script can take longer than a conventional HTTP API while it
+            # opens a bounded, read-only provider session.  This route never
+            # enters the durable execution queue, so its timeout is isolated
+            # from productive-write transport limits.
+            async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
                 response = await client.post(self.url, json={"payload": payload, "signature": signature})
                 response.raise_for_status()
                 if len(response.content) > 80_000:
