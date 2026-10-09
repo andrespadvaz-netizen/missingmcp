@@ -13,7 +13,13 @@ function dispatchLensContext_(p) {
     return {status: 'INVALID_REQUEST', documents: []};
   }
 
-  var verdict = Engine.ContextResolver.resolve(request, {operator_context: null});
+  var phase = 'RESOLVE_CONTEXT';
+  var verdict;
+  try {
+    verdict = Engine.ContextResolver.resolve(request, {operator_context: null});
+  } catch (_) {
+    return lensUnavailable_(phase);
+  }
   // Continuity is a fallback only when this turn contains no context signal.
   // An explicit or ambiguous request can never be overridden by session state.
   if ((verdict.candidates || []).length === 0 && isLensSessionId_(sessionId)) {
@@ -32,19 +38,23 @@ function dispatchLensContext_(p) {
     };
   }
 
-  var previousLevel = Engine.Config.runLevel();
+  var previousLevel;
   try {
+    phase = 'READ_RUN_LEVEL';
+    previousLevel = Engine.Config.runLevel();
     // Lens always runs the same bounded read-only retrieval level and restores
     // the exact prior Engine state in finally.  The Engine may have entered a
     // higher orchestration state before this request; rejecting it here made
     // Lens unavailable even though no Lens write or model call is possible.
     Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
+    phase = 'OPEN_READ_SESSION';
     var context = verdict.resolved_context;
     var session = Engine.ToolBroker.newSession(
       {execution_id: 'lens-' + Utilities.getUuid()},
       Engine.ContextResolver.scopeFor([context], context),
       Engine.AuthorityPolicy.preRetrievalGrant([context])
     );
+    phase = 'READ_SOURCES';
     var sourceSpecs = [
       {source: 'NOTION', search: 'notion.search', fetch: 'notion.fetch'},
       {source: 'DRIVE', search: 'drive.search', fetch: 'drive.fetch'}
@@ -93,10 +103,19 @@ function dispatchLensContext_(p) {
       sources: sources, writes_attempted: 0, models_invoked: 0
     };
   } catch (_) {
-    return {status: 'UNAVAILABLE', documents: []};
+    return lensUnavailable_(phase);
   } finally {
-    Engine.Config._setRunLevel(previousLevel);
+    if (previousLevel) {
+      try { Engine.Config._setRunLevel(previousLevel); } catch (_) {}
+    }
   }
+}
+
+// This is returned only to the authenticated Gateway for operational
+// diagnosis.  It contains no request text, source id, document metadata, or
+// exception detail, and the Worker normalizer never puts it in model context.
+function lensUnavailable_(phase) {
+  return {status: 'UNAVAILABLE', documents: [], failure_stage: phase};
 }
 
 function lensSearchQuery_(request) {
