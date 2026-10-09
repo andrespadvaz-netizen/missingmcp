@@ -34,10 +34,17 @@ function dispatchLensContext_(p) {
 
   var previousLevel = Engine.Config.runLevel();
   try {
-    if (previousLevel !== Engine.Config.LEVELS.LEVEL_0) {
+    // A live Engine can already be in its read-only level while serving its
+    // own health/recovery work.  Lens is compatible with LEVEL_0 and LEVEL_1:
+    // it never writes or invokes a model, and the exact previous level is
+    // restored in finally.  Only a productive/unknown level is unsafe here.
+    if (previousLevel !== Engine.Config.LEVELS.LEVEL_0 &&
+        previousLevel !== Engine.Config.LEVELS.LEVEL_1) {
       return {status: 'UNAVAILABLE', documents: []};
     }
-    Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
+    if (previousLevel === Engine.Config.LEVELS.LEVEL_0) {
+      Engine.Config._setRunLevel(Engine.Config.LEVELS.LEVEL_1);
+    }
     var context = verdict.resolved_context;
     var session = Engine.ToolBroker.newSession(
       {execution_id: 'lens-' + Utilities.getUuid()},
