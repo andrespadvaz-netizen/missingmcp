@@ -17,6 +17,7 @@ from .workers import WorkerManager
 from .adapters import build_adapters, RETIRED_ADAPTERS
 from .adapters.base import is_remote, is_local, is_upstream_oauth
 from .log import log
+from .metis.transport import LensContextBridgeError
 
 _TPL = Path(__file__).parent / "templates"
 _STATIC = Path(__file__).parent / "static"
@@ -189,6 +190,8 @@ def build_app(config: Config) -> Starlette:
 
         try:
             result = await adapters["metis"].worker.bridge.call_lens_context(text, lens_session_id)
+        except LensContextBridgeError as exc:
+            return JSONResponse({"status": "UNAVAILABLE", "failure_stage": str(exc)}, status_code=502)
         except Exception:
             # The response intentionally carries no upstream diagnostic or source content.
             return JSONResponse({"status": "UNAVAILABLE"}, status_code=502)

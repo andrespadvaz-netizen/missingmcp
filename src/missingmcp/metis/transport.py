@@ -10,6 +10,10 @@ from ..log import private_transport
 from .writes import WriteWorker
 
 
+class LensContextBridgeError(RuntimeError):
+    """A bounded, non-sensitive reason why a Lens bridge read was rejected."""
+
+
 # One-time operator-reviewed accounting reconciliations. Each is bound to an
 # immutable execution id and sequence: it can never affect a later execution
 # or make another provider request.
@@ -78,13 +82,25 @@ class Bridge:
             # from productive-write transport limits.
             async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
                 response = await client.post(self.url, json={"payload": payload, "signature": signature})
-                response.raise_for_status()
+                if response.status_code < 200 or response.status_code >= 300:
+                    raise LensContextBridgeError(f"BRIDGE_HTTP_{response.status_code}")
                 if len(response.content) > 80_000:
-                    raise ValueError("lens_context_response_too_large")
-                data = response.json()
+                    raise LensContextBridgeError("BRIDGE_RESPONSE_TOO_LARGE")
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise LensContextBridgeError("BRIDGE_INVALID_JSON") from exc
+        except httpx.TimeoutException as exc:
+            raise LensContextBridgeError("BRIDGE_TIMEOUT") from exc
         finally:
             private_transport.reset(token)
-        return _validate_lens_context_response(data)
+        try:
+            return _validate_lens_context_response(data)
+        except ValueError as exc:
+            # Do not expose a Bridge body: it can contain internal errors or
+            # credentials.  The contract class alone is sufficient to repair
+            # the route safely.
+            raise LensContextBridgeError("BRIDGE_CONTRACT_REJECTED") from exc
 
     async def _call(self, envelope, row):
         payload = json.dumps({**envelope, "timestamp": int(time.time())}, separators=(",", ":"), ensure_ascii=False)
