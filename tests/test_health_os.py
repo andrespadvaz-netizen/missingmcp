@@ -8,6 +8,7 @@ from missingmcp.health_os.importers import observations_from_export, workout_fro
 from missingmcp.health_os.persistence import HealthOSRepository
 from missingmcp import store
 from missingmcp.app import build_app
+from missingmcp.health_os.service import build_health_os_app
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -32,6 +33,19 @@ def test_observation_preserves_provenance_and_is_idempotent():
     first = health.ingest_observations([item])
     second = health.ingest_observations([item])
     assert (first.accepted, second.duplicates) == (1, 1)
+
+
+def test_equivalent_instants_with_different_offsets_are_not_double_counted():
+    health = make_health()
+    local = observation(at=when(1), pid="hk:offset")
+    utc = observation(at=datetime(2026, 10, 1, 14, tzinfo=timezone.utc), pid="hk:offset")
+    assert health.ingest_observations([local, utc]).duplicates == 1
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -1, 0, 400])
+def test_nonfinite_or_negative_sensor_values_are_rejected(value):
+    with pytest.raises(ValueError):
+        observation(value=value)
 
 
 def test_units_normalize_and_missing_is_not_zero():
@@ -66,6 +80,13 @@ def test_speediance_and_apple_workout_are_one_logical_session():
     health.ingest_workout(speediance)
     assert len(health.logical_workouts()) == 1
     assert health.data_quality(when(2))["raw_workouts"] == 2
+
+
+def test_strength_synonyms_link_apple_and_speediance_sessions():
+    health = make_health()
+    health.ingest_workout(WorkoutSession("apple-1", when(1, 18), when(1, 19), APPLE_HEALTH, "functional strength training"))
+    health.ingest_workout(WorkoutSession("speed-1", when(1, 18), when(1, 19), SPEEDIANCE, "strength"))
+    assert len(health.logical_workouts()) == 1
 
 
 def test_non_overlapping_workouts_never_merge():
@@ -123,6 +144,17 @@ def test_repository_encrypts_and_deduplicates_records():
     assert store.decrypt("s" * 40, encrypted) == json.dumps(payload, sort_keys=True)
 
 
+def test_repository_uses_operator_timezone_and_persists_apple_transition():
+    conn = store.init_db(":memory:")
+    repo = HealthOSRepository(conn, "s" * 40, "America/Mexico_City")
+    repo.set_apple_transition(datetime(2026, 10, 1, 6, tzinfo=timezone.utc))
+    payload = {"metric": "heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-02T05:00:00+00:00", "provenance_id": "hk:local-day"}
+    repo.ingest(APPLE_HEALTH, [payload], [])
+    health = repo._load_health(datetime(2026, 10, 2, 12, tzinfo=timezone.utc))
+    assert health.local_day(datetime(2026, 10, 2, 5, tzinfo=timezone.utc)) == "2026-10-01"
+    assert health.baseline_era(datetime(2026, 10, 2, 12, tzinfo=timezone.utc)).value == "ERA_APPLE_TRANSITION"
+
+
 def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     key = "h" * 40
     config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
@@ -137,6 +169,16 @@ def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     assert brief["brief"]["decision"] == "ABSTENERSE"
 
 
+def test_isolated_service_has_no_garmin_surface(tmp_path):
+    key = "h" * 40
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    client = TestClient(build_health_os_app(config))
+    assert client.get("/healthz").json() == {"status": "OK"}
+    assert client.get("/garmin").status_code == 404
+    transition = client.post("/health-os/transition", json={"started_at": "2026-10-01T08:00:00-06:00"}, headers={"Authorization": f"Bearer {key}"})
+    assert transition.json()["baseline_era"] == "ERA_APPLE_TRANSITION"
+
+
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():
     health = make_health()
     health.set_apple_transition(when(1))
@@ -145,8 +187,11 @@ def test_readiness_abstains_until_metric_specific_baselines_are_stable():
             observation("sleep_duration", 7, "hr", at=when(day), pid=f"sleep:{day}"),
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
-    assert health.assess_readiness(when(29)).state == DecisionState.ACTIVA
+    assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
     assert health.assess_readiness(when(29), ["dizziness"]).state == DecisionState.ESCALAR
+    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ESCALAR
+    assert health.assess_readiness(when(29), ["fatiga"]).state == DecisionState.AJUSTA
+    assert health.assess_readiness(when(29), ["dolor"]).state == DecisionState.DETEN
 
 
 def test_model_interpreted_value_never_drives_readiness():

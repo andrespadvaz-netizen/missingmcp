@@ -69,7 +69,7 @@ def build_app(config: Config) -> Starlette:
     rate = security.RateLimiter()
     bk = backup.Backup(config)
     dr = report.DailyReport(config)
-    health_os = HealthOSRepository(conn, config.gateway_secret) if config.health_os_ingest_key else None
+    health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if config.health_os_ingest_key else None
 
     def _health_os_authorized(request):
         return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
@@ -96,6 +96,20 @@ def build_app(config: Config) -> Starlette:
         if not _health_os_authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "quality": health_os.quality(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
+
+    async def health_os_transition(request):
+        if not _health_os_authorized(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=8_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            started_at = datetime.fromisoformat(body["started_at"])
+            health_os.set_apple_transition(started_at)
+        except (KeyError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+        return JSONResponse({"status": "OK", "baseline_era": health_os._load_health(started_at).baseline_era(started_at).value}, headers={"Cache-Control": "no-store"})
 
     async def health_os_brief(request):
         if not _health_os_authorized(request):
@@ -464,6 +478,7 @@ def build_app(config: Config) -> Starlette:
         Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
         Route("/health-os/ingest", health_os_ingest, methods=["POST"]),
         Route("/health-os/quality", health_os_quality, methods=["GET"]),
+        Route("/health-os/transition", health_os_transition, methods=["POST"]),
         Route("/health-os/brief", health_os_brief, methods=["POST"]),
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/robots.txt", _text(robots_txt, "text/plain"), methods=["GET"]),

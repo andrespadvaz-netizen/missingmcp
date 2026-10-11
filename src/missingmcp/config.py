@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class Config:
     # Dedicated bearer secret for the private, read-only Metis Lens context endpoint.
     metis_lens_context_key: str = ""
     health_os_ingest_key: str = ""
+    health_os_timezone: str = "America/Mexico_City"
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -70,6 +72,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
+    health_os_timezone = env.get("HEALTH_OS_TIMEZONE", "America/Mexico_City")
+    try:
+        ZoneInfo(health_os_timezone)
+    except Exception as exc:
+        raise ValueError("HEALTH_OS_TIMEZONE must be a valid IANA timezone") from exc
     if any(metis):
         import re
         if (not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0])
@@ -96,6 +103,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_operator_key=metis[2],
         metis_lens_context_key=metis_lens_context_key,
         health_os_ingest_key=health_os_ingest_key,
+        health_os_timezone=health_os_timezone,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),
         worker_idle_ttl=int(env.get("WORKER_IDLE_TTL", "900")),
