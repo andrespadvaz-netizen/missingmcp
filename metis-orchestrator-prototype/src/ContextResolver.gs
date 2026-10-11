@@ -20,6 +20,15 @@ var ContextResolver = (function () {
     return s;
   }
 
+  function registeredRoot(projectId) {
+    var value = String(projectId || '').trim();
+    var names = Config.contextNames();
+    for (var i = 0; i < names.length; i++) {
+      if (value === names[i] || value.indexOf(names[i] + '/') === 0) { return names[i]; }
+    }
+    return null;
+  }
+
   /**
    * Detecta candidatos de contexto SÓLO a partir del turno vivo del operador.
    * Nunca a partir de contenido recuperado (spec §6.2).
@@ -28,8 +37,10 @@ var ContextResolver = (function () {
     var opts = options || {};
     var found = [];
     if (opts.operator_context) {
-      // Instrucción expresa del operador: contexto declarado, no inferido.
-      return Config.contextNames().indexOf(opts.operator_context) >= 0 ? [opts.operator_context] : [];
+      // El Gateway conserva el id completo del subproyecto para aislamiento;
+      // el motor resuelve su raíz registrada para aplicar la misma partición.
+      var root = registeredRoot(opts.operator_context);
+      return root ? [root] : [];
     }
     // An explicit first-line context selects an exact registry entry. Parent
     // names mentioned inside a subproject's task do not broaden its scope.
@@ -169,6 +180,7 @@ var ContextResolver = (function () {
 
   return {
     normalize: normalize,
+    registeredRoot: registeredRoot,
     detectCandidates: detectCandidates,
     detectIntent: detectIntent,
     isIncompatible: isIncompatible,

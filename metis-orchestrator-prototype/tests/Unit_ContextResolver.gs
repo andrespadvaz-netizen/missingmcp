@@ -25,6 +25,15 @@ function registerUnitContextResolver() {
     t.ok(verdict.scope.substance_allowed, 'con contexto resuelto se permite sustancia');
   });
 
+  TestRunner.unit('ContextResolver', 'resuelve subproyecto bajo su raíz sin ampliar contexto', function (t) {
+    var verdict = ContextResolver.resolve('Audita Health OS.', { operator_context: 'PERSONAL/HEALTH_OS' });
+    t.equals(verdict.resolved_context, 'PERSONAL', 'usa la raíz registrada para la partición');
+    t.deepEquals(verdict.candidates, ['PERSONAL'], 'no incorpora otros contextos');
+    t.equals(verdict.scope.substance_allowed, true, 'habilita únicamente la sustancia de PERSONAL');
+    t.equals(ContextResolver.registeredRoot('PERSONALITY/HEALTH_OS'), null,
+      'no acepta prefijos parciales como contexto válido');
+  });
+
   TestRunner.unit('ContextResolver', 'detecta conflicto multi-contexto', function (t) {
     var verdict = ContextResolver.resolve('Compara el pipeline de Shokko con la reorganización de Andrea');
     t.equals(verdict.candidates.length, 2, 'dos candidatos materiales');
