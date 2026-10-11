@@ -346,3 +346,8 @@ function inspectBridge() {
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};
 }
+
+/** Run once from the editor after deployment to grant the explicit trigger scope. */
+function authorizeBridgeRuntime() {
+  return {scriptapp_ready:Array.isArray(ScriptApp.getProjectTriggers())};
+}
