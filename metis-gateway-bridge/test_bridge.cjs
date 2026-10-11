@@ -15,8 +15,9 @@ function fixture() {
   const context = {
     PropertiesService:{getScriptProperties:()=>props},
     LockService:{getScriptLock:()=>({tryLock:()=>{if(locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
-    ScriptApp:{getProjectTriggers:()=>triggers.map(name=>({getHandlerFunction:()=>name})),
-      newTrigger:name=>({timeBased:()=>({after:()=>({create:()=>{triggers.push(name);}})})})},
+    ScriptApp:{getProjectTriggers:()=>triggers,
+      deleteTrigger:trigger=>{triggers=triggers.filter(x=>x!==trigger);},
+      newTrigger:name=>({timeBased:()=>({after:()=>({create:()=>{const trigger={getHandlerFunction:()=>name};triggers.push(trigger);return trigger;}})})})},
     ContentService:{MimeType:{JSON:'json'},createTextOutput:s=>({setMimeType:()=>JSON.parse(s)})},
     Utilities:{Charset:{UTF_8:'utf8'}, DigestAlgorithm:{SHA_256:'sha256'},
       computeHmacSha256Signature:(p,s)=>[...crypto.createHmac('sha256',s).update(p).digest()],
@@ -42,7 +43,7 @@ function fixture() {
   }
   function drain() {
     let guard=20;
-    while(triggers.length && guard--) {const name=triggers.shift();context[name]();}
+    while(triggers.length && guard--) {const trigger=triggers.shift();context[trigger.getHandlerFunction()]();}
     assert.ok(guard>0,'background worker did not terminate');
   }
   function request(seq=1,action='run',override={}) {
@@ -68,6 +69,17 @@ test('Run returns durable ACK before the engine and status is read-only',()=>{
   assert.equal(ack.state,'ACCEPTED');assert.equal(f.calls(),0);assert.equal(f.triggers(),1);
   assert.equal(f.rawRequest(1,'status').state,'ACCEPTED');assert.equal(f.calls(),0);
   f.drain();assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);
+});
+test('Trigger scheduling prunes stale workers and operator repair resumes the same durable receipt',()=>{
+  const f=fixture();const ack=f.rawRequest();assert.equal(ack.state,'ACCEPTED');
+  for(let i=0;i<25;i++) f.context.scheduleBridgeWorker_();
+  assert.equal(f.triggers(),1,'only one worker trigger survives');
+  const repair=f.context.repairBridgeRuntime();
+  assert.equal(repair.id,ack.id);assert.equal(repair.seq,ack.seq);
+  assert.equal(repair.state,'ACCEPTED');assert.equal(repair.worker_scheduled,true);
+  assert.equal(f.triggers(),1,'repair does not duplicate the trigger');
+  f.drain();assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);
+  assert.equal(f.triggers(),0,'worker and watchdog triggers are removed after completion');
 });
 test('Bridge enforces UTF-8 limit before spending and accepts escaped boundary',()=>{
   for(const text of ['é'.repeat(64000), '\u0001'.repeat(128000)]) {

@@ -73,6 +73,8 @@ function dispatch_(p) {
 
 /** Installable trigger entry point. It is the only path that runs the engine. */
 function bridgeWorkerTick() {
+  deleteBridgeTriggers_('bridgeWorkerTick');
+  deleteBridgeTriggers_('bridgeWatchdogTick');
   var props=PropertiesService.getScriptProperties();
   var receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
   if (['ACCEPTED','CHECKPOINT'].indexOf(receipt.state) < 0) return;
@@ -83,6 +85,7 @@ function bridgeWorkerTick() {
 
 /** A separate trigger converts a killed Apps Script worker into a diagnosable terminal receipt. */
 function bridgeWatchdogTick() {
+  deleteBridgeTriggers_('bridgeWatchdogTick');
   var props=PropertiesService.getScriptProperties();
   var lock=LockService.getScriptLock();
   if (!lock.tryLock(100)) return;
@@ -96,11 +99,41 @@ function bridgeWatchdogTick() {
 }
 
 function scheduleBridgeWorker_() {
+  deleteBridgeTriggers_('bridgeWorkerTick');
+  deleteBridgeTriggers_('bridgeWatchdogTick');
   ScriptApp.newTrigger('bridgeWorkerTick').timeBased().after(1000).create();
 }
 
 function scheduleBridgeWatchdog_() {
+  deleteBridgeTriggers_('bridgeWatchdogTick');
   ScriptApp.newTrigger('bridgeWatchdogTick').timeBased().after(430000).create();
+}
+
+/** Keep the project below Apps Script's 20-trigger quota. */
+function deleteBridgeTriggers_(handler) {
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === handler) ScriptApp.deleteTrigger(trigger);
+  });
+}
+
+/**
+ * Operator recovery for a durable ACCEPTED/CHECKPOINT receipt. It never
+ * creates a new execution and never advances a RUNNING receipt whose provider
+ * outcome could be uncertain.
+ */
+function repairBridgeRuntime() {
+  deleteBridgeTriggers_('bridgeWorkerTick');
+  deleteBridgeTriggers_('bridgeWatchdogTick');
+  var receipt=JSON.parse(PropertiesService.getScriptProperties().getProperty('receipt') || '{"seq":0}');
+  if (['ACCEPTED','CHECKPOINT'].indexOf(receipt.state) >= 0) {
+    scheduleBridgeWorker_();
+    return {repaired:true,id:receipt.id,seq:receipt.seq,state:receipt.state,worker_scheduled:true};
+  }
+  if (receipt.state === 'RUNNING') {
+    scheduleBridgeWatchdog_();
+    return {repaired:false,id:receipt.id,seq:receipt.seq,state:receipt.state,worker_scheduled:false,requires_review:true};
+  }
+  return {repaired:true,id:receipt.id || null,seq:receipt.seq || 0,state:receipt.state || null,worker_scheduled:false};
 }
 
 function execute_(p) {
