@@ -70,11 +70,13 @@ function registerUnitAuditTelemetry() {
       var result = Orchestrator.run('Audita Metis: todo el caso original.', {
         current_model:'OPENAI',operator_context:'METIS',intent:'audit',providers:providers
       });
-      t.equals(result.route,'CROSS_AUDIT','conserva la auditoría cruzada');
+      t.equals(result.route,limitReached?'REQUIRES_ANDRES':'CROSS_AUDIT',
+        limitReached?'expone la decisión requerida':'conserva la auditoría cruzada');
       t.equals(result.limits.model_interventions,limitReached?3:4,'contabiliza cada intervención');
       t.equals(result.provider_provenance.length,limitReached?3:4,'conserva procedencia');
       if(limitReached) {
-        t.equals(result.status,'FAILED','nunca amplía el presupuesto de intervenciones');
+        t.equals(result.status,'REQUIRES_ANDRES','nunca amplía el presupuesto y solicita decisión');
+        t.includes(result.final_answer,'REQUIERE ANDRÉS','hace visible la intervención necesaria');
         t.equals(providers.OPENAI.calls.length,2,'no despacha continuación sin capacidad');
       } else {
         t.equals(result.status,'COMPLETED','termina completo');

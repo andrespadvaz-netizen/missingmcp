@@ -926,10 +926,17 @@ var Orchestrator = (function () {
 
     } catch (e) {
       // Fail closed: sin efectos externos, con causa visible y redactada.
-      execution.status = 'FAILED';
-      if (!execution.route) { execution.route = 'ABSTAIN'; }
-      execution.final_answer = 'Corrida detenida (fail closed): ' +
-        (e.code ? e.code : 'ERROR') + ' — ' + Errors.redactText(e.message);
+      var operatorLimit = Errors.is(e, Errors.CODES.LIMIT_EXCEEDED);
+      execution.status = operatorLimit ? 'REQUIRES_ANDRES' : 'FAILED';
+      if (operatorLimit) {
+        execution.route = 'REQUIRES_ANDRES';
+        execution.final_answer = 'REQUIERE ANDRÉS: se alcanzó un límite operativo antes de completar la corrida. ' +
+          Errors.redactText(e.message);
+      } else {
+        if (!execution.route) { execution.route = 'ABSTAIN'; }
+        execution.final_answer = 'Corrida detenida (fail closed): ' +
+          (e.code ? e.code : 'ERROR') + ' — ' + Errors.redactText(e.message);
+      }
       runtime.blocks.push({ code: e.code ? e.code : 'ERROR', detail: Errors.redactText(e.message) });
 
       // Salida de degradación estructurada (criterio DoD reconciliado,

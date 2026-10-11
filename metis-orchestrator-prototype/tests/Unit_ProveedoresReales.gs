@@ -962,8 +962,10 @@ function registerUnitProveedoresReales() {
           }
         );
 
-        t.equals(resultado.status, 'FAILED',
-          'la guarda dura de herramienta detiene la corrida');
+        t.equals(resultado.status, 'REQUIRES_ANDRES',
+          'la guarda dura de herramienta detiene la corrida y solicita decisión');
+        t.includes(resultado.final_answer, 'REQUIERE ANDRÉS',
+          'el límite queda visible para el operador');
 
         t.ok(!!resultado.degradation,
           'el fallo queda representado en la degradación estructurada');
