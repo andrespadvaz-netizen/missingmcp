@@ -66,9 +66,9 @@ function registerUnitProveedoresReales() {
     }
   };
 
-  TestRunner.unit('Capacidad autorizada', 'ambos proveedores tienen tope de 16384 y respetan una petición menor', function(t) {
+  TestRunner.unit('Capacidad autorizada', 'ambos proveedores usan 4096 por defecto y respetan una petición explícita', function(t) {
     var request={system:'s',prompt:'p'};
-    t.equals(OpenAIAdapter.create().buildRequest(request,null).max_output_tokens,16384,'OpenAI acotado');
+    t.equals(OpenAIAdapter.create().buildRequest(request,null).max_output_tokens,4096,'OpenAI acotado');
     t.deepEquals(OpenAIAdapter.create().buildRequest({system:'s',prompt:'p',effort:'low'},null).reasoning,
       {effort:'low'},'OpenAI recibe el esfuerzo bajo de recuperación');
     t.throwsCode(Errors.CODES.CONFIG,function(){
@@ -76,7 +76,7 @@ function registerUnitProveedoresReales() {
     },'OpenAI rechaza effort no permitido');
     var anthropicBody=AnthropicAdapter.create().buildRequest(request,null);
     t.equals(anthropicBody.model,'claude-sonnet-5','Sonnet 5 es el modelo rutinario');
-    t.equals(anthropicBody.max_tokens,16384,'Anthropic acotado');
+    t.equals(anthropicBody.max_tokens,4096,'Anthropic acotado');
     t.deepEquals(anthropicBody.thinking,{type:'adaptive'},'thinking adaptativo declarado');
     t.equals(anthropicBody.output_config.effort,'medium','effort coincide con el cliente de aceptación');
     t.equals(AnthropicAdapter.create().buildRequest({system:'s',prompt:'p',effort:'low'},null).output_config.effort,

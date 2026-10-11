@@ -85,7 +85,11 @@ var Config = (function () {
       model: 'claude-sonnet-5',
       version_header: '2023-06-01',
       secret_key: 'ANTHROPIC_API_KEY',
-      max_tokens: 16384,
+      // A single 16k generation can outlive Apps Script's hard execution
+      // window and strand a durable receipt after provider dispatch.  Routine
+      // turns are deliberately smaller; TerminalOutput can continue a
+      // truncated answer in another independently accounted checkpoint.
+      max_tokens: 4096,
       // Sonnet 5 is the routine producer and reconciler. Opus is reserved for
       // an explicit future escalation path, never selected implicitly here.
       effort: 'medium'
@@ -421,7 +425,7 @@ var Config = (function () {
 
   // Output capacity is separate from money ceilings, which remain external.
   function outputTokenLimit(request) {
-    var value = request.max_output_tokens === undefined ? 16384 : request.max_output_tokens;
+    var value = request.max_output_tokens === undefined ? 4096 : request.max_output_tokens;
     if (!Number.isInteger(value) || value < 1 || value > 16384) {
       throw Errors.configError('Output allowance must be an integer from 1 to 16384');
     }

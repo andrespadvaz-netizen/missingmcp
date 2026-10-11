@@ -162,6 +162,26 @@ test('Warm worker advances durable provider calls without trigger latency or dup
   assert.deepEqual(executionIds,[f.request().id,f.request().id,f.request().id]);
   assert.equal(f.request(1,'status').state,'DONE');assert.equal(paid,3);
 });
+
+test('Durable receipt records provider checkpoint duration',()=>{
+  const f=fixture();
+  const base={name:'ANTHROPIC',buildRequest:()=>({max_tokens:100}),
+    complete:()=>({text:'ok',tool_requests:[],usage:{estimated_cost_usd:.1},stop_reason:'completed',provider_model:'test',provider_request_id:'req'}),
+    completeWithTools:function(r){return this.complete(r);},normalizeResponse:x=>x,redactProviderError:e=>e};
+  f.context.Engine.AnthropicAdapter.create=()=>base;
+  f.context.Engine.OpenAIAdapter.create=()=>base;
+  f.context.Engine.Orchestrator.run=(request,opts)=>{
+    const value=opts.providers.ANTHROPIC.complete({prompt:request});
+    opts.provider_replay.onAccounted(value,opts.provider_replay.isReplay(value));
+    return {status:'FAILED',blocks:[{code:'CONFIG',detail:'DURABLE_YIELD'}],limits:{estimated_cost_usd:.1,cost_known:true}};
+  };
+  f.rawRequest();
+  f.rawRequest(1,'advance');
+  const state=JSON.parse(f.context.Utilities.ungzip(f.context.Utilities.newBlob(f.context.Utilities.base64Decode(f.data.durable_0),'application/x-gzip')).getDataAsString('UTF-8'));
+  assert.equal(state.calls[0].state,'ACCOUNTED');
+  assert.equal(typeof state.calls[0].duration_ms,'number');
+  assert.ok(state.calls[0].duration_ms>=0);
+});
 test('Engine human decision and budget failure retained, not substituted',()=>{
   for (const status of ['REQUIRES_ANDRES','FAILED']) {
     const f=fixture();f.context.Engine.Orchestrator.run=()=>({status,execution_id:'blocked',final_answer:'Límite alcanzado',limits:{cost_known:true,estimated_cost_usd:0}});
