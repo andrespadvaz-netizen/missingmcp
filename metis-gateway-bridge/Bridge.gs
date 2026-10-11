@@ -72,15 +72,26 @@ function dispatch_(p) {
   } finally { lock.releaseLock(); }
 }
 
-/** Installable trigger entry point. It is the only path that runs the engine. */
+/**
+ * Installable trigger entry point. It is the only path that runs the engine.
+ *
+ * A provider call is still persisted and accounted before the next one starts,
+ * but a warm worker now consumes as many durable checkpoints as fit inside a
+ * conservative Apps Script time budget.  The old implementation scheduled a
+ * fresh Google trigger after every provider call; trigger latency, rather than
+ * model latency, made a five-turn audit take seven to ten minutes.
+ */
 function bridgeWorkerTick() {
   deleteBridgeTriggers_('bridgeWorkerTick');
   deleteBridgeTriggers_('bridgeWatchdogTick');
   var props=PropertiesService.getScriptProperties();
   var receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
   if (['ACCEPTED','CHECKPOINT'].indexOf(receipt.state) < 0) return;
-  execute_( {action:'status',seq:receipt.seq,id:receipt.id,fingerprint:receipt.fingerprint} );
-  receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+  var deadline=Date.now()+240000;
+  while (['ACCEPTED','CHECKPOINT'].indexOf(receipt.state) >= 0 && Date.now() < deadline) {
+    execute_({action:'status',seq:receipt.seq,id:receipt.id,fingerprint:receipt.fingerprint});
+    receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+  }
   if (receipt.state === 'CHECKPOINT') scheduleBridgeWorker_();
 }
 
@@ -274,7 +285,8 @@ function isDurableYield_(result) {
 
 /**
  * Replays accounted provider results and permits exactly one new paid call in
- * each bridge invocation. An intent is durable before network dispatch; the
+ * each engine pass. A warm worker may run multiple passes while time remains.
+ * An intent is durable before network dispatch; the
  * response becomes replayable only after ProviderAdapter has charged Ledger.
  */
 function durableReplay_(props, receipt, state) {

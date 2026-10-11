@@ -128,7 +128,7 @@ test('Status never executes and watchdog makes a killed worker terminal',()=>{
   f.context.bridgeWatchdogTick();assert.equal(f.rawRequest(1,'status').result.error,'ENGINE_WORKER_INTERRUPTED');
   f.request();assert.equal(f.calls(),1);
 });
-test('Durable execution advances one paid provider call per status without duplicate accounting',()=>{
+test('Warm worker advances durable provider calls without trigger latency or duplicate accounting',()=>{
   const f=fixture();let paid=0, accounted=0;const executionIds=[];
   const base={name:'ANTHROPIC',buildRequest:()=>({max_tokens:100}),
     complete:()=>{paid++;return {text:'turn '+paid,tool_requests:[],usage:{estimated_cost_usd:.1},stop_reason:'completed',provider_model:'test',provider_request_id:'req-'+paid};},
@@ -155,8 +155,6 @@ test('Durable execution advances one paid provider call per status without dupli
       blocks:[],limits:{cost_known:true,estimated_cost_usd:cost}};
   };
   assert.equal(f.rawRequest().state,'ACCEPTED');
-  f.context.bridgeWorkerTick();assert.equal(f.rawRequest(1,'status').state,'RUNNING');
-  f.context.bridgeWorkerTick();assert.equal(f.rawRequest(1,'status').state,'RUNNING');
   f.context.bridgeWorkerTick();const done=f.rawRequest(1,'status');
   assert.equal(done.state,'DONE');assert.equal(done.result.status,'COMPLETED');
   assert.equal(paid,3);assert.equal(accounted,3);
