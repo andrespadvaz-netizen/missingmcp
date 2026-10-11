@@ -258,6 +258,10 @@ function execute_(p) {
         terminal_completion:result.terminal_completion || [],
         model_completion:result.model_completion || [],
         provider_provenance:result.provider_provenance || [],
+        provider_checkpoint_timings:durableState.calls.map(function(c,index){
+          return {ordinal:index+1,provider:c.provider || null,method:c.method || null,
+            duration_ms:Number.isFinite(c.duration_ms) ? c.duration_ms : null};
+        }),
         requires_review:result.limits.cost_known !== true,
         engine_version:38,
         engine_release:9,

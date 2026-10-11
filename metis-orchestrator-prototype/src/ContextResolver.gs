@@ -22,7 +22,9 @@ var ContextResolver = (function () {
 
   function registeredRoot(projectId) {
     var value = String(projectId || '').trim();
-    var names = Config.contextNames();
+    // Prefer the most specific registered boundary.  Registry order must not
+    // make a parent shadow an explicitly registered child.
+    var names = Config.contextNames().slice().sort(function(a,b){return b.length-a.length;});
     for (var i = 0; i < names.length; i++) {
       if (value === names[i] || value.indexOf(names[i] + '/') === 0) { return names[i]; }
     }
@@ -55,9 +57,14 @@ var ContextResolver = (function () {
         var value=normalize(label);
         return declared===value || declared.indexOf(value+'.')===0 || declared.indexOf(value+'/')===0;
       }
-      var exactKeys=Config.contextNames().filter(matches);
-      if (exactKeys.length) { return exactKeys; }
-      return Config.contextNames().filter(function(name) { return matches(Config.contexts()[name].notion_project); });
+      var names=Config.contextNames();
+      var literal=names.filter(function(name){return declared===normalize(name);});
+      if (literal.length) { return [literal.sort(function(a,b){return b.length-a.length;})[0]]; }
+      var exactKeys=names.filter(matches).sort(function(a,b){return b.length-a.length;});
+      if (exactKeys.length) { return [exactKeys[0]]; }
+      var notionKeys=names.filter(function(name) { return matches(Config.contexts()[name].notion_project); })
+        .sort(function(a,b){return b.length-a.length;});
+      return notionKeys.length ? [notionKeys[0]] : [];
     }
     var text = normalize(operatorRequest);
     var names = Config.contextNames();
