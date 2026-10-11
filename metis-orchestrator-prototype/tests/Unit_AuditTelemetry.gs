@@ -126,6 +126,18 @@ function registerUnitAuditTelemetry() {
       t.equals(result.status, 'REQUIRES_ANDRES', 'el cierre no presenta la auditoría como acreditada');
       t.equals(result.blocks[0].code, 'AUDIT_READ_FAILURES', 'expone el bloqueo operativo');
       t.equals(result.degradation.code, 'AUDIT_READ_FAILURES', 'expone degradación estructurada');
+      t.equals(result.degradation.read_failures.length, 1,
+        'el recibo enumera cada lectura fallida');
+      t.equals(result.degradation.read_failures[0].tool, 'notion.fetch',
+        'identifica la herramienta que falló');
+      t.includes(result.degradation.read_failures[0].source, 'sho-01',
+        'identifica la fuente solicitada');
+      t.equals(result.degradation.read_failures[0].code, 'PARTITION_VIOLATION',
+        'conserva el código técnico');
+      t.ok(result.degradation.read_failures[0].error.length > 0,
+        'conserva el mensaje redactado para diagnóstico');
+      t.equals(result.blocks[0].failures[0].tool, 'notion.fetch',
+        'el bloqueo visible conserva el mismo diagnóstico');
       t.equals(result.degradation.next_action.action, 'PROVISION_CONTEXT_READ_PARTITIONS',
         'indica la corrección técnica necesaria');
       t.includes(providers.OPENAI.calls[1].system, 'AUDITOR_TOOL_ERRORS:',

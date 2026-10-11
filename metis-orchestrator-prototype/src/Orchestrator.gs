@@ -215,7 +215,16 @@ var Orchestrator = (function () {
             Errors.is(e, Errors.CODES.LIMIT_EXCEEDED)) {
           throw e; // fail closed: no se degrada una guarda dura
         }
-        var failure = { name: req.name, code: e.code ? e.code : 'ERROR', error: Errors.redactText(e.message) };
+        var failure = {
+          name: req.name,
+          code: e.code ? e.code : 'ERROR',
+          error: Errors.redactText(e.message),
+          // El recibo debe permitir reparar una lectura fallida sin volver a
+          // pagar una corrida sólo para descubrir qué objeto se intentó leer.
+          // La carga permanece dentro del recibo autenticado y se redacta y
+          // acota antes de persistirse.
+          source: Errors.redactText(JSON.stringify(req.arguments || {})).slice(0, 1000)
+        };
         session.tool_errors.push(failure);
         results.push({ name: req.name, ok: false, error: failure.error });
       }
@@ -365,7 +374,8 @@ var Orchestrator = (function () {
       return {
         name: failure.name || null,
         code: failure.code || 'ERROR',
-        message: Errors.redactText(failure.message || '')
+        message: Errors.redactText(failure.error || failure.message || ''),
+        source: failure.source || null
       };
     });
     return [
@@ -730,15 +740,25 @@ var Orchestrator = (function () {
         // fuentes. El bloqueo y la degradación quedan visibles para clientes y
         // reportes sin depender de que el modelo los redacte correctamente.
         if (auditorReadFailures.length > 0) {
+          var readFailureDetails = auditorReadFailures.map(function (failure) {
+            return {
+              tool: failure.name || null,
+              source: failure.source || null,
+              code: failure.code || 'ERROR',
+              error: Errors.redactText(failure.error || '')
+            };
+          });
           runtime.blocks.push({
             code: 'AUDIT_READ_FAILURES',
             detail: auditorReadFailures.length + ' lectura(s) del auditor fallaron' +
-              (evidenceUnavailable ? '; no recuperó evidencia' : '')
+              (evidenceUnavailable ? '; no recuperó evidencia' : ''),
+            failures: readFailureDetails
           });
           runtime.degradation = {
             code: 'AUDIT_READ_FAILURES',
             provider: target,
             stage: 'TOOL_EXECUTION',
+            read_failures: readFailureDetails,
             cost_status: runtime.cost_known ? 'KNOWN' : 'UNKNOWN',
             next_action: {
               applicable: evidenceUnavailable,
