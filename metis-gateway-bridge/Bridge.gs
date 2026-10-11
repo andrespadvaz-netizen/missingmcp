@@ -307,7 +307,8 @@ function durableReplay_(props, receipt, state) {
     if (prior || newCalls >= 1) {
       var y = new Error('DURABLE_YIELD'); y.code = 'CONFIG'; throw y;
     }
-    state.calls.push({state:'STARTED', provider:base.name || null, method:method});
+    state.calls.push({state:'STARTED', provider:base.name || null, method:method,
+      started_at:Date.now()});
     pendingIndex = index;
     newCalls++;
     lastWasReplay = false;
@@ -336,7 +337,10 @@ function durableReplay_(props, receipt, state) {
       isReplay: function() { return lastWasReplay; },
       onAccounted: function(normalized, replayed) {
         if (replayed) { return; }
-        state.calls[pendingIndex] = {state:'ACCOUNTED', response:normalized};
+        var started=state.calls[pendingIndex] && state.calls[pendingIndex].started_at;
+        state.calls[pendingIndex] = {state:'ACCOUNTED', response:normalized,
+          started_at:started || null, accounted_at:Date.now(),
+          duration_ms:started ? Date.now()-started : null};
         pendingIndex = null;
         save();
       }
