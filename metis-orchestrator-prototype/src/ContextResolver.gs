@@ -49,7 +49,7 @@ var ContextResolver = (function () {
       var declared=normalize(explicit[1].trim());
       function matches(label) {
         var value=normalize(label);
-        return declared===value || declared.indexOf(value+'.')===0;
+        return declared===value || declared.indexOf(value+'.')===0 || declared.indexOf(value+'/')===0;
       }
       var exactKeys=Config.contextNames().filter(matches);
       if (exactKeys.length) { return exactKeys; }

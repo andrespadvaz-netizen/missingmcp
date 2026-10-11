@@ -28,6 +28,9 @@ def validate(args):
     if not isinstance(key, str) or not KEY.fullmatch(key):
         raise RequestError("idempotency_key must contain 16–128 letters, digits, _ or -.")
     context_project = "UNSCOPED"
+    legacy_context = re.match(r"\s*Contexto:\s*([A-Z0-9_.-]+(?:/[A-Z0-9_.-]+)*)\s*(?:\r?\n|$)", text)
+    if legacy_context:
+        context_project = legacy_context.group(1)
     if "context" in args:
         context = args["context"]
         if not isinstance(context, dict) or set(context) != {"project", "source"}:

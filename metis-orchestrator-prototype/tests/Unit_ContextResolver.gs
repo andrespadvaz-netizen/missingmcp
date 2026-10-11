@@ -32,6 +32,8 @@ function registerUnitContextResolver() {
     t.equals(verdict.scope.substance_allowed, true, 'habilita únicamente la sustancia de PERSONAL');
     t.equals(ContextResolver.registeredRoot('PERSONALITY/HEALTH_OS'), null,
       'no acepta prefijos parciales como contexto válido');
+    var legacy = ContextResolver.resolve('Contexto: PERSONAL/HEALTH_OS\nAudita el gate.', {});
+    t.equals(legacy.resolved_context, 'PERSONAL', 'la cabecera canónica heredada conserva compatibilidad');
   });
 
   TestRunner.unit('ContextResolver', 'detecta conflicto multi-contexto', function (t) {

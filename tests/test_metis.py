@@ -183,6 +183,12 @@ def test_capacity_fail_closed(queue):
         queue.create('operator',REQUEST)
 
 
+def test_legacy_canonical_context_header_preserves_subproject_isolation(queue):
+    request = {**REQUEST, 'request': 'Contexto: PERSONAL/HEALTH_OS\nAudita el gate A.'}
+    created = queue.create('operator', request)
+    assert created['context_project'] == 'PERSONAL/HEALTH_OS'
+
+
 @pytest.mark.parametrize('env', [
     {'METIS_BRIDGE_URL':'http://evil/exec'},
     {'METIS_OPERATOR_KEY':'short'},
