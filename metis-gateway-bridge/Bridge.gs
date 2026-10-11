@@ -194,7 +194,6 @@ function execute_(p) {
         receipt.state = 'CHECKPOINT';
         receipt.next_call = durableState.calls.length + 1;
         props.setProperty('receipt', JSON.stringify(receipt));
-        scheduleBridgeWorker_();
         return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
       }
       var output = {
@@ -345,6 +344,25 @@ function inspectBridge() {
     productive_enabled:PropertiesService.getScriptProperties().getProperty('GATEWAY_PRODUCTIVE_ENABLED')==='true',
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};
+}
+
+/** Redacted operational probe. It exposes no request, model output or secret. */
+function inspectBridgeReceipt() {
+  var props=PropertiesService.getScriptProperties();
+  var receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+  var summary={seq:receipt.seq || 0,id:receipt.id || null,state:receipt.state || null,
+    next_call:receipt.next_call || null,chunks:receipt.chunks || 0,
+    durable_chunks:receipt.durable_chunks || 0,started_at:receipt.started_at || null};
+  if (receipt.state === 'DONE') {
+    var result=cached_(props,receipt).result || {};
+    summary.result_status=result.status || null;
+    summary.cost_known=result.cost_known === true;
+    summary.cost_usd=result.cost_usd === undefined ? null : result.cost_usd;
+    summary.requires_review=result.requires_review === true;
+    summary.failure_stage=result.failure_stage || null;
+  }
+  console.log(JSON.stringify(summary));
+  return summary;
 }
 
 /** Run once from the editor after deployment to grant the explicit trigger scope. */

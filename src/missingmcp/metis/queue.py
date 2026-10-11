@@ -173,6 +173,42 @@ class Queue:
             self.db.execute("ROLLBACK")
             raise
 
+    def reconcile_terminal(self, row, result):
+        """Replace an uncertain timeout with the signed terminal bridge receipt.
+
+        The bridge is monotonic by (id, seq), so a later DONE receipt for the
+        same pair is stronger evidence than the gateway's local timeout.
+        """
+        status = result.get("status")
+        cost = result.get("cost_usd")
+        if (status not in TERMINAL or result.get("cost_known") is not True
+                or result.get("requires_review") is not False
+                or isinstance(cost, bool) or not isinstance(cost, (int, float))
+                or not math.isfinite(cost) or cost < 0):
+            return False
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.db.execute("SELECT * FROM metis_executions WHERE id=? AND seq=?",
+                                      (row["id"], row["seq"])).fetchone()
+            paused = self.db.execute("SELECT 1 FROM metis_pause WHERE execution_id=?", (row["id"],)).fetchone()
+            original = json.loads(decrypt(self.secret, current["result_enc"])) if current and current["result_enc"] else {}
+            if (not current or current["status"] != "FAILED" or not paused
+                    or original.get("error") != "TRANSPORT_UNCERTAIN"):
+                self.db.execute("COMMIT")
+                return False
+            reviewed = {**result, "transport_reconciliation": {
+                "execution_id": row["id"], "seq": row["seq"],
+                "basis": "SIGNED_TERMINAL_BRIDGE_RECEIPT"},
+                "original_failure": original}
+            self.db.execute("UPDATE metis_executions SET status=?,result_enc=? WHERE id=?",
+                            (status, encrypt(self.secret, json.dumps(reviewed, ensure_ascii=False)), row["id"]))
+            self.db.execute("DELETE FROM metis_pause WHERE execution_id=?", (row["id"],))
+            self.db.execute("COMMIT")
+            return True
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+
     def finish(self, row, result):
         status = result.get("status")
         if status not in TERMINAL:

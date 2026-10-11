@@ -158,7 +158,8 @@ class Worker:
                 try:
                     reply = await self.bridge.call("status", paused)
                     if reply.get("state") == "DONE" and isinstance(reply.get("result"), dict):
-                        self.queue.reconcile_accounting(paused, reply["result"])
+                        if not self.queue.reconcile_terminal(paused, reply["result"]):
+                            self.queue.reconcile_accounting(paused, reply["result"])
                 except (httpx.HTTPError, ValueError, TypeError):
                     pass
         await self.write_worker.reconcile_known_object()

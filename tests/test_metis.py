@@ -318,6 +318,25 @@ async def test_accounting_review_reads_only_and_preserves_failure(queue, monkeyp
     assert not queue.reconcile_accounting(row, reviewed)
 
 
+def test_signed_terminal_receipt_replaces_transport_timeout(queue):
+    first = queue.create('operator', REQUEST)
+    row = queue.next(); queue.claim(row)
+    queue.finish(row, {'status':'FAILED','error':'TRANSPORT_UNCERTAIN',
+                       'cost_known':False,'cost_usd':None,'requires_review':True,
+                       'failure_stage':'BRIDGE_DELIVERY','final_answer':None})
+    terminal = {'status':'COMPLETED','cost_known':True,'cost_usd':.27065225,
+                'requires_review':False,'failure_stage':None,
+                'final_answer':'dictamen'}
+    paused = queue.paused_execution()
+    assert queue.reconcile_terminal(paused, terminal)
+    answer = queue.get('operator', first['execution_id'])
+    assert answer['status'] == 'COMPLETED'
+    assert answer['cost_known'] is True and answer['cost_usd'] == .27065225
+    assert answer['transport_reconciliation']['basis'] == 'SIGNED_TERMINAL_BRIDGE_RECEIPT'
+    assert answer['original_failure']['error'] == 'TRANSPORT_UNCERTAIN'
+    assert answer['context_paused'] is False and answer['gateway_paused'] is False
+
+
 @pytest.mark.parametrize('change', [
     {'accounting_reconciliation':{}}, {'cost_usd':float('nan')},
     {'cost_usd':-1}, {'requires_review':True}, {'status':'COMPLETED'},
