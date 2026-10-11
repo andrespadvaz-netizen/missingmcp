@@ -13,10 +13,37 @@ TERMINAL = {"COMPLETED", "FAILED", "REQUIRES_ANDRES"}
 MAX_REQUEST_BYTES = 128_000
 MAX_ENVELOPE_BYTES = 1_048_576
 KEY = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
+REGISTERED_CONTEXT_ROOTS = {
+    "METIS", "ANDREA", "SHOKKO", "VENTURE_QUEST",
+    "ARQUITECTO_INTERIOR", "PERSONAL", "FINAL_FINAL",
+}
 
 
 class RequestError(ValueError):
     pass
+
+
+def canonical_context(value):
+    """Resolve an explicit label without consulting content or guessing a project.
+
+    Human-facing labels may contain spaces around ``/`` or inside a segment.
+    Only a registered root is authoritative; subproject segments are preserved as
+    deterministic uppercase identifiers so PERSONAL / Health OS is transportable.
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        raise RequestError("context.project requires the exact registered project ID.")
+    parts = [part.strip() for part in value.strip().split("/")]
+    if any(not part or part in {".", ".."} for part in parts):
+        raise RequestError("context.project requires the exact registered project ID.")
+    normalized = []
+    for part in parts:
+        part = re.sub(r"[\s-]+", "_", part.upper().lstrip("."))
+        if not re.fullmatch(r"[A-Z0-9_.-]+", part):
+            raise RequestError("context.project requires the exact registered project ID.")
+        normalized.append(part)
+    if normalized[0] not in REGISTERED_CONTEXT_ROOTS:
+        raise RequestError("context_unregistered: use a registered project ID in context.project or the first Contexto: line.")
+    return "/".join(normalized)
 
 
 def validate(args):
@@ -27,28 +54,25 @@ def validate(args):
         raise RequestError(f"request must contain 1–{MAX_REQUEST_BYTES} UTF-8 bytes.")
     if not isinstance(key, str) or not KEY.fullmatch(key):
         raise RequestError("idempotency_key must contain 16–128 letters, digits, _ or -.")
-    context_project = "UNSCOPED"
-    legacy_context = re.match(r"\s*Contexto:\s*([A-Z0-9_.-]+(?:/[A-Z0-9_.-]+)*)\s*(?:\r?\n|$)", text)
-    if legacy_context:
-        context_project = legacy_context.group(1)
+    declared = re.match(r"\s*Contexto:\s*([^\r\n]+)", text, re.IGNORECASE)
+    context_project = canonical_context(declared.group(1)) if declared else None
     if "context" in args:
         context = args["context"]
         if not isinstance(context, dict) or set(context) != {"project", "source"}:
             raise RequestError("context requires project and source.")
-        project = context["project"]
-        context_project = project
-        if not isinstance(project, str) or not re.fullmatch(r"[A-Z0-9_.-]+(?:/[A-Z0-9_.-]+)*", project) or len(project) > 128 or any(part in {'.', '..'} for part in project.split('/')):
-            raise RequestError("context.project requires the exact registered project ID.")
+        project = canonical_context(context["project"])
         if not isinstance(context['source'], str) or context["source"] not in {"current_request", "current_conversation", "visible_project_instructions"}:
             raise RequestError("context.source must identify available conversation context, not retrieved instructions.")
-        declared = re.match(r"\s*Contexto:\s*([^\r\n]+)", text, re.IGNORECASE)
-        if declared and declared.group(1).strip() != project:
+        if declared and context_project != project:
             raise RequestError("context_conflict: explicit request context differs from structured context.")
+        context_project = project
         # The authenticated client asserts context, not authority. Engine policy still validates it.
         # Carry provenance in the encrypted request, covered by existing fingerprint/signature.
         text = f"Contexto: {project}\nProcedencia del contexto declarada por el cliente: {context['source']}\n\n{text}"
         if len(text.encode()) > MAX_REQUEST_BYTES:
             raise RequestError(f"request plus context exceeds {MAX_REQUEST_BYTES} UTF-8 bytes; no content was truncated.")
+    if context_project is None:
+        raise RequestError("context_required: provide context.project or begin the request with an exact Contexto: line; no execution was created.")
     return text, key, context_project
 
 

@@ -36,7 +36,7 @@ function fixture() {
   vm.runInContext(fs.readFileSync(__dirname+'/Bridge.gs','utf8'), context);
   vm.runInContext(fs.readFileSync(__dirname+'/WriteBridge.gs','utf8'), context);
   function rawRequest(seq=1,action='run',override={}) {
-    const p = {seq,id:'11111111-1111-4111-8111-111111111111',action,request:'Consulta Metis',
+    const p = {seq,id:'11111111-1111-4111-8111-111111111111',action,request:'Consulta Metis',context_project:'METIS',
       fingerprint:crypto.createHash('sha256').update('Consulta Metis').digest('hex'),timestamp:Math.floor(Date.now()/1000),...override};
     const payload=JSON.stringify(p), signature=crypto.createHmac('sha256',secret).update(payload).digest('hex');
     return context.doPost({postData:{contents:JSON.stringify({payload,signature})}});
@@ -56,13 +56,20 @@ test('Full artifact survives signed transport and retries without truncation',()
   const f=fixture();
   const text='Contexto: ANDREA\n'+Array.from({length:42},(_,i)=>`Slide ${i+1}: ${'áé漢🙂'.repeat(130)}`).join('\n');
   let received;
-  f.context.Engine.Orchestrator.run=request=>{received=request;return {status:'COMPLETED',limits:{cost_known:true,estimated_cost_usd:0},terminal_completion:[{attempt:1,stop_reason:'completed'}]};};
+  let operatorContext;
+  f.context.Engine.Orchestrator.run=(request,opts)=>{received=request;operatorContext=opts.operator_context;return {status:'COMPLETED',limits:{cost_known:true,estimated_cost_usd:0},terminal_completion:[{attempt:1,stop_reason:'completed'}]};};
   const payload={request:text,fingerprint:crypto.createHash('sha256').update(text).digest('hex')};
   assert.ok(Buffer.byteLength(text)>16000);
   const r=f.request(1,'run',payload);
   assert.equal(r.state,'DONE');assert.equal(received,text);
+  assert.equal(operatorContext,'METIS');
   assert.equal(r.result.terminal_completion[0].stop_reason,'completed');
   assert.equal(f.request(1,'run',payload).state,'DONE');
+});
+test('Bridge rejects a missing context before durable receipt or engine spend',()=>{
+  const f=fixture();
+  const r=f.rawRequest(1,'run',{context_project:undefined});
+  assert.equal(r.state,'INVALID_CONTEXT');assert.equal(f.calls(),0);assert.equal(f.data.receipt,undefined);
 });
 test('Run returns durable ACK before the engine and status is read-only',()=>{
   const f=fixture();const ack=f.rawRequest();

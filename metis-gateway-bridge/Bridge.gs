@@ -58,6 +58,7 @@ function dispatch_(p) {
       return cached_(props,receipt);
     }
     if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
+    if (typeof p.context_project !== 'string' || !/^[A-Z0-9_.-]+(?:\/[A-Z0-9_.-]+)*$/.test(p.context_project)) return {id:p.id,seq:p.seq,state:'INVALID_CONTEXT'};
     if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 128000) return {id:p.id,seq:p.seq,state:'INVALID_REQUEST'};
     var hash=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,p.request,Utilities.Charset.UTF_8)
       .map(function(b){return ('0'+((b+256)%256).toString(16)).slice(-2);}).join('');
@@ -65,7 +66,7 @@ function dispatch_(p) {
     receipt={seq:p.seq,id:p.id,fingerprint:p.fingerprint,state:'ACCEPTED',chunks:0,durable_chunks:0,accepted_at:Date.now()};
     props.setProperty('receipt',JSON.stringify(receipt));
     clearDurable_(props,receipt);
-    storeDurable_(props,receipt,{request:p.request,origin_model:p.origin_model || 'ANTHROPIC',calls:[]});
+    storeDurable_(props,receipt,{request:p.request,origin_model:p.origin_model || 'ANTHROPIC',context_project:p.context_project,calls:[]});
     scheduleBridgeWorker_();
     return {id:p.id,seq:p.seq,state:'ACCEPTED'};
   } finally { lock.releaseLock(); }
@@ -155,6 +156,7 @@ function execute_(p) {
         var durable = loadDurable_(props, receipt);
         p.request = durable.request;
         p.origin_model = durable.origin_model;
+        p.context_project = durable.context_project;
         receipt.state = 'RUNNING';
         receipt.started_at = Date.now();
         props.setProperty('receipt', JSON.stringify(receipt));
@@ -176,6 +178,9 @@ function execute_(p) {
       if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) {
         return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
       }
+      if (typeof p.context_project !== 'string' || !/^[A-Z0-9_.-]+(?:\/[A-Z0-9_.-]+)*$/.test(p.context_project)) {
+        return {id:p.id,seq:p.seq,state:'INVALID_CONTEXT'};
+      }
       if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 128000) {
         return {id:p.id, seq:p.seq, state:'INVALID_REQUEST'};
       }
@@ -196,7 +201,7 @@ function execute_(p) {
     }
     if (!resuming) {
       clearDurable_(props, receipt);
-      storeDurable_(props, receipt, {request:p.request, origin_model:p.origin_model || 'ANTHROPIC', calls:[]});
+      storeDurable_(props, receipt, {request:p.request, origin_model:p.origin_model || 'ANTHROPIC', context_project:p.context_project, calls:[]});
     }
     var previous = Engine.Config.runLevel();
     var previousLimits = Engine.Config.limits();
@@ -216,6 +221,7 @@ function execute_(p) {
         execution_id: p.id,
         // First client is Claude. Identity is server-declared, never client-selected.
         current_model: p.origin_model || 'ANTHROPIC',
+        operator_context: p.context_project,
         mandate: {source:'FIXED_POLICY',requests_execution:productive},
         providers: {
           OPENAI:replay.wrap(Engine.OpenAIAdapter.create()),

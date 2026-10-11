@@ -55,7 +55,8 @@ class Bridge:
     async def call(self, action, row, request=None):
         return await self._call({"action": action, "seq": row["seq"], "id": row["id"],
                               "fingerprint": row["fingerprint"], "request": request,
-                              "origin_model": row["origin_model"] if "origin_model" in row.keys() else "ANTHROPIC"}, row)
+                              "origin_model": row["origin_model"] if "origin_model" in row.keys() else "ANTHROPIC",
+                              "context_project": row["context_project"]}, row)
 
     async def call_write(self, action, row, write):
         return await self._call({"action": action, "seq": row["seq"], "id": row["id"],

@@ -26,7 +26,7 @@ async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, 
         return httpx.Response(200,json={'id':'id-1','seq':1,'state':'DONE'})
     monkeypatch.setattr(httpx,'AsyncClient',lambda **kw:real_client(transport=httpx.MockTransport(response),**kw))
     try:
-        await Bridge('https://bridge.test/', 'secret').call('status',{'id':'id-1','seq':1,'fingerprint':'fp'})
+        await Bridge('https://bridge.test/', 'secret').call('status',{'id':'id-1','seq':1,'fingerprint':'fp','context_project':'METIS'})
         assert not private_transport.get()
         logger.info('ordinary request remains visible')
         output = capsys.readouterr().out
@@ -37,7 +37,8 @@ async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, 
         logger.setLevel(prior)
 
 SECRET = 'storage-secret-' * 4
-REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001'}
+REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001',
+           'context': {'project':'METIS', 'source':'current_request'}}
 
 
 def test_lens_gateway_accepts_only_partition_scoped_evidence():
@@ -124,7 +125,9 @@ def test_durable_encrypted_queue(tmp_path):
     q.close()
     q = Queue(path, SECRET)
     assert q.get('operator',one['execution_id'])['status'] == 'DISPATCHED'
-    assert q.request(q.next()) == REQUEST['request']
+    compiled = q.request(q.next())
+    assert compiled.startswith('Contexto: METIS\n')
+    assert compiled.endswith(REQUEST['request'])
     assert REQUEST['request'] not in q.next()['request_enc']
     q.close()
 

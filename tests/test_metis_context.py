@@ -8,13 +8,14 @@ def args():
 
 
 def test_context_carried_without_operator_repetition():
-    request, _ = validate(args())
+    request, _, project = validate(args())
+    assert project == 'ANDREA'
     assert request.startswith('Contexto: ANDREA\n')
     assert 'current_conversation' in request
     assert request.endswith('Audita este mazo completo.')
 
 
-@pytest.mark.parametrize('project', ['ANDREA\nContexto: METIS', '', 'Andrea', '../ANDREA', 'A'*129])
+@pytest.mark.parametrize('project', ['ANDREA\nContexto: METIS', '', 'UNKNOWN', '../ANDREA', 'A'*129])
 def test_invalid_context_rejected(project):
     value = args()
     value['context']['project'] = project
@@ -43,7 +44,8 @@ def test_full_unicode_artifact_survives_context_and_queue(tmp_path):
     value = args()
     value['request'] = '\n'.join(f'Lámina {i}: ' + 'áéíóú ' * 180 for i in range(1, 43))
     assert len(value['request'].encode()) > 16000
-    compiled, _ = validate(value)
+    compiled, _, project = validate(value)
+    assert project == 'ANDREA'
     assert compiled.endswith(value['request'])
     queue = Queue(str(tmp_path/'artifact.db'), 'test-secret-'*4)
     try:
@@ -57,10 +59,25 @@ def test_full_unicode_artifact_survives_context_and_queue(tmp_path):
 
 
 def test_utf8_byte_boundary():
-    value = {'request': 'é'*(MAX_REQUEST_BYTES//2), 'idempotency_key':'byte-boundary-0001'}
+    value = {'request': 'Contexto: METIS\n' + 'é'*((MAX_REQUEST_BYTES-16)//2), 'idempotency_key':'byte-boundary-0001'}
     assert validate(value)[0] == value['request']
     value['request'] += 'é'
     with pytest.raises(RequestError):
+        validate(value)
+
+
+def test_spaced_human_context_is_canonicalized_without_client_context_object():
+    value = {'request': 'Contexto: PERSONAL / Health OS\nAudita el gate A.',
+             'idempotency_key':'spaced-context-0001'}
+    request, _, project = validate(value)
+    assert request == value['request']
+    assert project == 'PERSONAL/HEALTH_OS'
+
+
+@pytest.mark.parametrize('request_text', ['Audita sin contexto.', 'Contexto: PROYECTO INVENTADO\nAudita.'])
+def test_missing_or_unregistered_context_fails_before_execution(request_text):
+    value = {'request': request_text, 'idempotency_key':'invalid-context-0001'}
+    with pytest.raises(RequestError, match='context_'):
         validate(value)
 
 
