@@ -841,16 +841,10 @@ var Orchestrator = (function () {
           throw Errors.schemaError('Respuesta de reconciliación incompleta: ' + reconciliation.stop_reason);
         }
         producerText = reconciliation.text;
-        // En una auditoría sin acciones, rechazar la propuesta ya responde al
-        // operador. No confundir bloqueo de la propuesta con bloqueo del flujo.
-        // Nunca levanta un bloqueo de autoridad, un plan, ni una petición humana
-        // explícita; tampoco autoriza una aprobación contra el auditor.
-        if (isAudit && !session.proposed_actions.length &&
-            /^DICTAMEN: RECHAZAR(?:\r?\n|$)/.test(producerText.trim()) &&
-            !/^\s*(?:\*\*)?REQUIERE DECISI[ÓO]N DE ANDR[ÉE]S\b/im.test(producerText) &&
-            runtime.blocks.length === 1 && runtime.blocks[0].code === 'AUDIT_BLOCKS_MATERIALLY') {
-          execution.status = 'COMPLETED';
-        }
+        // Un bloqueo material de auditoría siempre conserva la ruta
+        // REQUIRES_ANDRES. El dictamen narrativo puede rechazar la propuesta,
+        // pero no tiene autoridad para cerrar el bloqueo humano que ya fijó el
+        // router determinista.
       }
 
       // 10-12. Plan de acciones: validar el PLAN COMPLETO antes de simular nada.

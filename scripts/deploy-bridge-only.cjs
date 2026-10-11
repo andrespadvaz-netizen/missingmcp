@@ -41,14 +41,14 @@ async function main() {
   if (!manifest) throw new Error('Missing bridge manifest');
   const manifestJson = JSON.parse(manifest.source);
   const library = manifestJson.dependencies.libraries.find(x => x.userSymbol === 'Engine');
-  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30','31','32'].indexOf(String(library.version)) < 0) {
+  if (!library || library.libraryId !== engineId || ['20','22','26','27','29','30','31','32','33'].indexOf(String(library.version)) < 0) {
     throw new Error('Bridge is not pinned to an expected rollback engine; found '+String(library && library.version));
   }
-  library.version = '32';
+  library.version = '33';
   library.developmentMode = false;
   manifest.source = JSON.stringify(manifestJson, null, 2);
   await api('/'+bridgeId+'/content','PUT',{files:bridge.files});
-  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'All-context verified read partitions; engine 32'});
+  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'Material audit blocks require Andres; engine 33'});
   const deployment = await api('/'+bridgeId+'/deployments/'+deploymentId);
   await api('/'+bridgeId+'/deployments/'+deploymentId,'PUT',{deploymentConfig:{
     ...deployment.deploymentConfig, versionNumber:bridgeVersion.versionNumber
@@ -58,6 +58,6 @@ async function main() {
   if (!remote || remote.source.trim() !== bridgeFile.source.trim()) throw new Error('Bridge verification failed');
   const remoteLens = verify.files.find(x => x.name === 'LensContext' || x.name.endsWith('/LensContext'));
   if (!remoteLens || remoteLens.source.trim() !== lensSource.trim()) throw new Error('LensContext verification failed');
-  console.log(JSON.stringify({engine_version:32,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
+  console.log(JSON.stringify({engine_version:33,bridge_version:bridgeVersion.versionNumber,deployment_id:deploymentId,verified:true}));
 }
 main().catch(e=>{console.error(e.message);process.exitCode=1;});

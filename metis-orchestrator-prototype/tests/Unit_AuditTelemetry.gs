@@ -133,7 +133,7 @@ function registerUnitAuditTelemetry() {
     });
 
   [
-    { text: 'DICTAMEN: RECHAZAR\nLa propuesta requiere corregir su justificación técnica.', status: 'COMPLETED' },
+    { text: 'DICTAMEN: RECHAZAR\nLa propuesta requiere corregir su justificación técnica.', status: 'REQUIRES_ANDRES' },
     { text: 'DICTAMEN: APROBAR\nAprobación que contradice el bloqueo material.', status: 'REQUIRES_ANDRES' },
     { text: 'DICTAMEN: RECHAZAR\nREQUIERE DECISIÓN DE ANDRÉS: resolver una preferencia de alcance no expresada.', status: 'REQUIRES_ANDRES' }
   ].forEach(function (example) {
@@ -147,7 +147,7 @@ function registerUnitAuditTelemetry() {
       var result = Orchestrator.run('Audita Metis y recomienda aprobar o rechazar, sin ejecutar cambios.', {
         current_model: 'OPENAI', operator_context: 'METIS', intent: 'audit', providers: providers
       });
-      t.equals(result.status, example.status, 'distingue rechazar una propuesta de necesitar intervención humana');
+      t.equals(result.status, example.status, 'todo bloqueo material exige intervención humana');
       t.ok(result.audit.blocks_materially, 'conserva el veredicto material del auditor');
       t.equals(result.actions.length, 0, 'no autoriza acciones');
       t.includes(result.final_answer, example.text, 'entrega la conclusión real sin sustituirla');

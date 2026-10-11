@@ -38,7 +38,7 @@ async function main() {
     replace(engine.files, path.basename(fileName,'.gs'), fs.readFileSync(path.join(engineSourceDir,fileName),'utf8'));
   }
   await api('/'+engineId+'/content','PUT',{files:engine.files});
-  const engineVersion = await api('/'+engineId+'/versions','POST',{description:'Engine v9; full source synchronization with bounded empty-output recovery'});
+  const engineVersion = await api('/'+engineId+'/versions','POST',{description:'Engine v33; material audit blocks always require Andres'});
 
   const bridge = await api('/'+bridgeId+'/content');
   replace(bridge.files, 'Bridge', fs.readFileSync(path.join(root,'metis-gateway-bridge','Bridge.gs'),'utf8'));
@@ -51,7 +51,7 @@ async function main() {
   library.developmentMode = false;
   manifest.source = JSON.stringify(manifestJson, null, 2);
   await api('/'+bridgeId+'/content','PUT',{files:bridge.files});
-  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'Gateway durable execution; one paid provider call per invocation'});
+  const bridgeVersion = await api('/'+bridgeId+'/versions','POST',{description:'Gateway v58; material audit blocks always require Andres'});
   const deployment = await api('/'+bridgeId+'/deployments/'+deploymentId);
   await api('/'+bridgeId+'/deployments/'+deploymentId,'PUT',{deploymentConfig:{
     ...deployment.deploymentConfig, versionNumber:bridgeVersion.versionNumber
