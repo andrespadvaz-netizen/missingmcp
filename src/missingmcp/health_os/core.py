@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta, tzinfo, timezone
 from enum import StrEnum
 from hashlib import sha256
+from math import isfinite
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
@@ -45,6 +46,15 @@ class MetricObservation:
             raise ValueError("semantic must identify the kind of observation")
         if not self.source or not self.provenance_id or not self.unit:
             raise ValueError("source, provenance_id, and unit are required")
+        if not isfinite(self.value) or self.value < 0:
+            raise ValueError("observation value must be finite and non-negative")
+        # These are data-integrity limits, not medical alert thresholds.  They
+        # only discard values a sensor cannot plausibly encode; escalation
+        # thresholds remain a clinician-owned policy.
+        if self.metric in {"heart_rate", "resting_heart_rate", "walking_heart_rate_average"} and not 0 < self.value <= 300:
+            raise ValueError("heart-rate observation is outside sensor bounds")
+        if self.metric == "oxygen_saturation" and not 0 < self.value <= 100:
+            raise ValueError("oxygen-saturation observation is outside sensor bounds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +169,7 @@ class HealthOS:
 
     @staticmethod
     def _observation_key(item: MetricObservation) -> str:
-        raw = "|".join((item.source, item.provenance_id, item.metric, item.observed_at.isoformat()))
+        raw = "|".join((item.source, item.provenance_id, item.metric, item.observed_at.astimezone(timezone.utc).isoformat()))
         return sha256(raw.encode()).hexdigest()
 
     def ingest_observations(self, observations: Iterable[MetricObservation]) -> IngestResult:
@@ -192,6 +202,13 @@ class HealthOS:
     def _workout_key(session: WorkoutSession) -> str:
         return sha256(f"{session.source}|{session.workout_id}".encode()).hexdigest()
 
+    @staticmethod
+    def _activity_family(value: str) -> str:
+        normalized = value.lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"strength", "strength_training", "functional_strength_training", "traditional_strength_training", "weight_training"}:
+            return "strength"
+        return normalized
+
     def ingest_workout(self, session: WorkoutSession) -> str:
         """Store a session or link it to its matching Apple/Speediance session.
 
@@ -207,7 +224,7 @@ class HealthOS:
             overlap = self._overlap(existing, session)
             shorter = min(existing.end_time - existing.start_time, session.end_time - session.start_time)
             starts_close = abs(existing.start_time - session.start_time) <= timedelta(minutes=15)
-            if compatible_sources and existing.activity_type == session.activity_type and starts_close and overlap >= shorter / 2:
+            if compatible_sources and self._activity_family(existing.activity_type) == self._activity_family(session.activity_type) and starts_close and overlap >= shorter / 2:
                 self._workouts[key] = session
                 linked = self._workout_links.setdefault(existing_key, {existing_key})
                 linked.add(key)
@@ -263,10 +280,14 @@ class HealthOS:
         """Return a conservative, explainable state; never changes a plan itself."""
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        flags = {flag.strip().lower() for flag in subjective_flags}
-        urgent = flags & {"chest_pain", "dizziness", "shortness_of_breath"}
+        flags = {flag.strip().lower().replace(" ", "_") for flag in subjective_flags}
+        urgent = flags & {"chest_pain", "dolor_de_pecho", "dizziness", "mareo", "shortness_of_breath", "falta_de_aire"}
         if urgent:
             return DecisionAssessment(DecisionState.ESCALAR, "high", ("acute subjective safety flag",), (), False)
+        if flags & {"pain", "dolor", "injury", "lesion", "illness", "fever", "fiebre"}:
+            return DecisionAssessment(DecisionState.DETEN, "medium", ("subjective stop flag",), (), False)
+        if flags & {"fatigue", "fatiga", "soreness", "muscle_soreness", "poor_sleep", "mal_sueno"}:
+            return DecisionAssessment(DecisionState.AJUSTA, "medium", ("subjective adjustment flag",), (), False)
         quality = self.data_quality(now)
         if quality["stale"] or quality["legacy_after_transition"]:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("data quality does not support a readiness decision",), ("recent Apple Health coverage",), False)
@@ -277,7 +298,10 @@ class HealthOS:
         interpreted = [x for x in self._observations.values() if x.semantic == "model_interpreted" and x.observed_at >= now - timedelta(days=3)]
         if interpreted:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("model-interpreted values cannot drive readiness",), (), False)
-        return DecisionAssessment(DecisionState.ACTIVA, "medium", ("recent measured coverage and stable metric baselines",), (), False)
+        # A stable personal baseline alone does not establish a safe medical
+        # range.  A clinician-reviewed policy is intentionally required before
+        # ACTIVA can be emitted from physiological data.
+        return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("no clinician-reviewed safety policy is configured",), (), False)
 
     def local_day(self, at: datetime) -> str:
         return at.astimezone(self.timezone).date().isoformat()

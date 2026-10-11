@@ -22,4 +22,7 @@ fuentes, falta baseline de sueño/FC reposo o sólo existe información
 hechos de fuente y se escalan; nunca reciben interpretación diagnóstica.
 
 La implementación expone este contrato como `POST /health-os/brief`, protegido
-por la clave dedicada de ingestión. Su respuesta no contiene mediciones crudas.
+por la clave dedicada de ingestión. Esta es la única fuente técnica del bloque
+Health del Brief diario: el protocolo en Notion debe consumir este snapshot y no
+una segunda lógica ni narrativa de ChatGPT. Su respuesta no contiene mediciones
+crudas.

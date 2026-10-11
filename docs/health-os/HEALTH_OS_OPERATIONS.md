@@ -3,14 +3,13 @@
 ## Productores autorizados
 
 El núcleo admite sólo `APPLE_HEALTH` y `SPEEDIANCE`. La app móvil de ChatGPT
-dispone de una conexión Health nativa autorizada por Andrés y es la vía primaria
-para consultar métricas sincronizadas de Apple Health. Al incorporar un resultado
-al Health OS debe conservarse fecha, rango, métricas y procedencia
-`APPLE_HEALTH/CHATGPT_HEALTH`. El contrato de importación queda disponible para
-automatización futura, pero no se requiere una app iOS adicional para consultar
-y analizar los datos dentro de ChatGPT.
+puede consultar métricas sincronizadas de Apple Health, pero sus respuestas son
+`model_interpreted`: sirven para exploración y conversación, nunca como evidencia
+canónica ni como entrada del Brief. La producción exige un productor que preserve
+fecha ISO-8601 con offset, unidad, valor crudo y `provenance_id` de HealthKit.
 
-El adaptador está implementado en el gateway: `POST /health-os/ingest` y
+El adaptador aislado está implementado como servicio `health-os` (sin Garmin,
+login Garmin ni worker Garmin) con `Dockerfile.health-os`: `POST /health-os/ingest` y
 `GET /health-os/quality`. Ambos exigen `Authorization: Bearer <HEALTH_OS_INGEST_KEY>`;
 la clave debe ser distinta de `GATEWAY_SECRET` y tener 32 caracteres o más.
 Los eventos se cifran localmente antes de persistirse y las respuestas no
@@ -29,7 +28,7 @@ semántica. Ausencias se rechazan: nunca se convierten en cero.
 
 ## Runbook de transición
 
-1. Registrar `set_apple_transition()` con fecha/hora local verificable.
+1. Registrar `POST /health-os/transition` con `started_at` ISO-8601 verificable.
 2. Enviar exportaciones Apple Health y, para fuerza, Speediance.
 3. Revisar `data_quality(now)`: cobertura, antigüedad, mezcla de legado y sesiones.
 4. Tras 14 días locales distintos de datos Apple, cambia a `ERA_APPLE_BASELINE`.
@@ -48,3 +47,6 @@ era explícitamente, nunca reactivar el puente Garmin de producción.
 Health OS es de apoyo personal, no dispositivo médico ni motor de diagnóstico.
 Las conclusiones deben mostrar procedencia y calidad; datos faltantes,
 antiguos o en conflicto no habilitan recomendaciones automáticas.
+`ACTIVA` no se emite hasta configurar una política de seguridad revisada por un
+clínico; los límites físicos de sensor sólo rechazan registros imposibles, no
+determinan seguridad médica.
