@@ -108,7 +108,12 @@ class Bridge:
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            # ``advance`` performs one provider call against a receipt whose
+            # intent was already persisted by ``run``.  Give that call enough
+            # time to return its durable checkpoint; ordinary ingress/status
+            # requests remain short and read-only.
+            timeout = 120 if envelope.get("action") == "advance" else 30
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 response = await client.post(self.url, json={"payload": payload, "signature": signature})
                 response.raise_for_status()
                 if len(response.content) > 500000:
@@ -174,7 +179,11 @@ class Worker:
             # From this commit onward a transport failure NEVER causes another run.
             action, request = "run", self.queue.request(row)
         else:
-            action, request = "status", None
+            # Railway drives the next durable provider checkpoint directly.
+            # Apps Script time triggers remain a recovery path, not the normal
+            # latency path. Repeating advance cannot duplicate an accounted
+            # call because the bridge replays the durable receipt first.
+            action, request = "advance", None
         try:
             reply = await self.bridge.call(action, row, request)
         except (httpx.HTTPError, ValueError, TypeError) as exc:

@@ -27,9 +27,10 @@ function doPost(e) {
     // make a harmless retrieval capable of blocking paid work.
     if (p.action === 'lens_context') { return json_(dispatchLensContext_(p)); }
     if (!Number.isSafeInteger(p.seq) || p.seq < 1 || !/^[a-f0-9-]{36}$/.test(p.id) ||
-        !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','status','write','write_status'].indexOf(p.action) < 0) {
+        !/^[a-f0-9]{64}$/.test(p.fingerprint) || ['run','advance','status','write','write_status'].indexOf(p.action) < 0) {
       return json_({error: 'invalid_request'});
     }
+    if (p.action === 'advance') { return json_(execute_(p)); }
     return json_(p.action === 'write' || p.action === 'write_status' ? dispatchWrite_(p) : dispatch_(p));
   } catch (_) { return json_({error: 'bridge_failure'}); }
 }
@@ -161,7 +162,7 @@ function execute_(p) {
         return {id:p.id, seq:p.seq, state:'CONFLICT'};
       }
       if (receipt.state === 'CHECKPOINT' || receipt.state === 'ACCEPTED') {
-        if (p.action !== 'status') {
+        if (['status','advance'].indexOf(p.action) < 0) {
           return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
         }
         var durable = loadDurable_(props, receipt);

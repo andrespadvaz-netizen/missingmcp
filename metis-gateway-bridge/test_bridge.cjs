@@ -71,11 +71,12 @@ test('Bridge rejects a missing context before durable receipt or engine spend',(
   const r=f.rawRequest(1,'run',{context_project:undefined});
   assert.equal(r.state,'INVALID_CONTEXT');assert.equal(f.calls(),0);assert.equal(f.data.receipt,undefined);
 });
-test('Run returns durable ACK before the engine and status is read-only',()=>{
+test('Run returns durable ACK, status is read-only, and advance drives work immediately',()=>{
   const f=fixture();const ack=f.rawRequest();
   assert.equal(ack.state,'ACCEPTED');assert.equal(f.calls(),0);assert.equal(f.triggers(),1);
   assert.equal(f.rawRequest(1,'status').state,'ACCEPTED');assert.equal(f.calls(),0);
-  f.drain();assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);
+  assert.equal(f.rawRequest(1,'advance').state,'DONE');assert.equal(f.calls(),1);
+  assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);
 });
 test('Trigger scheduling prunes stale workers and operator repair resumes the same durable receipt',()=>{
   const f=fixture();const ack=f.rawRequest();assert.equal(ack.state,'ACCEPTED');

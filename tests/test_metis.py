@@ -164,7 +164,7 @@ async def test_lifecycle_exact_result_and_paid_retry(queue, status):
     assert answer['status'] == status
     for key, value in bridge.result.items():
         assert answer[key] == value
-    assert bridge.calls == ['run','status']
+    assert bridge.calls == ['run','advance']
 
 
 @pytest.mark.asyncio
