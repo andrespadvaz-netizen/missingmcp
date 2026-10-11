@@ -50,6 +50,7 @@ class Config:
     metis_operator_key: str = ""
     # Dedicated bearer secret for the private, read-only Metis Lens context endpoint.
     metis_lens_context_key: str = ""
+    health_os_ingest_key: str = ""
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -68,6 +69,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     metis = [env.get(name, "") for name in
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
+    health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
     if any(metis):
         import re
         if (not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", metis[0])
@@ -80,6 +82,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             raise ValueError("METIS_LENS_CONTEXT_KEY must be at least 32 characters")
         if metis_lens_context_key in metis[1:] or secret == metis_lens_context_key:
             raise ValueError("Lens context secret must be distinct from existing Metis secrets")
+    if health_os_ingest_key and (len(health_os_ingest_key) < 32 or health_os_ingest_key == secret):
+        raise ValueError("HEALTH_OS_INGEST_KEY must be distinct from GATEWAY_SECRET and at least 32 characters")
     return Config(
         gateway_secret=secret,
         public_url=public_url,
@@ -91,6 +95,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_bridge_secret=metis[1],
         metis_operator_key=metis[2],
         metis_lens_context_key=metis_lens_context_key,
+        health_os_ingest_key=health_os_ingest_key,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),
         worker_idle_ttl=int(env.get("WORKER_IDLE_TTL", "900")),

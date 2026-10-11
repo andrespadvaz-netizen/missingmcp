@@ -14,6 +14,9 @@ dependencies = [
     "garminconnect>=0.3.2",
     "cryptography>=42",
     "python-multipart>=0.0.9",
+    # IANA time-zone database for Windows and minimal containers. Health OS
+    # preserves the operator's local date for sleep and late workouts.
+    "tzdata>=2024.1",
     # PostHog telemetry (telemetry.py). The SDK is thread-based (no asyncio) and
     # pulls a second HTTP stack (requests) — accepted in the 2026-07-20 design
     # spec. 0-cost when POSTHOG_API_KEY is unset: telemetry.init() is a no-op.
