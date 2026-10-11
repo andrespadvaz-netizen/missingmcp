@@ -48,7 +48,10 @@ def test_garmin_forward_materialize_writes_0600_tokens_file(tmp_path):
     GarminWorkerForward(CFG).materialize('{"t":1}', str(tmp_path))
     path = tmp_path / "garmin_tokens.json"
     assert path.read_text() == '{"t":1}'
-    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    # Windows' mode bits do not represent the ACL applied to the file; the
+    # creation mode is enforced and observable on POSIX only.
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
 from unittest.mock import patch

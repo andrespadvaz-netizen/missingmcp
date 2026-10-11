@@ -18,6 +18,8 @@ from .adapters import build_adapters, RETIRED_ADAPTERS
 from .adapters.base import is_remote, is_local, is_upstream_oauth
 from .log import log
 from .metis.transport import LensContextBridgeError
+from .health_os.persistence import HealthOSRepository
+from datetime import datetime, timezone
 
 _TPL = Path(__file__).parent / "templates"
 _STATIC = Path(__file__).parent / "static"
@@ -67,6 +69,48 @@ def build_app(config: Config) -> Starlette:
     rate = security.RateLimiter()
     bk = backup.Backup(config)
     dr = report.DailyReport(config)
+    health_os = HealthOSRepository(conn, config.gateway_secret) if config.health_os_ingest_key else None
+
+    def _health_os_authorized(request):
+        return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
+
+    async def health_os_ingest(request):
+        if not _health_os_authorized(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=256_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            source = body["source"]
+            observations = body.get("observations", [])
+            workouts = body.get("workouts", [])
+            if not isinstance(source, str) or not isinstance(observations, list) or not isinstance(workouts, list):
+                raise ValueError("invalid payload shape")
+            result = health_os.ingest(source, observations, workouts)
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+        return JSONResponse({"status": "OK", **result}, headers={"Cache-Control": "no-store"})
+
+    async def health_os_quality(request):
+        if not _health_os_authorized(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        return JSONResponse({"status": "OK", "quality": health_os.quality(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
+
+    async def health_os_brief(request):
+        if not _health_os_authorized(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=8_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+            flags = body.get("subjective_flags", [])
+            if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
+                raise ValueError("subjective_flags must be a string list")
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+        return JSONResponse({"status": "OK", "brief": health_os.brief(datetime.now(timezone.utc), tuple(flags))}, headers={"Cache-Control": "no-store"})
 
     def _render(name: str, title: str, desc: str | None = None,
                 path: str = "/", extra_head: str = "") -> str:
@@ -418,6 +462,9 @@ def build_app(config: Config) -> Starlette:
         Route("/suggest", suggest, methods=["POST"]),
         Route("/healthz", healthz, methods=["GET"]),
         Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
+        Route("/health-os/ingest", health_os_ingest, methods=["POST"]),
+        Route("/health-os/quality", health_os_quality, methods=["GET"]),
+        Route("/health-os/brief", health_os_brief, methods=["POST"]),
         Route("/favicon.ico", favicon, methods=["GET"]),
         Route("/robots.txt", _text(robots_txt, "text/plain"), methods=["GET"]),
         Route("/sitemap.xml", _text(sitemap_xml, "application/xml"), methods=["GET"]),

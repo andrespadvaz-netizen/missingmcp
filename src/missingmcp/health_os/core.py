@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, tzinfo
+from enum import StrEnum
+from hashlib import sha256
+from typing import Iterable
+from zoneinfo import ZoneInfo
+
+
+class BaselineEra(StrEnum):
+    GARMIN = "ERA_GARMIN"
+    APPLE_TRANSITION = "ERA_APPLE_TRANSITION"
+    APPLE_BASELINE = "ERA_APPLE_BASELINE"
+
+
+class DecisionState(StrEnum):
+    ACTIVA = "ACTIVA"
+    AJUSTA = "AJUSTA"
+    DETEN = "DETEN"
+    ABSTENERSE = "ABSTENERSE"
+    ESCALAR = "ESCALAR"
+
+
+APPLE_HEALTH = "APPLE_HEALTH"
+SPEEDIANCE = "SPEEDIANCE"
+GARMIN_LEGACY = "GARMIN_LEGACY"
+
+
+@dataclass(frozen=True, slots=True)
+class MetricObservation:
+    metric: str
+    value: float
+    unit: str
+    observed_at: datetime
+    source: str
+    provenance_id: str
+    semantic: str = "measured"
+    confidence: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.observed_at.tzinfo is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if self.semantic not in {"measured", "estimated", "manual", "derived", "model_interpreted"}:
+            raise ValueError("semantic must identify the kind of observation")
+        if not self.source or not self.provenance_id or not self.unit:
+            raise ValueError("source, provenance_id, and unit are required")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkoutSession:
+    workout_id: str
+    start_time: datetime
+    end_time: datetime
+    source: str
+    activity_type: str
+    exercises: tuple[dict, ...] = ()
+    physiological_metrics: tuple[MetricObservation, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.start_time.tzinfo is None or self.end_time.tzinfo is None:
+            raise ValueError("workout times must be timezone-aware")
+        if self.end_time <= self.start_time:
+            raise ValueError("workout end_time must follow start_time")
+        if not self.workout_id or not self.source or not self.activity_type:
+            raise ValueError("workout identity, source, and activity_type are required")
+
+
+@dataclass(slots=True)
+class IngestResult:
+    accepted: int = 0
+    duplicates: int = 0
+    rejected: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionAssessment:
+    state: DecisionState
+    confidence: str
+    factors: tuple[str, ...]
+    missing: tuple[str, ...]
+    automated_action: bool = False
+
+
+def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
+    key = unit.strip().lower()
+    if metric in {"body_mass", "weight"}:
+        if key in {"lb", "lbs", "pound", "pounds"}:
+            return round(value * 0.45359237, 6), "kg"
+        if key == "kg":
+            return value, "kg"
+    if metric == "distance":
+        if key in {"mi", "mile", "miles"}:
+            return round(value * 1.609344, 6), "km"
+        if key == "km":
+            return value, "km"
+    if metric in {"sleep_duration", "workout_duration"}:
+        if key in {"h", "hr", "hour", "hours"}:
+            return round(value * 60, 6), "min"
+        if key in {"min", "minute", "minutes"}:
+            return value, "min"
+    if metric == "heart_rate" and key == "bpm":
+        return value, "bpm"
+    if metric == "hrv" and key == "ms":
+        return value, "ms"
+    if metric == "active_energy" and key in {"kcal", "cal"}:
+        return value, "kcal"
+    # Apple Health / ChatGPT Health catalog. Keep this explicit: accepting an
+    # unknown unit would make a plausible-looking Health OS conclusion unsafe.
+    if metric in {"resting_heart_rate", "walking_heart_rate_average"} and key == "bpm":
+        return value, "bpm"
+    if metric in {"oxygen_saturation", "body_fat_percentage", "walking_asymmetry", "double_support_percentage"} and key in {"%", "percent", "percentage"}:
+        return value, "%"
+    if metric in {"respiratory_rate"} and key in {"breaths/min", "breaths_per_minute", "brpm"}:
+        return value, "breaths/min"
+    if metric in {"systolic_blood_pressure", "diastolic_blood_pressure"} and key in {"mmhg", "mm hg"}:
+        return value, "mmHg"
+    if metric in {"steps", "flights_climbed"} and key in {"count", "steps", "flights"}:
+        return value, "count"
+    if metric in {"exercise_time", "stand_time", "mindfulness_duration"} and key in {"min", "minute", "minutes"}:
+        return value, "min"
+    if metric in {"lean_body_mass"} and key == "kg":
+        return value, "kg"
+    if metric == "height":
+        if key in {"m", "meter", "meters"}:
+            return round(value * 100, 6), "cm"
+        if key in {"cm", "centimeter", "centimeters"}:
+            return value, "cm"
+    if metric == "bmi" and key in {"kg/m2", "kg/m²"}:
+        return value, "kg/m2"
+    if metric in {"walking_speed", "stair_ascent_speed", "stair_descent_speed"} and key in {"km/h", "kph"}:
+        return value, "km/h"
+    if metric == "step_length" and key in {"cm", "centimeter", "centimeters"}:
+        return value, "cm"
+    if metric in {"dietary_protein", "dietary_carbohydrates", "dietary_fat", "dietary_fiber", "dietary_sugar", "dietary_saturated_fat"} and key in {"g", "gram", "grams"}:
+        return value, "g"
+    if metric in {"dietary_sodium", "dietary_potassium", "dietary_calcium", "dietary_magnesium", "dietary_phosphorus", "dietary_iron", "dietary_vitamin_c"} and key in {"mg", "milligram", "milligrams"}:
+        return value, "mg"
+    if metric in {"environmental_noise", "headphone_noise"} and key in {"db", "dba", "db(a)"}:
+        return value, "dBA"
+    raise ValueError(f"unsupported unit {unit!r} for metric {metric!r}")
+
+
+class HealthOS:
+    """In-memory reference implementation of the policy-bearing Health OS core.
+
+    Persistence and producer authentication belong to the deployment adapter;
+    this class owns semantics, idempotence, provenance, and safety checks.
+    """
+
+    def __init__(self, timezone: str | tzinfo = "America/Mexico_City") -> None:
+        # Deployments use the IANA name; accepting a tzinfo keeps tests and
+        # offline import tools deterministic even on hosts without a zoneinfo DB.
+        self.timezone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
+        self._observations: dict[str, MetricObservation] = {}
+        self._workouts: dict[str, WorkoutSession] = {}
+        self._workout_links: dict[str, set[str]] = {}
+        self._apple_baseline_started: datetime | None = None
+
+    @staticmethod
+    def _observation_key(item: MetricObservation) -> str:
+        raw = "|".join((item.source, item.provenance_id, item.metric, item.observed_at.isoformat()))
+        return sha256(raw.encode()).hexdigest()
+
+    def ingest_observations(self, observations: Iterable[MetricObservation]) -> IngestResult:
+        result = IngestResult()
+        for original in observations:
+            try:
+                value, unit = _canonical_unit(original.metric, original.value, original.unit)
+                item = MetricObservation(
+                    metric=original.metric, value=value, unit=unit,
+                    observed_at=original.observed_at, source=original.source,
+                    provenance_id=original.provenance_id, semantic=original.semantic,
+                    confidence=original.confidence,
+                )
+            except ValueError as exc:
+                result.rejected.append(str(exc))
+                continue
+            key = self._observation_key(item)
+            if key in self._observations:
+                result.duplicates += 1
+            else:
+                self._observations[key] = item
+                result.accepted += 1
+        return result
+
+    @staticmethod
+    def _overlap(a: WorkoutSession, b: WorkoutSession) -> timedelta:
+        return max(timedelta(), min(a.end_time, b.end_time) - max(a.start_time, b.start_time))
+
+    @staticmethod
+    def _workout_key(session: WorkoutSession) -> str:
+        return sha256(f"{session.source}|{session.workout_id}".encode()).hexdigest()
+
+    def ingest_workout(self, session: WorkoutSession) -> str:
+        """Store a session or link it to its matching Apple/Speediance session.
+
+        A Speediance strength session and an Apple Health strength workout are
+        one logical workout only if their activity type agrees and they overlap
+        by at least five minutes.  Near timestamps alone never merge sessions.
+        """
+        key = self._workout_key(session)
+        if key in self._workouts:
+            return key
+        for existing_key, existing in self._workouts.items():
+            compatible_sources = {existing.source, session.source} == {APPLE_HEALTH, SPEEDIANCE}
+            overlap = self._overlap(existing, session)
+            shorter = min(existing.end_time - existing.start_time, session.end_time - session.start_time)
+            starts_close = abs(existing.start_time - session.start_time) <= timedelta(minutes=15)
+            if compatible_sources and existing.activity_type == session.activity_type and starts_close and overlap >= shorter / 2:
+                self._workouts[key] = session
+                linked = self._workout_links.setdefault(existing_key, {existing_key})
+                linked.add(key)
+                self._workout_links[key] = linked
+                return key
+        self._workouts[key] = session
+        self._workout_links[key] = {key}
+        return key
+
+    def logical_workouts(self) -> list[tuple[WorkoutSession, ...]]:
+        emitted: set[str] = set()
+        groups: list[tuple[WorkoutSession, ...]] = []
+        for key, links in self._workout_links.items():
+            if key in emitted:
+                continue
+            emitted.update(links)
+            groups.append(tuple(self._workouts[item] for item in sorted(links)))
+        return groups
+
+    def set_apple_transition(self, started_at: datetime) -> None:
+        if started_at.tzinfo is None:
+            raise ValueError("started_at must be timezone-aware")
+        self._apple_baseline_started = started_at
+
+    def baseline_era(self, at: datetime) -> BaselineEra:
+        if at.tzinfo is None:
+            raise ValueError("at must be timezone-aware")
+        if self._apple_baseline_started is None or at < self._apple_baseline_started:
+            return BaselineEra.GARMIN
+        coverage = {o.observed_at.astimezone(self.timezone).date() for o in self._observations.values()
+                    if o.source == APPLE_HEALTH and o.observed_at >= self._apple_baseline_started}
+        if len(coverage) < 14:
+            return BaselineEra.APPLE_TRANSITION
+        return BaselineEra.APPLE_BASELINE
+
+    def metric_baseline_days(self, metric: str, at: datetime, window_days: int = 42) -> int:
+        """Number of Apple local days supporting one metric's current baseline.
+
+        Baselines belong to individual metrics; a long steps history cannot make
+        a seven-day HRV series look mature.
+        """
+        if at.tzinfo is None:
+            raise ValueError("at must be timezone-aware")
+        lower = at - timedelta(days=window_days)
+        return len({self.local_day(x.observed_at) for x in self._observations.values()
+                    if x.source == APPLE_HEALTH and x.metric == metric and x.observed_at >= lower
+                    and x.semantic != "model_interpreted"})
+
+    def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
+        return self.metric_baseline_days(metric, at) >= 28
+
+    def assess_readiness(self, now: datetime, subjective_flags: Iterable[str] = ()) -> DecisionAssessment:
+        """Return a conservative, explainable state; never changes a plan itself."""
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        flags = {flag.strip().lower() for flag in subjective_flags}
+        urgent = flags & {"chest_pain", "dizziness", "shortness_of_breath"}
+        if urgent:
+            return DecisionAssessment(DecisionState.ESCALAR, "high", ("acute subjective safety flag",), (), False)
+        quality = self.data_quality(now)
+        if quality["stale"] or quality["legacy_after_transition"]:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("data quality does not support a readiness decision",), ("recent Apple Health coverage",), False)
+        required = ("sleep_duration", "resting_heart_rate")
+        missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
+        if missing:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
+        interpreted = [x for x in self._observations.values() if x.semantic == "model_interpreted" and x.observed_at >= now - timedelta(days=3)]
+        if interpreted:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("model-interpreted values cannot drive readiness",), (), False)
+        return DecisionAssessment(DecisionState.ACTIVA, "medium", ("recent measured coverage and stable metric baselines",), (), False)
+
+    def local_day(self, at: datetime) -> str:
+        return at.astimezone(self.timezone).date().isoformat()
+
+    def data_quality(self, now: datetime) -> dict[str, object]:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        apple = [x for x in self._observations.values() if x.source == APPLE_HEALTH]
+        days = {self.local_day(x.observed_at) for x in apple}
+        stale = not apple or max(x.observed_at for x in apple) < now - timedelta(days=2)
+        mixed = [x.metric for x in self._observations.values() if x.source == GARMIN_LEGACY and self.baseline_era(x.observed_at) != BaselineEra.GARMIN]
+        return {
+            "coverage_days": len(days),
+            "stale": stale,
+            "legacy_after_transition": sorted(set(mixed)),
+            "logical_workouts": len(self.logical_workouts()),
+            "raw_workouts": len(self._workouts),
+            "pass": not stale and not mixed,
+        }
