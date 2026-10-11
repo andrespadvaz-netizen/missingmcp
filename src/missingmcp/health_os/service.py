@@ -18,6 +18,7 @@ from .. import security, store
 from ..config import Config, load_config
 from ..log import resolve_log_level, setup_logging
 from .persistence import HealthOSRepository
+from .apple_export import parse_apple_health_export
 
 
 def build_health_os_app(config: Config) -> Starlette:
@@ -45,6 +46,19 @@ def build_health_os_app(config: Config) -> Starlette:
         if not authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "quality": repo.quality(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
+
+    async def apple_export(request):
+        if not authorized(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        xml = await security.read_body_limited(request, max_bytes=64 * 1024 * 1024)
+        if xml is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            parsed = parse_apple_health_export(xml)
+            result = repo.ingest("APPLE_HEALTH", parsed.observations, parsed.workouts)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+        return JSONResponse({"status": "OK", **result, "ignored_apple_types": list(parsed.ignored_types)}, headers={"Cache-Control": "no-store"})
 
     async def brief(request):
         if not authorized(request):
@@ -75,6 +89,7 @@ def build_health_os_app(config: Config) -> Starlette:
 
     return Starlette(routes=[
         Route("/healthz", healthz), Route("/health-os/ingest", ingest, methods=["POST"]),
+        Route("/health-os/import/apple-export", apple_export, methods=["POST"]),
         Route("/health-os/quality", quality), Route("/health-os/brief", brief, methods=["POST"]),
         Route("/health-os/transition", transition, methods=["POST"]),
     ])

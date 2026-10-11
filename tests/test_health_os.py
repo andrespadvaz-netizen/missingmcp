@@ -9,6 +9,7 @@ from missingmcp.health_os.persistence import HealthOSRepository
 from missingmcp import store
 from missingmcp.app import build_app
 from missingmcp.health_os.service import build_health_os_app
+from missingmcp.health_os.apple_export import parse_apple_health_export
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -177,6 +178,22 @@ def test_isolated_service_has_no_garmin_surface(tmp_path):
     assert client.get("/garmin").status_code == 404
     transition = client.post("/health-os/transition", json={"started_at": "2026-10-01T08:00:00-06:00"}, headers={"Authorization": f"Bearer {key}"})
     assert transition.json()["baseline_era"] == "ERA_APPLE_TRANSITION"
+
+
+def test_native_apple_export_is_raw_provenance_bearing_input(tmp_path):
+    xml = b'''<?xml version="1.0"?><HealthData>
+      <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" unit="count/min" value="55" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600" creationDate="2026-10-01 08:00:01 -0600"/>
+      <Record type="HKQuantityTypeIdentifierOxygenSaturation" sourceName="Apple Watch" unit="%" value="0.97" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600" creationDate="2026-10-01 08:00:01 -0600"/>
+      <Record type="HKQuantityTypeIdentifierUnknown" value="1" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+    </HealthData>'''
+    parsed = parse_apple_health_export(xml)
+    assert parsed.observations[0]["provenance_id"].startswith("apple-export:")
+    assert parsed.observations[1]["value"] == 97
+    assert parsed.ignored_types == ("HKQuantityTypeIdentifierUnknown",)
+    key = "h" * 40
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    response = TestClient(build_health_os_app(config)).post("/health-os/import/apple-export", content=xml, headers={"Authorization": f"Bearer {key}"})
+    assert response.json()["accepted"] == 2
 
 
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():

@@ -13,9 +13,21 @@ de ChatGPT no acredita por sí misma una exportación automática hacia Metis o
 Notion. Copiar valores manualmente no es una solución aceptable: convierte
 narrativa de modelo en evidencia.
 
-## Adaptador mínimo aceptable
+## Adaptador implementado: exportación nativa
 
-Un transporte productivo deberá usar autorización mínima por categoría, enviar
+El servicio aislado incorpora `POST /health-os/import/apple-export`. Acepta
+directamente `export.xml` generado por Apple Health, extrae sólo tipos explícitamente
+soportados y produce identificadores de procedencia deterministas a partir de los
+campos originales de cada muestra. Los tipos desconocidos se devuelven como
+`ignored_apple_types`; nunca se adivinan ni se convierten.
+
+Este es un transporte de evidencia cruda por lotes, no una copia de conversación
+ni una sincronización continua. Requiere exportar el archivo desde el iPhone y
+enviarlo al servicio privado autenticado.
+
+## Criterio restante para automatización continua
+
+sólo un productor iPhone autorizado por categoría podrá enviar
 sólo registros crudos a `/health-os/ingest`, conservar `provenance_id`, offset,
 unidad y semántica, cifrar persistencia y demostrar cinco días consecutivos de
 cobertura sin intervención manual.
