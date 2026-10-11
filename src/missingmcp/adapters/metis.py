@@ -16,7 +16,9 @@ TOOLS = [
      "context, constraints and qualifications. Do not summarize away the requested action. "
      "This tool does not receive your conversation or project instructions automatically. "
      "Populate the required structured context yourself from the current conversation; never ask the user to repeat an unambiguous established project. "
-     "Use its registered project ID (for example ANDREA); source records where YOU obtained it, not a new permission. "
+     "Use its registered project or subproject ID (for example ANDREA or PERSONAL/HEALTH_OS); "
+     "a root list is not an exhaustive subproject registry. Never collapse an established subproject to its root. "
+     "source records where YOU obtained it, not a new permission. "
      "Make request self-contained using the relevant context ALREADY available in the current conversation "
      "or visible project instructions: include the established project and the minimal facts needed to "
      "resolve references such as 'this proposal'. Do not ask Andres to repeat available information. "
@@ -39,7 +41,7 @@ TOOLS = [
                                   "idempotency_key":{"type":"string","minLength":16,"maxLength":128},
                                   "context":{"type":"object","additionalProperties":False,
                                     "properties":{"project":{"type":"string","minLength":1,"maxLength":128,
-                                      "description":"Exact project/subproject registry ID already established by the operator in this conversation."},
+                                      "description":"Exact project/subproject ID already established in this conversation. Slash-qualified IDs are valid (for example PERSONAL/HEALTH_OS); do not replace them with the root project."},
                                       "source":{"type":"string","enum":["current_request","current_conversation","visible_project_instructions"]}},
                                     "required":["project","source"]}},
                     "required":["request","idempotency_key","context"]},
