@@ -34,6 +34,11 @@ function registerUnitContextResolver() {
       'no acepta prefijos parciales como contexto válido');
     var legacy = ContextResolver.resolve('Contexto: PERSONAL/HEALTH_OS\nAudita el gate.', {});
     t.equals(legacy.resolved_context, 'PERSONAL', 'la cabecera canónica heredada conserva compatibilidad');
+    var visibleLabel = ContextResolver.resolve('Contexto: PERSONAL / Health OS\nAudita el gate.', {});
+    t.equals(visibleLabel.resolved_context, 'PERSONAL',
+      'la etiqueta humana con espacios conserva la misma frontera de contexto');
+    t.deepEquals(visibleLabel.candidates, ['PERSONAL'],
+      'los espacios visuales no incorporan contextos adicionales');
   });
 
   TestRunner.unit('ContextResolver', 'detecta conflicto multi-contexto', function (t) {

@@ -46,7 +46,11 @@ var ContextResolver = (function () {
     // names mentioned inside a subproject's task do not broaden its scope.
     var explicit = String(operatorRequest).match(/^\s*Contexto:\s*([^\r\n]+)\s*(?:\r?\n|$)/i);
     if (explicit) {
-      var declared=normalize(explicit[1].trim());
+      // Los clientes pueden presentar el subproyecto con espacios visuales
+      // alrededor del separador (por ejemplo `PERSONAL / Health OS`). Esa
+      // variante conserva la misma frontera jerárquica y no debe convertir
+      // una solicitud explícita en UNSCOPED.
+      var declared=normalize(explicit[1].trim()).replace(/\s*\/\s*/g, '/');
       function matches(label) {
         var value=normalize(label);
         return declared===value || declared.indexOf(value+'.')===0 || declared.indexOf(value+'/')===0;
