@@ -27,11 +27,13 @@ def validate(args):
         raise RequestError(f"request must contain 1–{MAX_REQUEST_BYTES} UTF-8 bytes.")
     if not isinstance(key, str) or not KEY.fullmatch(key):
         raise RequestError("idempotency_key must contain 16–128 letters, digits, _ or -.")
+    context_project = "UNSCOPED"
     if "context" in args:
         context = args["context"]
         if not isinstance(context, dict) or set(context) != {"project", "source"}:
             raise RequestError("context requires project and source.")
         project = context["project"]
+        context_project = project
         if not isinstance(project, str) or not re.fullmatch(r"[A-Z0-9_.-]+(?:/[A-Z0-9_.-]+)*", project) or len(project) > 128 or any(part in {'.', '..'} for part in project.split('/')):
             raise RequestError("context.project requires the exact registered project ID.")
         if not isinstance(context['source'], str) or context["source"] not in {"current_request", "current_conversation", "visible_project_instructions"}:
@@ -44,7 +46,7 @@ def validate(args):
         text = f"Contexto: {project}\nProcedencia del contexto declarada por el cliente: {context['source']}\n\n{text}"
         if len(text.encode()) > MAX_REQUEST_BYTES:
             raise RequestError(f"request plus context exceeds {MAX_REQUEST_BYTES} UTF-8 bytes; no content was truncated.")
-    return text, key
+    return text, key, context_project
 
 
 class Queue:
@@ -72,11 +74,13 @@ class Queue:
         columns = {x[1] for x in self.db.execute("PRAGMA table_info(metis_executions)")}
         if "origin_model" not in columns:
             self.db.execute("ALTER TABLE metis_executions ADD COLUMN origin_model TEXT NOT NULL DEFAULT 'ANTHROPIC'")
+        if "context_project" not in columns:
+            self.db.execute("ALTER TABLE metis_executions ADD COLUMN context_project TEXT NOT NULL DEFAULT 'UNSCOPED'")
 
     def create(self, owner, args, origin_model="ANTHROPIC"):
         if origin_model not in {"ANTHROPIC", "OPENAI"}:
             raise RequestError("invalid_origin")
-        text, key = validate(args)
+        text, key, context_project = validate(args)
         fp = hashlib.sha256(text.encode()).hexdigest()
         self.db.execute("BEGIN IMMEDIATE")
         try:
@@ -85,8 +89,8 @@ class Queue:
                 if row["fingerprint"] != fp:
                     raise RequestError("idempotency_conflict: reuse the key only for the identical request.")
             else:
-                if self.db.execute("SELECT 1 FROM metis_pause LIMIT 1").fetchone():
-                    raise RequestError("gateway_paused: an uncertain execution requires operator review.")
+                if self.db.execute("SELECT 1 FROM metis_pause p JOIN metis_executions e ON e.id=p.execution_id WHERE e.context_project=? LIMIT 1", (context_project,)).fetchone():
+                    raise RequestError("context_paused: an uncertain execution in this context requires operator review.")
                 # Durable ingress limits supplement OAuth's per-IP/token limits.
                 now = time.time()
                 if self.db.execute("SELECT count(*) FROM metis_executions WHERE created>?", (now-3600,)).fetchone()[0] >= 20:
@@ -94,8 +98,8 @@ class Queue:
                 if self.db.execute("SELECT count(*) FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED','APPLYING')").fetchone()[0] >= 5:
                     raise RequestError("queue_full")
                 eid = str(uuid.uuid4())
-                self.db.execute("INSERT INTO metis_executions (id,owner,idem,fingerprint,request_enc,status,created) VALUES (?,?,?,?,?,'QUEUED',?)",
-                                (eid, owner, key, fp, encrypt(self.secret, text), now))
+                self.db.execute("INSERT INTO metis_executions (id,owner,idem,fingerprint,request_enc,status,created,context_project) VALUES (?,?,?,?,?,'QUEUED',?,?)",
+                                (eid, owner, key, fp, encrypt(self.secret, text), now, context_project))
                 self.db.execute("UPDATE metis_executions SET origin_model=? WHERE id=?", (origin_model, eid))
                 row = self.db.execute("SELECT * FROM metis_executions WHERE id=?", (eid,)).fetchone()
             self.db.execute("COMMIT")
@@ -121,13 +125,16 @@ class Queue:
         result["writes_paused"] = bool(self.db.execute("SELECT 1 FROM metis_write_pause LIMIT 1").fetchone())
         return {**result, "execution_id": row["id"], "correlation_id": row["id"],
                 "status": row["status"], "created_at": row["created"],
-                "gateway_paused": bool(self.db.execute("SELECT 1 FROM metis_pause LIMIT 1").fetchone()),
+                "context_project": row["context_project"],
+                "context_paused": bool(self.db.execute("SELECT 1 FROM metis_pause p JOIN metis_executions e ON e.id=p.execution_id WHERE e.context_project=? LIMIT 1", (row["context_project"],)).fetchone()),
+                "gateway_paused": False,
                 "poll_after_seconds": 15 if row["status"] not in TERMINAL else None}
 
     def next(self):
-        if self.db.execute("SELECT 1 FROM metis_pause LIMIT 1").fetchone():
-            return None
-        return self.db.execute("SELECT * FROM metis_executions WHERE status IN ('QUEUED','DISPATCHED','APPLYING') ORDER BY seq LIMIT 1").fetchone()
+        return self.db.execute("""SELECT e.* FROM metis_executions e
+            WHERE e.status IN ('QUEUED','DISPATCHED','APPLYING')
+              AND NOT EXISTS (SELECT 1 FROM metis_pause p JOIN metis_executions pe ON pe.id=p.execution_id WHERE pe.context_project=e.context_project)
+            ORDER BY e.seq LIMIT 1""").fetchone()
 
     def claim(self, row):
         return self.db.execute("UPDATE metis_executions SET status='DISPATCHED', dispatched=? WHERE id=? AND status='QUEUED'",

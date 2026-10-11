@@ -238,6 +238,19 @@ async def test_uncertain_transport_pauses_new_spend(queue):
     assert queue.create('operator',REQUEST)['execution_id'] == one['execution_id']
 
 
+def test_uncertain_execution_pauses_only_its_context(queue):
+    a={**REQUEST,'idempotency_key':'context-a-request-0001','context':{'project':'ANDREA','source':'current_request'}}
+    b={**REQUEST,'idempotency_key':'context-b-request-0001','context':{'project':'SHOKKO','source':'current_request'}}
+    first=queue.create('operator',a); row=queue.next(); queue.claim(row)
+    queue.finish(row,{'status':'FAILED','cost_known':False,'cost_usd':None,'requires_review':True})
+    with pytest.raises(RequestError,match='context_paused'):
+        queue.create('operator',{**a,'idempotency_key':'context-a-request-0002'})
+    second=queue.create('operator',b)
+    assert second['context_project']=='SHOKKO' and second['context_paused'] is False
+    assert queue.next()['id']==second['execution_id']
+    assert queue.get('operator',first['execution_id'])['context_paused'] is True
+
+
 def test_http_auth_isolation_and_malformed_request(tmp_path):
     from starlette.testclient import TestClient
     from missingmcp.app import build_app

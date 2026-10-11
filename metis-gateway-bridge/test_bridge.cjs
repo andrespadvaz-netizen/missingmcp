@@ -7,7 +7,7 @@ let tests = 0;
 function fixture() {
   const secret = 'test-bridge-secret'.repeat(3);
   const data = {GATEWAY_BRIDGE_SECRET: secret};
-  let calls = 0, locked = false, level = 'LEVEL_0';
+  let calls = 0, locked = false, level = 'LEVEL_0', triggers = [];
   let limits = {MAX_RUN_BUDGET_USD:2,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:25};
   const blob = (x,contentType) => ({contentType,getBytes:()=>Buffer.isBuffer(x)?x:Buffer.from(x), getDataAsString:()=>Buffer.from(x).toString()});
   const props = {getProperty:k=>data[k]??null, setProperty:(k,v)=>{data[k]=v;},
@@ -15,6 +15,8 @@ function fixture() {
   const context = {
     PropertiesService:{getScriptProperties:()=>props},
     LockService:{getScriptLock:()=>({tryLock:()=>{if(locked)return false;locked=true;return true;},releaseLock:()=>{locked=false;}})},
+    ScriptApp:{getProjectTriggers:()=>triggers.map(name=>({getHandlerFunction:()=>name})),
+      newTrigger:name=>({timeBased:()=>({after:()=>({create:()=>{triggers.push(name);}})})})},
     ContentService:{MimeType:{JSON:'json'},createTextOutput:s=>({setMimeType:()=>JSON.parse(s)})},
     Utilities:{Charset:{UTF_8:'utf8'}, DigestAlgorithm:{SHA_256:'sha256'},
       computeHmacSha256Signature:(p,s)=>[...crypto.createHmac('sha256',s).update(p).digest()],
@@ -32,13 +34,21 @@ function fixture() {
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(__dirname+'/Bridge.gs','utf8'), context);
   vm.runInContext(fs.readFileSync(__dirname+'/WriteBridge.gs','utf8'), context);
-  function request(seq=1,action='run',override={}) {
+  function rawRequest(seq=1,action='run',override={}) {
     const p = {seq,id:'11111111-1111-4111-8111-111111111111',action,request:'Consulta Metis',
       fingerprint:crypto.createHash('sha256').update('Consulta Metis').digest('hex'),timestamp:Math.floor(Date.now()/1000),...override};
     const payload=JSON.stringify(p), signature=crypto.createHmac('sha256',secret).update(payload).digest('hex');
     return context.doPost({postData:{contents:JSON.stringify({payload,signature})}});
   }
-  return {context,data,request,calls:()=>calls,level:()=>level};
+  function drain() {
+    let guard=20;
+    while(triggers.length && guard--) {const name=triggers.shift();context[name]();}
+    assert.ok(guard>0,'background worker did not terminate');
+  }
+  function request(seq=1,action='run',override={}) {
+    const first=rawRequest(seq,action,override);if(first.state==='ACCEPTED'){drain();return rawRequest(seq,'status',override);}return first;
+  }
+  return {context,data,request,rawRequest,drain,calls:()=>calls,level:()=>level,triggers:()=>triggers.length};
 }
 function test(name, fn) {fn(); tests++; console.log('PASS '+name);}
 test('Full artifact survives signed transport and retries without truncation',()=>{
@@ -52,6 +62,12 @@ test('Full artifact survives signed transport and retries without truncation',()
   assert.equal(r.state,'DONE');assert.equal(received,text);
   assert.equal(r.result.terminal_completion[0].stop_reason,'completed');
   assert.equal(f.request(1,'run',payload).state,'DONE');
+});
+test('Run returns durable ACK before the engine and status is read-only',()=>{
+  const f=fixture();const ack=f.rawRequest();
+  assert.equal(ack.state,'ACCEPTED');assert.equal(f.calls(),0);assert.equal(f.triggers(),1);
+  assert.equal(f.rawRequest(1,'status').state,'ACCEPTED');assert.equal(f.calls(),0);
+  f.drain();assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);
 });
 test('Bridge enforces UTF-8 limit before spending and accepts escaped boundary',()=>{
   for(const text of ['é'.repeat(64000), '\u0001'.repeat(128000)]) {
@@ -77,6 +93,9 @@ test('Retry after response loss does not repeat paid run',()=>{
 test('Old sequence never runs after cache advances',()=>{
   const f=fixture();f.request();f.request(2);assert.equal(f.request().state,'GONE');assert.equal(f.calls(),2);
 });
+test('A higher sequence may skip a context-scoped paused lane',()=>{
+  const f=fixture();f.request();assert.equal(f.request(3).state,'DONE');assert.equal(f.calls(),2);
+});
 test('Conflicting identity or payload cannot reuse receipt',()=>{
   const f=fixture();f.request();assert.equal(f.request(1,'run',{fingerprint:'0'.repeat(64)}).state,'CONFLICT');assert.equal(f.calls(),1);
 });
@@ -84,9 +103,10 @@ test('Missing delivery becomes tombstone; late run cannot spend',()=>{
   const f=fixture();assert.equal(f.request(1,'status').result.error,'DISPATCH_NOT_DELIVERED');
   f.request();assert.equal(f.calls(),0);
 });
-test('Terminated engine is technical failure, no automatic restart',()=>{
-  const f=fixture();f.request();let receipt=JSON.parse(f.data.receipt);receipt.state='RUNNING';
-  f.data.receipt=JSON.stringify(receipt);assert.equal(f.request(1,'status').result.error,'ENGINE_INTERRUPTED');
+test('Status never executes and watchdog makes a killed worker terminal',()=>{
+  const f=fixture();f.request();let receipt=JSON.parse(f.data.receipt);receipt.state='RUNNING';receipt.started_at=0;
+  f.data.receipt=JSON.stringify(receipt);assert.equal(f.rawRequest(1,'status').state,'RUNNING');
+  f.context.bridgeWatchdogTick();assert.equal(f.rawRequest(1,'status').result.error,'ENGINE_WORKER_INTERRUPTED');
   f.request();assert.equal(f.calls(),1);
 });
 test('Durable execution advances one paid provider call per status without duplicate accounting',()=>{
@@ -115,9 +135,10 @@ test('Durable execution advances one paid provider call per status without dupli
     return {status:'COMPLETED',execution_id:opts.execution_id,route:'CROSS_AUDIT',final_answer:'complete',
       blocks:[],limits:{cost_known:true,estimated_cost_usd:cost}};
   };
-  assert.equal(f.request().state,'RUNNING');
-  assert.equal(f.request(1,'status').state,'RUNNING');
-  const done=f.request(1,'status');
+  assert.equal(f.rawRequest().state,'ACCEPTED');
+  f.context.bridgeWorkerTick();assert.equal(f.rawRequest(1,'status').state,'RUNNING');
+  f.context.bridgeWorkerTick();assert.equal(f.rawRequest(1,'status').state,'RUNNING');
+  f.context.bridgeWorkerTick();const done=f.rawRequest(1,'status');
   assert.equal(done.state,'DONE');assert.equal(done.result.status,'COMPLETED');
   assert.equal(paid,3);assert.equal(accounted,3);
   assert.deepEqual(executionIds,[f.request().id,f.request().id,f.request().id]);
@@ -136,11 +157,12 @@ test('Fail closed on missing secret, invalid signature, stale request and finger
   assert.equal(f.context.doPost({postData:{contents:JSON.stringify({payload:'{}',signature:'0'.repeat(64)})}}).error,'unauthorized');
   delete f.data.GATEWAY_BRIDGE_SECRET;assert.equal(f.request().error,'unauthorized');assert.equal(f.calls(),0);
 });
-test('Pin remains immutable and bridge contains no log/trigger/provider endpoint',()=>{
+test('Pin remains immutable and async trigger scope is explicit',()=>{
   const manifest=JSON.parse(fs.readFileSync(__dirname+'/appsscript.json'));
   assert.equal(manifest.dependencies.libraries[0].version,'32');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
-  assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|newTrigger|api\.openai\.com|api\.anthropic\.com/);
+  assert.ok(manifest.oauthScopes.includes('https://www.googleapis.com/auth/script.scriptapp'));
+  assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|api\.openai\.com|api\.anthropic\.com/);
 });
 console.log(`${tests} bridge checks passed`);
 

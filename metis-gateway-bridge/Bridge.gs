@@ -1,6 +1,7 @@
 /** Transport only. Separate project; Engine library pinned to reviewed v9.
  * One monotonic receipt survives forever; only the latest result is cached.
- * Railway persists it before sending the next sequence. Old sequences never run.
+ * Railway persists it before sending a higher sequence. Old sequences never run;
+ * gaps are valid because a paused context may be skipped while another proceeds.
  * Never log requests, results, exceptions or signing/provider credentials.
  */
 function doPost(e) {
@@ -37,7 +38,72 @@ function json_(value) {
   return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);
 }
 
+/** Persist first and acknowledge quickly. Provider work runs outside the HTTP request. */
 function dispatch_(p) {
+  var props = PropertiesService.getScriptProperties();
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(100)) { return {id:p.id, seq:p.seq, state:'BUSY'}; }
+  try {
+    var receipt = JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+    if (p.seq < receipt.seq) { return {id:p.id, seq:p.seq, state:'GONE'}; }
+    if (p.seq === receipt.seq) {
+      if (p.id !== receipt.id || p.fingerprint !== receipt.fingerprint) return {id:p.id,seq:p.seq,state:'CONFLICT'};
+      if (receipt.state === 'DONE') return cached_(props, receipt);
+      return {id:receipt.id,seq:receipt.seq,state:receipt.state === 'ACCEPTED' ? 'ACCEPTED' : 'RUNNING',checkpoint:receipt.next_call || null};
+    }
+    if (p.action === 'status') {
+      receipt={seq:p.seq,id:p.id,fingerprint:p.fingerprint,state:'RUNNING',chunks:0,durable_chunks:0};
+      props.setProperty('receipt',JSON.stringify(receipt));
+      finish_(props,receipt,{status:'FAILED',error:'DISPATCH_NOT_DELIVERED',cost_usd:0,cost_known:true,engine_execution_id:null,final_answer:null});
+      return cached_(props,receipt);
+    }
+    if (p.origin_model !== undefined && ['OPENAI','ANTHROPIC'].indexOf(p.origin_model) < 0) return {id:p.id,seq:p.seq,state:'INVALID_ORIGIN'};
+    if (typeof p.request !== 'string' || !p.request.trim() || Utilities.newBlob(p.request).getBytes().length > 128000) return {id:p.id,seq:p.seq,state:'INVALID_REQUEST'};
+    var hash=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,p.request,Utilities.Charset.UTF_8)
+      .map(function(b){return ('0'+((b+256)%256).toString(16)).slice(-2);}).join('');
+    if (hash !== p.fingerprint) return {id:p.id,seq:p.seq,state:'CONFLICT'};
+    receipt={seq:p.seq,id:p.id,fingerprint:p.fingerprint,state:'ACCEPTED',chunks:0,durable_chunks:0,accepted_at:Date.now()};
+    props.setProperty('receipt',JSON.stringify(receipt));
+    clearDurable_(props,receipt);
+    storeDurable_(props,receipt,{request:p.request,origin_model:p.origin_model || 'ANTHROPIC',calls:[]});
+    scheduleBridgeWorker_();
+    return {id:p.id,seq:p.seq,state:'ACCEPTED'};
+  } finally { lock.releaseLock(); }
+}
+
+/** Installable trigger entry point. It is the only path that runs the engine. */
+function bridgeWorkerTick() {
+  var props=PropertiesService.getScriptProperties();
+  var receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+  if (['ACCEPTED','CHECKPOINT'].indexOf(receipt.state) < 0) return;
+  execute_( {action:'status',seq:receipt.seq,id:receipt.id,fingerprint:receipt.fingerprint} );
+  receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+  if (receipt.state === 'CHECKPOINT') scheduleBridgeWorker_();
+}
+
+/** A separate trigger converts a killed Apps Script worker into a diagnosable terminal receipt. */
+function bridgeWatchdogTick() {
+  var props=PropertiesService.getScriptProperties();
+  var lock=LockService.getScriptLock();
+  if (!lock.tryLock(100)) return;
+  try {
+    var receipt=JSON.parse(props.getProperty('receipt') || '{"seq":0}');
+    if (receipt.state === 'RUNNING' && Date.now()-(receipt.started_at || 0) > 420000) {
+      finish_(props,receipt,{status:'FAILED',error:'ENGINE_WORKER_INTERRUPTED',failure_stage:'ENGINE_BACKGROUND_WORKER',
+        cost_usd:null,cost_known:false,engine_execution_id:receipt.id,final_answer:null,requires_review:true});
+    }
+  } finally { lock.releaseLock(); }
+}
+
+function scheduleBridgeWorker_() {
+  ScriptApp.newTrigger('bridgeWorkerTick').timeBased().after(1000).create();
+}
+
+function scheduleBridgeWatchdog_() {
+  ScriptApp.newTrigger('bridgeWatchdogTick').timeBased().after(430000).create();
+}
+
+function execute_(p) {
   var props = PropertiesService.getScriptProperties();
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(100)) { return {id: p.id, seq: p.seq, state: 'BUSY'}; }
@@ -49,7 +115,7 @@ function dispatch_(p) {
       if (p.id !== receipt.id || p.fingerprint !== receipt.fingerprint) {
         return {id:p.id, seq:p.seq, state:'CONFLICT'};
       }
-      if (receipt.state === 'CHECKPOINT') {
+      if (receipt.state === 'CHECKPOINT' || receipt.state === 'ACCEPTED') {
         if (p.action !== 'status') {
           return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
         }
@@ -57,7 +123,9 @@ function dispatch_(p) {
         p.request = durable.request;
         p.origin_model = durable.origin_model;
         receipt.state = 'RUNNING';
+        receipt.started_at = Date.now();
         props.setProperty('receipt', JSON.stringify(receipt));
+        scheduleBridgeWatchdog_();
         resuming = true;
       }
       if (receipt.state === 'RUNNING') {
@@ -126,6 +194,7 @@ function dispatch_(p) {
         receipt.state = 'CHECKPOINT';
         receipt.next_call = durableState.calls.length + 1;
         props.setProperty('receipt', JSON.stringify(receipt));
+        scheduleBridgeWorker_();
         return {id:receipt.id, seq:receipt.seq, state:'RUNNING', checkpoint:receipt.next_call};
       }
       var output = {

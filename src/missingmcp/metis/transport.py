@@ -107,7 +107,7 @@ class Bridge:
         signature = hmac.new(self.secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
         token = private_transport.set(True)
         try:
-            async with httpx.AsyncClient(timeout=390, follow_redirects=True) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                 response = await client.post(self.url, json={"payload": payload, "signature": signature})
                 response.raise_for_status()
                 if len(response.content) > 500000:
@@ -123,7 +123,7 @@ class Bridge:
 class Worker:
     def __init__(self, queue, bridge):
         self.queue, self.bridge = queue, bridge
-        self.last_review = None
+        self.last_review = {}
         self.write_worker = WriteWorker(queue, bridge)
 
     def reconcile_interrupted_receipt(self, row):
@@ -151,18 +151,16 @@ class Worker:
         paused = self.queue.paused_execution()
         if paused:
             if self.reconcile_interrupted_receipt(paused):
-                return
-            if self.last_review is not None and time.monotonic() - self.last_review < 60:
-                return
-            self.last_review = time.monotonic()
-            # A paused gateway may read an explicitly reviewed receipt, never run.
-            try:
-                reply = await self.bridge.call("status", paused)
-                if reply.get("state") == "DONE" and isinstance(reply.get("result"), dict):
-                    self.queue.reconcile_accounting(paused, reply["result"])
-            except (httpx.HTTPError, ValueError, TypeError):
-                pass
-            return
+                paused = None
+            elif time.monotonic() - self.last_review.get(paused["id"], -61) >= 60:
+                self.last_review[paused["id"]] = time.monotonic()
+                # Status is read-only: it can reconcile evidence but never execute.
+                try:
+                    reply = await self.bridge.call("status", paused)
+                    if reply.get("state") == "DONE" and isinstance(reply.get("result"), dict):
+                        self.queue.reconcile_accounting(paused, reply["result"])
+                except (httpx.HTTPError, ValueError, TypeError):
+                    pass
         await self.write_worker.reconcile_known_object()
         row = self.queue.next()
         if not row:
@@ -177,23 +175,26 @@ class Worker:
             action, request = "status", None
         try:
             reply = await self.bridge.call(action, row, request)
-        except (httpx.HTTPError, ValueError, TypeError):
-            self.expire_uncertain(row)
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            self.expire_uncertain(row, _transport_failure_class(exc))
             return  # keep the durable dispatch receipt and reconcile later
         if reply.get("state") == "DONE":
             result = reply.get("result")
             if isinstance(result, dict) and result.get("status") in {"COMPLETED", "FAILED", "REQUIRES_ANDRES"}:
                 self.queue.finish(row, result)
                 return
-        self.expire_uncertain(row)
+        if reply.get("state") in {"ACCEPTED", "RUNNING"}:
+            return
+        self.expire_uncertain(row, "BRIDGE_CONTRACT_REJECTED")
         # Missing/expired bridge receipts are NOT proof no paid call happened.
         # The row remains DISPATCHED; block subsequent spend until inspected.
 
-    def expire_uncertain(self, row):
+    def expire_uncertain(self, row, failure_class="BRIDGE_TRANSPORT_FAILURE"):
         if row["dispatched"] and time.time() - row["dispatched"] > 900:
             self.queue.finish(row, {"status":"FAILED", "error":"TRANSPORT_UNCERTAIN",
                 "requires_review":True, "cost_known":False, "cost_usd":None,
-                "engine_execution_id":None, "final_answer":None})
+                "engine_execution_id":None, "final_answer":None,
+                "failure_stage":"BRIDGE_DELIVERY", "transport_failure_class":failure_class})
 
     async def run(self, stop):
         while not stop.is_set():
@@ -227,3 +228,18 @@ def _validate_lens_context_response(data):
                 or len(document["content"].encode("utf-8")) > 1_200):
             raise ValueError("invalid_lens_context_response")
     return data
+
+
+def _transport_failure_class(exc):
+    if isinstance(exc, httpx.TimeoutException):
+        return "BRIDGE_TIMEOUT"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "BRIDGE_HTTP_ERROR"
+    if isinstance(exc, httpx.HTTPError):
+        return "BRIDGE_CONNECTION_ERROR"
+    value = str(exc)
+    if value == "bridge_response_too_large":
+        return "BRIDGE_RESPONSE_TOO_LARGE"
+    if value == "bridge_correlation_mismatch":
+        return "BRIDGE_CORRELATION_MISMATCH"
+    return "BRIDGE_INVALID_RESPONSE"
