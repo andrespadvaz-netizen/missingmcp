@@ -159,6 +159,8 @@ test('Warm worker advances durable provider calls without trigger latency or dup
   f.context.bridgeWorkerTick();const done=f.rawRequest(1,'status');
   assert.equal(done.state,'DONE');assert.equal(done.result.status,'COMPLETED');
   assert.equal(paid,3);assert.equal(accounted,3);
+  assert.equal(done.result.provider_checkpoint_timings.length,3);
+  assert.ok(done.result.provider_checkpoint_timings.every(x=>typeof x.duration_ms==='number'));
   assert.deepEqual(executionIds,[f.request().id,f.request().id,f.request().id]);
   assert.equal(f.request(1,'status').state,'DONE');assert.equal(paid,3);
 });
