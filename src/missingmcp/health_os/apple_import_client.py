@@ -13,6 +13,7 @@ import os
 import sys
 import zipfile
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 from xml.etree import ElementTree as ET
@@ -20,10 +21,12 @@ from xml.sax import handler, make_parser
 
 import httpx
 
-from .apple_export import _METRICS, _provenance, _value
+from .apple_export import _provenance, observation_from_apple_record
 from .core import APPLE_HEALTH
 
-_BATCH_BYTES = 180_000
+# Keep each request comfortably below the API limit and short enough for the
+# encrypted SQLite writer to remain responsive on a single Railway replica.
+_BATCH_BYTES = 80_000
 
 
 def _records(stream: BinaryIO) -> Iterator[tuple[str, dict[str, Any] | str]]:
@@ -67,20 +70,11 @@ class _StreamingAppleHealthHandler(handler.ContentHandler):
     def startElement(self, name: str, attrs) -> None:  # noqa: N802 - SAX API name
         attributes = dict(attrs.items())
         if name == "Record":
-            apple_type = attributes.get("type", "")
-            spec = _METRICS.get(apple_type)
-            if spec is None:
-                self._receive("ignored", apple_type or "unknown")
+            observation = observation_from_apple_record(attributes)
+            if observation is None:
+                self._receive("ignored", attributes.get("type", "") or "unknown")
                 return
-            metric, unit = spec
-            self._receive("observation", {
-                "metric": metric,
-                "value": _value(attributes["value"], apple_type),
-                "unit": unit,
-                "observed_at": attributes["endDate"],
-                "provenance_id": _provenance(attributes),
-                "semantic": "measured",
-            })
+            self._receive("observation", observation)
         elif name == "Workout":
             self._receive("workout", {
                 "workout_id": _provenance(attributes),
@@ -124,7 +118,7 @@ def _post_batch(client: httpx.Client, endpoint: str, key: str, observations: lis
     return payload
 
 
-def import_zip(zip_path: Path, endpoint: str, key: str) -> dict[str, Any]:
+def import_zip(zip_path: Path, endpoint: str, key: str, since: datetime | None = None) -> dict[str, Any]:
     summary: Counter[str] = Counter()
     ignored: Counter[str] = Counter()
     observations: list[dict[str, Any]] = []
@@ -149,6 +143,10 @@ def import_zip(zip_path: Path, endpoint: str, key: str) -> dict[str, Any]:
                 if kind == "ignored":
                     ignored[str(item)] += 1
                     return
+                observed_at = item["observed_at"] if kind == "observation" else item["end_time"]  # type: ignore[index]
+                if since is not None and datetime.fromisoformat(observed_at) < since:
+                    summary["outside_window"] += 1
+                    return
                 if kind == "observation":
                     observations.append(item)  # type: ignore[arg-type]
                     summary["observations_seen"] += 1
@@ -168,6 +166,7 @@ def import_zip(zip_path: Path, endpoint: str, key: str) -> dict[str, Any]:
         "rejected": summary["rejected"],
         "observations_seen": summary["observations_seen"],
         "workouts_seen": summary["workouts_seen"],
+        "outside_window": summary["outside_window"],
         "ignored_apple_types": sorted(ignored),
     }
 
@@ -176,12 +175,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Import a native Apple Health ZIP into private Health OS")
     parser.add_argument("zip_path", type=Path)
     parser.add_argument("--endpoint", required=True, help="Health OS base HTTPS URL")
+    parser.add_argument("--since", help="Import samples at or after an ISO-8601 instant")
     arguments = parser.parse_args()
     key = os.environ.get("HEALTH_OS_INGEST_KEY")
     if not key:
         raise SystemExit("HEALTH_OS_INGEST_KEY must be provided through the environment")
     try:
-        print(json.dumps(import_zip(arguments.zip_path, arguments.endpoint, key), sort_keys=True))
+        since = datetime.fromisoformat(arguments.since) if arguments.since else None
+        if since is not None and since.tzinfo is None:
+            raise ValueError("--since must include a UTC offset")
+        print(json.dumps(import_zip(arguments.zip_path, arguments.endpoint, key, since), sort_keys=True))
     except (OSError, ValueError, ET.ParseError, httpx.HTTPError, RuntimeError) as exc:
         print(json.dumps({"status": "FAILED", "error": type(exc).__name__}), file=sys.stderr)
         raise SystemExit(1) from exc

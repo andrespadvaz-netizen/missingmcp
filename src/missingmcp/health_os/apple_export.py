@@ -6,6 +6,7 @@ summary and derives a deterministic provenance id from Apple's sample fields.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
@@ -34,6 +35,8 @@ _METRICS: dict[str, tuple[str, str]] = {
     "HKQuantityTypeIdentifierSixMinuteWalkTestDistance": ("distance", "km"),
 }
 
+_SLEEP_ANALYSIS = "HKCategoryTypeIdentifierSleepAnalysis"
+
 
 @dataclass(frozen=True, slots=True)
 class AppleExportResult:
@@ -57,6 +60,31 @@ def _value(value: str, apple_type: str) -> float:
     return parsed
 
 
+def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] | None:
+    """Map one original Apple record without treating model text as evidence."""
+    apple_type = attributes.get("type", "")
+    spec = _METRICS.get(apple_type)
+    if spec is not None:
+        metric, unit = spec
+        return {
+            "metric": metric, "value": _value(attributes["value"], apple_type), "unit": unit,
+            "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+        }
+    # HealthKit sleep analysis is a category interval rather than a numerical
+    # quantity.  Only original periods marked asleep qualify; time-in-bed and
+    # awake intervals are preserved by Apple but must not inflate sleep.
+    if apple_type == _SLEEP_ANALYSIS and "asleep" in attributes.get("value", "").lower():
+        start = datetime.fromisoformat(attributes["startDate"])
+        end = datetime.fromisoformat(attributes["endDate"])
+        minutes = (end - start).total_seconds() / 60
+        if minutes > 0:
+            return {
+                "metric": "sleep_duration", "value": minutes, "unit": "min",
+                "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+            }
+    return None
+
+
 def parse_apple_health_export(xml: bytes) -> AppleExportResult:
     """Extract supported raw Records and Workouts from Apple `export.xml`.
 
@@ -70,15 +98,11 @@ def parse_apple_health_export(xml: bytes) -> AppleExportResult:
         for _, node in iterator:
             if node.tag == "Record":
                 attrs = node.attrib
-                spec = _METRICS.get(attrs.get("type", ""))
-                if spec is None:
+                observation = observation_from_apple_record(attrs)
+                if observation is None:
                     ignored.add(attrs.get("type", "unknown"))
                 else:
-                    metric, unit = spec
-                    observations.append({
-                        "metric": metric, "value": _value(attrs["value"], attrs["type"]), "unit": unit,
-                        "observed_at": attrs["endDate"], "provenance_id": _provenance(attrs), "semantic": "measured",
-                    })
+                    observations.append(observation)
                 node.clear()
             elif node.tag == "Workout":
                 attrs = node.attrib

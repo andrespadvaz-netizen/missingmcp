@@ -199,6 +199,17 @@ def test_native_apple_export_is_raw_provenance_bearing_input(tmp_path):
     assert response.json()["accepted"] == 2
 
 
+def test_native_apple_sleep_category_uses_only_asleep_intervals():
+    xml = b'''<HealthData>
+      <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="HKCategoryValueSleepAnalysisAsleepCore" startDate="2026-10-01 23:00:00 -0600" endDate="2026-10-02 06:00:00 -0600" sourceName="Apple Watch"/>
+      <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="HKCategoryValueSleepAnalysisInBed" startDate="2026-10-01 22:30:00 -0600" endDate="2026-10-02 06:30:00 -0600" sourceName="Apple Watch"/>
+    </HealthData>'''
+    parsed = parse_apple_health_export(xml)
+    assert len(parsed.observations) == 1
+    assert parsed.observations[0]["metric"] == "sleep_duration"
+    assert parsed.observations[0]["value"] == 420
+
+
 def test_streaming_import_reader_accepts_renamed_apple_export(tmp_path):
     archive_path = tmp_path / "exportar.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
