@@ -15,6 +15,18 @@ TestRunner.unit('Recuperación terminal OpenAI', 'reinicia con esfuerzo bajo cua
   t.equals(calls[1].max_output_tokens,16384,'conserva un límite acotado aunque el uso reportado sea cero');
 });
 
+TestRunner.unit('Recuperación terminal OpenAI', 'acepta continuación de solo remanente sin exigir eco del ancla', function(t) {
+  var partial = 'Inicio del dictamen. ' + new Array(15).join('Evidencia acotada. ');
+  var responses = [
+    {text:partial,tool_requests:[],usage:{input_tokens:10,output_tokens:100,estimated_cost_usd:0.01},provider_model:'gpt-5',stop_reason:'max_tokens',provider_request_id:'r0'},
+    {text:'Conclusión final sin repetir el fragmento anterior.',tool_requests:[],usage:{input_tokens:20,output_tokens:20,estimated_cost_usd:0.01},provider_model:'gpt-5',stop_reason:'completed',provider_request_id:'r1'}
+  ];
+  var result = TerminalOutput.complete({system:'s',prompt:'p',max_output_tokens:8192}, function() {
+    return responses.shift();
+  }, {MAX_TERMINAL_CONTINUATIONS:2}, []);
+  t.equals(result.text,partial+'Conclusión final sin repetir el fragmento anterior.','ensambla el remanente sin duplicar ni fallar');
+});
+
 function registerUnitAuditTelemetry() {
   TestRunner.unit('Compacción de resultados de lectura',
     'el registro exhaustivo permanece en sesión sin duplicarse dentro del prompt', function(t) {

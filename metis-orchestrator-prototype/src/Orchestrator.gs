@@ -844,10 +844,10 @@ var Orchestrator = (function () {
         // así que este turno queda forzado a responder solo con texto.
         var auditTelemetry = _renderAuditTelemetry(targetCycle, targetSession, isAudit);
         var reconciliationRequest = {
-          // The final synthesis receives the complete producer and auditor text,
-          // but it does not need another 16k-token output. Bounding it to 4k keeps
-          // enough of the authorized USD 2 run budget for this mandatory turn.
-          max_output_tokens: 4096,
+          // A 4k ceiling repeatedly forced a second paid continuation and made
+          // the final synthesis slower and less reliable. 8k stays inside the
+          // authorized run budget while normally completing in one call.
+          max_output_tokens: 8192,
           // Hechos del controlador en el canal de sistema; las narraciones de
           // los modelos quedan en el prompt como contenido sin autoridad.
           system: [
