@@ -1,4 +1,6 @@
 import json
+import io
+import zipfile
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -10,6 +12,7 @@ from missingmcp import store
 from missingmcp.app import build_app
 from missingmcp.health_os.service import build_health_os_app
 from missingmcp.health_os.apple_export import parse_apple_health_export
+from missingmcp.health_os.apple_import_client import _records, _export_entry
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -194,6 +197,23 @@ def test_native_apple_export_is_raw_provenance_bearing_input(tmp_path):
     config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     response = TestClient(build_health_os_app(config)).post("/health-os/import/apple-export", content=xml, headers={"Authorization": f"Bearer {key}"})
     assert response.json()["accepted"] == 2
+
+
+def test_streaming_import_reader_accepts_renamed_apple_export(tmp_path):
+    archive_path = tmp_path / "exportar.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("apple_health_export/exportar.xml", b'''<HealthData>
+          <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" unit="count/min" value="55" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600" creationDate="2026-10-01 08:00:01 -0600"/>
+          <Record type="HKQuantityTypeIdentifierNotSupported" value="1" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+        </HealthData>''')
+        archive.writestr("apple_health_export/export_cda.xml", b"<ClinicalDocument/>")
+    with zipfile.ZipFile(archive_path) as archive:
+        entry = _export_entry(archive)
+        assert entry.filename.endswith("exportar.xml")
+        records = list(_records(archive.open(entry)))
+    assert records[0][0] == "observation"
+    assert records[0][1]["provenance_id"].startswith("apple-export:")
+    assert records[1] == ("ignored", "HKQuantityTypeIdentifierNotSupported")
 
 
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():
