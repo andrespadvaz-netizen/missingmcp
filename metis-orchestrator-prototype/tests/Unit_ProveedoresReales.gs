@@ -93,7 +93,10 @@ function registerUnitProveedoresReales() {
     TestRunner.unit('Presupuesto prospectivo',factory.create().name+' no despacha cuando la llamada no cabe',function(t){
       Config._setRunLevel(Config.LEVELS.LEVEL_2);
       Config._setPricing(PRECIOS);
-      Config._setLimits({MAX_RUN_BUDGET_USD:0.1,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:25});
+      // Debe quedar por debajo de la cota prospectiva incluso con el límite
+      // productivo reducido a 4,096 tokens; así la prueba alcanza la guarda
+      // presupuestaria antes de necesitar una credencial de proveedor.
+      Config._setLimits({MAX_RUN_BUDGET_USD:0.001,MAX_DAILY_BUDGET_USD:5,MAX_MONTHLY_BUDGET_USD:25});
       var runtime={cost_usd:0,cost_known:true,active_provider_attempt:{invoked_provider:null}};
       t.throwsCode(Errors.CODES.LIMIT_EXCEEDED,function(){ProviderAdapter.callBudgeted(factory.create(),{system:'s',prompt:'p'},null,runtime);},'frena antes de red');
       t.equals(runtime.cost_usd,0,'no gasto');
