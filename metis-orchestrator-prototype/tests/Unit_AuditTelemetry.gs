@@ -16,6 +16,21 @@ TestRunner.unit('Recuperación terminal OpenAI', 'reinicia con esfuerzo bajo cua
 });
 
 function registerUnitAuditTelemetry() {
+  TestRunner.unit('Compacción de resultados de lectura',
+    'el registro exhaustivo permanece en sesión sin duplicarse dentro del prompt', function(t) {
+      var providers = Fixtures.providers([
+        {text:'Consulto vigencia.',tool_requests:[request('notion.decisions',{},0)],stop_reason:'tool_use'},
+        {text:'Respuesta basada en el registro.',tool_requests:[],stop_reason:'end_turn'}
+      ], []);
+      var result = Orchestrator.run('Consulta la vigencia de Metis.', {
+        current_model:'OPENAI',operator_context:'METIS',intent:'query',providers:providers
+      });
+      t.includes(providers.OPENAI.calls[1].prompt,'"admitted_to_session":2',
+        'el turno siguiente conserva la cardinalidad admitida');
+      t.notOk(providers.OPENAI.calls[1].prompt.indexOf('"documents":') !== -1,
+        'no vuelve a serializar el corpus crudo ya contenido en la cápsula de evidencia');
+      t.equals(result.limits.tool_calls,1,'la compacción no repite ni elimina la lectura');
+    });
   ['producer','auditor'].forEach(function(stage) {
     ['max_tokens','incomplete'].forEach(function(reason) {
       TestRunner.unit('Completitud por etapa', stage + ' incompleto nunca se acredita', function(t) {
