@@ -83,6 +83,31 @@ def build_health_os_app(config: Config) -> Starlette:
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "brief": repo.brief(datetime.now(timezone.utc), tuple(flags))}, headers={"Cache-Control": "no-store"})
 
+    async def trends(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        return JSONResponse({"status": "OK", "trends": repo.trends(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
+
+    async def quarantine_report(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        return JSONResponse({"status": "OK", "report": repo.quarantine_report()}, headers={"Cache-Control": "no-store"})
+
+    async def quarantine_apply(request):
+        if not authorized_ingest(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=2_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+            if body.get("confirm") != "QUARANTINE" or not isinstance(body.get("expected"), int):
+                raise ValueError("confirm and expected are required")
+            result = repo.quarantine_invalid(body["expected"])
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError, AttributeError):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        return JSONResponse({"status": "OK", **result}, headers={"Cache-Control": "no-store"})
+
     async def transition(request):
         if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
@@ -109,6 +134,8 @@ def build_health_os_app(config: Config) -> Starlette:
         Route("/health-os/import/apple-export", apple_export, methods=["POST"]),
         Route("/health-os/quality", quality), Route("/health-os/brief", brief, methods=["POST"]),
         Route("/health-os/transition", transition, methods=["POST"]),
+        Route("/health-os/trends", trends), Route("/health-os/quarantine", quarantine_report),
+        Route("/health-os/quarantine/apply", quarantine_apply, methods=["POST"]),
     ])
 
 

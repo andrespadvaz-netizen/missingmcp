@@ -351,7 +351,10 @@ def test_resumable_import_filters_metrics_and_never_puts_phi_in_checkpoint(tmp_p
     assert result["observations_seen"] == 1 and result["outside_metrics"] == 1
     assert len(posted) == 1
     saved = checkpoint.read_text(encoding="utf-8")
-    assert "55" not in saved and "Apple Watch" not in saved and "secret" not in saved
+    # The checkpoint legitimately holds the archive mtime in nanoseconds, so a
+    # bare "55" can appear by chance; check for the sample value as a value.
+    assert '"55"' not in saved and ": 55," not in saved and ": 55}" not in saved
+    assert "Apple Watch" not in saved and "secret" not in saved
     second = import_zip(archive_path, "https://health.example", "secret", metrics=["sleep_duration"], checkpoint=checkpoint)
     assert second["checkpoint_skipped"] == 1 and len(posted) == 1
 
@@ -539,3 +542,89 @@ def test_oversized_bodies_return_413_not_500(tmp_path):
     client = _service(tmp_path)
     assert client.post("/health-os/transition", headers={"Authorization": "Bearer " + "i" * 40}, content=b"x" * 9000).status_code == 413
     assert client.post("/health-os/brief", headers={"Authorization": "Bearer " + "r" * 40}, content=b"x" * 9000).status_code == 413
+
+
+# --- Sanitation of historical evidence and weekly trends ---
+
+def _seed_invalid(tmp_path):
+    db = store.init_db(str(tmp_path / "h.db"))
+    repo = HealthOSRepository(db, "d" * 40)
+    def put(key, source, payload):
+        db.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)",
+                   (key, source, store.encrypt("d" * 40, json.dumps(payload))))
+    good = {"metric": "resting_heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-05T08:00:00-06:00", "provenance_id": "ok"}
+    put("good", "APPLE_HEALTH", good)
+    put("garmin", "GARMIN_LEGACY", good)
+    put("zero", "APPLE_HEALTH", {**good, "metric": "weight", "value": 0, "unit": "kg", "provenance_id": "w"})
+    put("badunit", "APPLE_HEALTH", {**good, "unit": "beats", "provenance_id": "u"})
+    db.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES ('alien', 'APPLE_HEALTH', ?)",
+               (store.encrypt("z" * 40, "{}"),))
+    db.commit()
+    return db, repo
+
+
+def test_quarantine_report_names_reasons_without_values(tmp_path):
+    _, repo = _seed_invalid(tmp_path)
+    report = repo.quarantine_report()
+    assert report["invalid_records"] == 4
+    reasons = {item["reason"] for item in report["by_reason"]}
+    assert "unsupported_source:GARMIN_LEGACY" in reasons and "undecryptable" in reasons
+    assert any(r.startswith("failed_validation:unsupported unit") for r in reasons)
+    assert report["earliest_apple_day_by_metric"] == {"resting_heart_rate": "2026-10-05"}
+    assert "55" not in json.dumps(report)
+
+
+def test_silent_core_rejections_now_count_as_invalid(tmp_path):
+    _, repo = _seed_invalid(tmp_path)
+    assert repo.quality(when(6))["persisted_invalid_records"] == 4
+
+
+def test_quarantine_apply_moves_rows_atomically_and_restores_quality(tmp_path):
+    db, repo = _seed_invalid(tmp_path)
+    with pytest.raises(ValueError):
+        repo.quarantine_invalid(expected=3)
+    assert repo.quarantine_invalid(expected=4) == {"quarantined": 4}
+    assert db.execute("SELECT COUNT(*) FROM health_os_quarantine").fetchone()[0] == 4
+    assert db.execute("SELECT COUNT(*) FROM health_os_observations").fetchone()[0] == 1
+    assert repo.quality(when(6))["persisted_invalid_records"] == 0
+    assert repo.quarantine_invalid(expected=0) == {"quarantined": 0}
+
+
+def test_weekly_trends_are_aggregates_against_a_provisional_baseline():
+    health = make_health()
+    start = datetime(2026, 9, 1, tzinfo=MX)
+    health.set_apple_transition(start)
+    for day in range(40):
+        at = start + timedelta(days=day, hours=7)
+        health.ingest_observations([
+            MetricObservation("sleep_duration", 200, "min", at, APPLE_HEALTH, f"s1:{day}"),
+            MetricObservation("sleep_duration", 220, "min", at + timedelta(minutes=1), APPLE_HEALTH, f"s2:{day}"),
+            MetricObservation("resting_heart_rate", 55 if day < 34 else 58, "bpm", at, APPLE_HEALTH, f"r:{day}"),
+        ])
+    health.ingest_workout(WorkoutSession("hk", start + timedelta(days=36, hours=18), start + timedelta(days=36, hours=19), APPLE_HEALTH, "HKWorkoutActivityTypeTraditionalStrengthTraining"))
+    health.ingest_workout(WorkoutSession("sp", start + timedelta(days=36, hours=18), start + timedelta(days=36, hours=19), SPEEDIANCE, "strength"))
+    trends = health.weekly_trends(start + timedelta(days=39, hours=12))
+    assert trends["available"] is True
+    sleep = [r for r in trends["weeks"] if r["metric"] == "sleep_duration"][-1]
+    assert sleep["value"] == 420.0 and sleep["baseline_value"] == 420.0
+    rhr = [r for r in trends["weeks"] if r["metric"] == "resting_heart_rate"][-1]
+    assert rhr["change_vs_baseline"] == 3.0
+    workouts = [r for r in trends["weeks"] if r["metric"] == "workouts"]
+    assert workouts[-1]["value"] == 1 and workouts[-1]["strength_sessions"] == 1
+    assert all("observed_at" not in r and "provenance_id" not in r for r in trends["weeks"])
+
+
+def test_trends_require_the_apple_era_start():
+    assert make_health().weekly_trends(when(10))["available"] is False
+
+
+def test_new_routes_enforce_their_keys(tmp_path):
+    client = _service(tmp_path)
+    read, ingest = {"Authorization": "Bearer " + "r" * 40}, {"Authorization": "Bearer " + "i" * 40}
+    assert client.get("/health-os/trends", headers=ingest).status_code == 401
+    assert client.get("/health-os/quarantine", headers=ingest).status_code == 401
+    assert client.post("/health-os/quarantine/apply", headers=read, json={"confirm": "QUARANTINE", "expected": 0}).status_code == 401
+    assert client.get("/health-os/trends", headers=read).json()["trends"]["available"] is False
+    assert client.get("/health-os/quarantine", headers=read).json()["report"]["invalid_records"] == 0
+    assert client.post("/health-os/quarantine/apply", headers=ingest, json={"expected": 0}).status_code == 400
+    assert client.post("/health-os/quarantine/apply", headers=ingest, json={"confirm": "QUARANTINE", "expected": 0}).json()["quarantined"] == 0

@@ -402,6 +402,78 @@ class HealthOS:
         # not a medical clearance, diagnosis, prescription or training order.
         return DecisionAssessment(DecisionState.INFORMATIVO, "medium", ("Apple Health coverage and metric-specific baselines are stable",), (), False)
 
+    # Descriptive weekly trends (Política Operativa v0.5: "tendencia-descriptiva",
+    # app view only).  Daily values are aggregated first; nothing per-reading
+    # ever leaves the core.  Steps and energy are excluded on purpose: iPhone
+    # and Watch report overlapping intervals that cannot be de-duplicated from
+    # exported samples without double counting.
+    _TREND_METRICS = {
+        "sleep_duration": ("sum", "min"),
+        "resting_heart_rate": ("mean", "bpm"),
+        "hrv": ("mean", "ms"),
+        "respiratory_rate": ("mean", "breaths/min"),
+        "oxygen_saturation": ("mean", "%"),
+    }
+
+    def _daily_values(self, metric: str) -> dict[str, float]:
+        how, _ = self._TREND_METRICS[metric]
+        start = self._apple_baseline_started
+        buckets: dict[str, list[float]] = {}
+        for item in self._observations.values():
+            if (item.source != APPLE_HEALTH or item.metric != metric or item.semantic in NON_EVIDENCE_SEMANTICS
+                    or start is None or item.observed_at < start):
+                continue
+            buckets.setdefault(self.local_day(item.observed_at), []).append(item.value)
+        return {day: (sum(v) if how == "sum" else sum(v) / len(v)) for day, v in buckets.items()}
+
+    def weekly_trends(self, now: datetime, weeks: int = 4) -> dict[str, object]:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        if self._apple_baseline_started is None:
+            return {"available": False, "reason": "Apple era start is not recorded", "weeks": []}
+        today = now.astimezone(self.timezone).date()
+        this_monday = today - timedelta(days=today.weekday())
+        rows: list[dict[str, object]] = []
+        for metric, (how, unit) in self._TREND_METRICS.items():
+            daily = self._daily_values(metric)
+            for back in range(weeks - 1, -1, -1):
+                week_start = this_monday - timedelta(weeks=back)
+                days = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
+                values = [daily[d] for d in days if d in daily]
+                if not values:
+                    continue
+                prior = [daily[(week_start - timedelta(days=i)).isoformat()] for i in range(1, 29)
+                         if (week_start - timedelta(days=i)).isoformat() in daily]
+                mean = sum(values) / len(values)
+                baseline = sum(prior) / len(prior) if len(prior) >= 14 else None
+                rows.append({
+                    "metric": metric, "unit": unit, "week_start": week_start.isoformat(),
+                    "aggregate": "mean_of_nightly_totals" if how == "sum" else "mean_of_daily_means",
+                    "value": round(mean, 1), "valid_days": len(values),
+                    "baseline_value": round(baseline, 1) if baseline is not None else None,
+                    "baseline_days": len(prior),
+                    "change_vs_baseline": round(mean - baseline, 1) if baseline is not None else None,
+                    "rule": "tendencia-descriptiva v0.1",
+                })
+        for back in range(weeks - 1, -1, -1):
+            week_start = this_monday - timedelta(weeks=back)
+            week_end = week_start + timedelta(days=7)
+            sessions = [group for group in self.logical_workouts()
+                        if week_start <= group[0].start_time.astimezone(self.timezone).date() < week_end
+                        and group[0].start_time >= self._apple_baseline_started]
+            if not sessions:
+                continue
+            minutes = sum(max(s.end_time - s.start_time for s in group).total_seconds() / 60 for group in sessions)
+            strength = sum(1 for group in sessions if any(self._activity_family(s.activity_type) == "strength" for s in group))
+            rows.append({
+                "metric": "workouts", "unit": "sessions", "week_start": week_start.isoformat(),
+                "aggregate": "weekly_count", "value": len(sessions), "valid_days": None,
+                "baseline_value": None, "baseline_days": None, "change_vs_baseline": None,
+                "total_minutes": round(minutes), "strength_sessions": strength,
+                "rule": "tendencia-descriptiva v0.1",
+            })
+        return {"available": True, "reason": None, "weeks": rows}
+
     def local_day(self, at: datetime) -> str:
         return at.astimezone(self.timezone).date().isoformat()
 

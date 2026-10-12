@@ -44,3 +44,15 @@ crudas.
   `REVISAR_TECNICO`. It never causes an HTTP 500 or a restart loop.
 - `/healthz` reports the deployed short commit (`RAILWAY_GIT_COMMIT_SHA`) for credential-free
   deployment verification.
+
+## Sanitation and weekly trends (2026-10-12)
+
+- `GET /health-os/quarantine` (read key): invalid stored rows counted by table and fixed reason
+  category, earliest local Apple day per metric and the recorded Apple era start. No values.
+- `POST /health-os/quarantine/apply` (ingest key), body `{"confirm": "QUARANTINE", "expected": N}`:
+  moves the N invalid rows, still encrypted, into `health_os_quarantine` in one transaction. Nothing
+  is deleted; a stale count is refused. Rows the core used to drop silently now count as invalid.
+- `GET /health-os/trends` (read key): weekly descriptive aggregates (sleep, resting heart rate, HRV,
+  respiratory rate, SpO2, workouts and strength sessions) against a provisional 28-day baseline
+  (needs 14 valid days). App view only; the e-mail Brief keeps state, coverage, quality and legend.
+  Steps and energy are excluded: iPhone and Watch intervals overlap and would double count.
