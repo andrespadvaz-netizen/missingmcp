@@ -6,6 +6,7 @@ import re
 import sqlite3
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from ..store import encrypt, decrypt
 from . import writes
 
@@ -105,6 +106,19 @@ class Queue:
             cost_known INTEGER NOT NULL, cost_usd REAL,
             provider_request_id TEXT, request_sha256 TEXT NOT NULL,
             receipt_enc TEXT NOT NULL)""")
+        direct_columns = {x[1] for x in self.db.execute("PRAGMA table_info(metis_direct_audits)")}
+        if "model" not in direct_columns:
+            self.db.execute("ALTER TABLE metis_direct_audits ADD COLUMN model TEXT")
+            for direct_row in self.db.execute(
+                    "SELECT receipt_id,receipt_enc FROM metis_direct_audits WHERE model IS NULL").fetchall():
+                try:
+                    direct_receipt = json.loads(decrypt(self.secret, direct_row["receipt_enc"]))
+                    direct_model = direct_receipt.get("model")
+                    if isinstance(direct_model, str) and direct_model:
+                        self.db.execute("UPDATE metis_direct_audits SET model=? WHERE receipt_id=?",
+                                        (direct_model, direct_row["receipt_id"]))
+                except (ValueError, TypeError, KeyError):
+                    pass
         writes.initialize(self.db)
         columns = {x[1] for x in self.db.execute("PRAGMA table_info(metis_executions)")}
         if "origin_model" not in columns:
@@ -152,8 +166,8 @@ class Queue:
         self.db.execute("""INSERT OR IGNORE INTO metis_direct_audits
             (receipt_id,owner,context_project,origin_model,target_provider,status,
              created,elapsed_ms,cost_known,cost_usd,provider_request_id,
-             request_sha256,receipt_enc)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+             request_sha256,receipt_enc,model)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 receipt_id, owner, result.get("context_project", "UNSCOPED"),
                 origin_model, result.get("target_model_provider", "UNKNOWN"),
                 result.get("status", "FAILED"), time.time(),
@@ -161,8 +175,41 @@ class Queue:
                 1 if result.get("cost_known") is True else 0,
                 cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
                 result.get("provider_request_id"), hashlib.sha256(request.encode()).hexdigest(),
-                encrypt(self.secret, json.dumps(result, ensure_ascii=False))))
+                encrypt(self.secret, json.dumps(result, ensure_ascii=False)), result.get("model")))
         return receipt_id
+
+    def list_direct_audits(self, owner, context_project, start_date, end_date, limit=200):
+        """Return metadata only; encrypted requests and responses never leave the ledger."""
+        context_project = canonical_context(context_project)
+        if not isinstance(start_date, str) or not isinstance(end_date, str):
+            raise RequestError("start_date and end_date must use YYYY-MM-DD.")
+        try:
+            start = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            end = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError as exc:
+            raise RequestError("start_date and end_date must use YYYY-MM-DD.") from exc
+        if end < start or end - start > timedelta(days=366):
+            raise RequestError("date_range must be ordered and no longer than 366 days.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise RequestError("limit must be an integer from 1 to 500.")
+        end_exclusive = end + timedelta(days=1)
+        rows = self.db.execute("""SELECT receipt_id,origin_model,target_provider,status,
+                cost_known,cost_usd,elapsed_ms,provider_request_id,model,created
+            FROM metis_direct_audits
+            WHERE owner=? AND context_project=? AND created>=? AND created<?
+            ORDER BY created ASC, receipt_id ASC LIMIT ?""",
+            (owner, context_project, start.timestamp(), end_exclusive.timestamp(), limit)).fetchall()
+        return {"context_project": context_project, "start_date": start_date,
+                "end_date": end_date, "count": len(rows), "limit": limit,
+                "audits": [{
+                    "receipt_id": row["receipt_id"], "origin": row["origin_model"],
+                    "destination": row["target_provider"], "status": row["status"],
+                    "cost_known": bool(row["cost_known"]), "cost_usd": row["cost_usd"],
+                    "elapsed_ms": row["elapsed_ms"],
+                    "provider_request_id": row["provider_request_id"],
+                    "provider": row["target_provider"], "model": row["model"],
+                    "created_at": datetime.fromtimestamp(row["created"], timezone.utc).isoformat()
+                } for row in rows]}
 
     def get(self, owner, eid):
         if not isinstance(eid, str):

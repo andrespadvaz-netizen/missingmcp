@@ -108,6 +108,15 @@ async def test_direct_audit_tool_does_not_create_queue_row(tmp_path, monkeypatch
     assert receipt['status'] == 'COMPLETED'
     assert receipt['context_project'] == 'METIS'
     assert receipt['origin_model'] == 'ANTHROPIC'
+    listed = adapter.queue.list_direct_audits('metis-operator', 'METIS', '2026-01-01', '2026-12-31')
+    assert listed['count'] == 1
+    assert listed['audits'][0] == {
+        'receipt_id':'receipt-1', 'origin':'ANTHROPIC', 'destination':'OPENAI',
+        'status':'COMPLETED', 'cost_known':True, 'cost_usd':0.001,
+        'elapsed_ms':12, 'provider_request_id':None, 'provider':'OPENAI',
+        'model':None, 'created_at':listed['audits'][0]['created_at']}
+    assert 'receipt_enc' not in listed['audits'][0]
+    assert 'request_sha256' not in listed['audits'][0]
     adapter.queue.close()
 
 

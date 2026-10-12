@@ -62,6 +62,17 @@ TOOLS = [
                                     "required":["project","source"]}},
                     "required":["request","idempotency_key","context"]},
      "annotations":{"readOnlyHint":False,"destructiveHint":True,"idempotentHint":True,"openWorldHint":True}},
+    {"name":"metis_list_direct_audits", "description":
+     "List durable metadata receipts for direct read-only audits in one exact context and inclusive UTC date range. "
+     "Returns receipt, origin, destination, terminal status, cost, latency, provider request ID, provider, model and date. "
+     "Never returns request text, response text, encrypted payloads or request fingerprints. This tool performs no model call, write or external effect.",
+     "inputSchema":{"type":"object","additionalProperties":False,
+                    "properties":{"context":{"type":"string","minLength":1,"maxLength":128},
+                                  "start_date":{"type":"string","pattern":"^\\d{4}-\\d{2}-\\d{2}$"},
+                                  "end_date":{"type":"string","pattern":"^\\d{4}-\\d{2}-\\d{2}$"},
+                                  "limit":{"type":"integer","minimum":1,"maximum":500,"default":200}},
+                    "required":["context","start_date","end_date"]},
+     "annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":True,"openWorldHint":False}},
     {"name":"metis_get_execution", "description":
      "Read an execution without triggering another model call. Waits up to 20 seconds for completion. "
      "Pending: continue polling the SAME execution until terminal; a pending reply is not a failure. "
@@ -158,6 +169,12 @@ class MetisAdapter:
                 self.queue.record_direct_audit(account_key, self.origin_model, text, value)
             elif params.get("name") == "metis_create_execution":
                 value = self.queue.create(account_key, args, self.origin_model)
+            elif params.get("name") == "metis_list_direct_audits":
+                if not isinstance(args, dict) or not set(args).issubset({"context", "start_date", "end_date", "limit"}) \
+                        or not {"context", "start_date", "end_date"}.issubset(args):
+                    raise RequestError("Use context, start_date, end_date and optional limit only.")
+                value = self.queue.list_direct_audits(
+                    account_key, args["context"], args["start_date"], args["end_date"], args.get("limit", 200))
             elif params.get("name") == "metis_get_execution":
                 if not isinstance(args, dict) or set(args) != {"execution_id"}:
                     raise RequestError("Use execution_id only.")
