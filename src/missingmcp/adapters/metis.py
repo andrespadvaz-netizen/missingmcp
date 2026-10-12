@@ -4,12 +4,27 @@ import hashlib
 import hmac
 import json
 from .base import LoginError, LoginOk, SessionExpired
-from ..metis.queue import Queue, RequestError, TERMINAL, MAX_REQUEST_BYTES, MAX_ENVELOPE_BYTES
+from ..metis.queue import Queue, RequestError, TERMINAL, MAX_REQUEST_BYTES, MAX_ENVELOPE_BYTES, validate
 from ..metis.transport import Bridge, Worker
+from ..metis.direct_audit import DirectAudit
 
 POLL_WAIT_SECONDS = 20
 
 TOOLS = [
+    {"name":"metis_cross_audit", "description":
+     "Send one read-only, self-contained cross-audit directly to the other model and return its terminal answer in this same tool call. "
+     "This is the default path for audits, reviews, critique, reconciliation and model-to-model information transfer. "
+     "It has no queue, polling, Apps Script bridge, writes or side effects. Never call metis_create_execution for a read-only audit. "
+     "Populate the exact established project/subproject context and include all evidence needed by the reviewer. "
+     "The result is terminal: COMPLETED, REQUIRES_ANDRES or FAILED.",
+     "inputSchema":{"type":"object","additionalProperties":False,
+                    "properties":{"request":{"type":"string","minLength":1,"maxLength":128000},
+                                  "context":{"type":"object","additionalProperties":False,
+                                    "properties":{"project":{"type":"string","minLength":1,"maxLength":128},
+                                                  "source":{"type":"string","enum":["current_request","current_conversation","visible_project_instructions"]}},
+                                    "required":["project","source"]}},
+                    "required":["request","context"]},
+     "annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":False,"openWorldHint":True}},
     {"name":"metis_create_execution", "description":
      "Submit Andrés's natural-language request to Metis. The engine determines context and routing. "
      "Preserve the user's substantive wording, including requests to audit or independently review, "
@@ -71,6 +86,7 @@ class MetisAdapter:
         self.forward = self
         self.queue = shared.queue if shared else Queue(config.db_path, config.gateway_secret)
         self.worker = shared.worker if shared else Worker(self.queue, Bridge(config.metis_bridge_url, config.metis_bridge_secret))
+        self.direct_audit = shared.direct_audit if shared else DirectAudit(config)
         self.credential_version = hashlib.sha256(config.metis_operator_key.encode()).hexdigest()
 
     def login_hint(self, form):
@@ -130,7 +146,15 @@ class MetisAdapter:
             return error(-32602, "Invalid params")
         args = params.get("arguments")
         try:
-            if params.get("name") == "metis_create_execution":
+            if params.get("name") == "metis_cross_audit":
+                if not self.direct_audit.enabled:
+                    raise RequestError("direct_audit_not_configured")
+                if not isinstance(args, dict) or set(args) != {"request", "context"}:
+                    raise RequestError("Use request and context only.")
+                text, _, context_project = validate(
+                    {"request": args["request"], "idempotency_key": "direct-audit-validation", "context": args["context"]})
+                value = await self.direct_audit.run(self.origin_model, text, context_project)
+            elif params.get("name") == "metis_create_execution":
                 value = self.queue.create(account_key, args, self.origin_model)
             elif params.get("name") == "metis_get_execution":
                 if not isinstance(args, dict) or set(args) != {"execution_id"}:

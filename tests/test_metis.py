@@ -7,6 +7,7 @@ from missingmcp.metis.queue import Queue, RequestError
 from missingmcp.metis.transport import Worker, _validate_lens_context_response
 from missingmcp.adapters.metis import MetisAdapter
 from missingmcp.adapters.base import LoginError, SessionExpired
+from missingmcp.metis.direct_audit import DirectAudit
 
 
 @pytest.mark.asyncio
@@ -39,6 +40,66 @@ async def test_bridge_redirect_logs_are_private_and_context_resets(monkeypatch, 
 SECRET = 'storage-secret-' * 4
 REQUEST = {'request':'Consulta Metis: ¿cuál es el estado del proyecto?', 'idempotency_key':'test-request-0001',
            'context': {'project':'METIS', 'source':'current_request'}}
+
+
+@pytest.mark.asyncio
+async def test_direct_audit_calls_opposite_provider_and_returns_terminal(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'oa-secret',
+                       'METIS_ANTHROPIC_API_KEY': 'an-secret'})
+    direct = DirectAudit(cfg)
+    calls = []
+
+    async def fake_post(url, body, headers):
+        calls.append((url, body, headers))
+        return ({'id': 'msg-1', 'model': 'claude-sonnet-5',
+                 'content': [{'type': 'text', 'text': 'Auditoría completa'}],
+                 'usage': {'input_tokens': 10, 'output_tokens': 5}}, 'req-1')
+
+    monkeypatch.setattr(direct, '_post', fake_post)
+    result = await direct.run('OPENAI', 'Revisa esta decisión', 'METIS')
+    assert result['status'] == 'COMPLETED'
+    assert result['final_answer'] == 'Auditoría completa'
+    assert result['transport'] == 'DIRECT_API'
+    assert result['writes_attempted'] == 0
+    assert calls[0][0].endswith('/v1/messages')
+
+
+@pytest.mark.asyncio
+async def test_direct_audit_requires_andres_is_terminal(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'oa-secret',
+                       'METIS_ANTHROPIC_API_KEY': 'an-secret'})
+    direct = DirectAudit(cfg)
+
+    async def fake_openai(request, context):
+        return 'REQUIRES_ANDRES: elige A o B', {'input_tokens': 2}, 'gpt-5', 'resp-1'
+
+    monkeypatch.setattr(direct, '_openai', fake_openai)
+    result = await direct.run('ANTHROPIC', 'Decide', 'PERSONAL/HEALTH_OS')
+    assert result['status'] == 'REQUIRES_ANDRES'
+    assert result['context_project'] == 'PERSONAL/HEALTH_OS'
+
+
+@pytest.mark.asyncio
+async def test_direct_audit_tool_does_not_create_queue_row(tmp_path, monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'DATA_DIR': str(tmp_path),
+        'METIS_BRIDGE_URL':'https://script.google.com/macros/s/abc/exec',
+        'METIS_BRIDGE_SECRET':'b'*32, 'METIS_OPERATOR_KEY':'o'*32,
+        'METIS_OPENAI_API_KEY':'oa-secret', 'METIS_ANTHROPIC_API_KEY':'an-secret'})
+    adapter = MetisAdapter(cfg)
+
+    async def terminal(origin, request, context):
+        return {'status':'COMPLETED', 'final_answer':'ok', 'transport':'DIRECT_API'}
+
+    monkeypatch.setattr(adapter.direct_audit, 'run', terminal)
+    login = adapter.start_login({'metis_key':'o'*32})
+    body = json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/call', 'params':{
+        'name':'metis_cross_audit','arguments':{'request':'Audita esto',
+        'context':{'project':'METIS','source':'current_request'}}}}).encode()
+    _, _, data = await adapter.handle(None, login.account_key, login.blob, body)
+    result = json.loads(json.loads(data)['result']['content'][0]['text'])
+    assert result['status'] == 'COMPLETED'
+    assert adapter.queue.db.execute('SELECT count(*) FROM metis_executions').fetchone()[0] == 0
+    adapter.queue.close()
 
 
 def test_lens_gateway_accepts_only_partition_scoped_evidence():

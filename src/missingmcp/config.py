@@ -51,6 +51,11 @@ class Config:
     metis_operator_key: str = ""
     # Dedicated bearer secret for the private, read-only Metis Lens context endpoint.
     metis_lens_context_key: str = ""
+    metis_openai_api_key: str = ""
+    metis_anthropic_api_key: str = ""
+    metis_openai_model: str = "gpt-5"
+    metis_anthropic_model: str = "claude-sonnet-5"
+    metis_direct_audit_timeout: int = 180
     health_os_ingest_key: str = ""
     health_os_timezone: str = "America/Mexico_City"
 
@@ -71,6 +76,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     metis = [env.get(name, "") for name in
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
+    metis_openai_api_key = env.get("METIS_OPENAI_API_KEY", "")
+    metis_anthropic_api_key = env.get("METIS_ANTHROPIC_API_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
     health_os_timezone = env.get("HEALTH_OS_TIMEZONE", "America/Mexico_City")
     try:
@@ -102,6 +109,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_bridge_secret=metis[1],
         metis_operator_key=metis[2],
         metis_lens_context_key=metis_lens_context_key,
+        metis_openai_api_key=metis_openai_api_key,
+        metis_anthropic_api_key=metis_anthropic_api_key,
+        metis_openai_model=env.get("METIS_OPENAI_MODEL", "gpt-5"),
+        metis_anthropic_model=env.get("METIS_ANTHROPIC_MODEL", "claude-sonnet-5"),
+        metis_direct_audit_timeout=max(30, min(300, int(env.get("METIS_DIRECT_AUDIT_TIMEOUT", "180")))),
         health_os_ingest_key=health_os_ingest_key,
         health_os_timezone=health_os_timezone,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
