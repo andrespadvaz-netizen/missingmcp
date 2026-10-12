@@ -82,6 +82,30 @@ function registerUnitRouter() {
     t.equals(blocking.route, 'REQUIRES_ANDRES', 'si el auditor bloquea materialmente, para en Andrés');
   });
 
+  TestRunner.unit('Router', 'auditoría explícita no queda anulada por cobertura incompleta del productor', function (t) {
+    var d = Router.decide(base({
+      requires_cross_audit: true,
+      coverage: { complete: false, missing: ['NOTION', 'DRIVE'] }
+    }));
+    t.equals(d.route, 'CROSS_AUDIT', 'la solicitud llega al segundo proveedor');
+    t.equals(d.target_model, 'ANTHROPIC', 'selecciona al proveedor independiente');
+
+    var blocked = Router.decide(base({
+      audit_completed: true,
+      audit_blocks_materially: true,
+      coverage: { complete: false, missing: ['NOTION'] }
+    }));
+    t.equals(blocked.route, 'REQUIRES_ANDRES', 'el bloqueo del auditor prevalece al cierre');
+
+    var incomplete = Router.decide(base({
+      audit_completed: true,
+      audit_blocks_materially: false,
+      coverage: { complete: false, missing: ['DRIVE'] }
+    }));
+    t.equals(incomplete.route, 'ABSTAIN', 'sin bloqueo no inventa cobertura completa');
+    t.equals(incomplete.reason, 'COVERAGE_INCOMPLETE_AFTER_AUDIT', 'explica que la carencia persiste tras auditar');
+  });
+
   TestRunner.unit('Router', 'bloqueos duros antes que cualquier transferencia', function (t) {
     t.equals(Router.decide(base({ context_route: 'REQUIRES_ANDRES', requires_cross_audit: true })).route,
       'REQUIRES_ANDRES', 'contexto ambiguo gana sobre auditoría');

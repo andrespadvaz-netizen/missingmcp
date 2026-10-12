@@ -326,6 +326,11 @@ var Orchestrator = (function () {
         system: systemPolicy() + '\n' + _renderExecutionFacts(spec.session, spec.role === 'AUDITOR'),
         prompt: prompt
       };
+      // Tras recuperar evidencia el trabajo restante es síntesis visible, no
+      // exploración. El esfuerzo bajo evita que un proveedor consuma todo el
+      // límite de salida en razonamiento oculto y obligue a una segunda llamada
+      // EMPTY_REASONING_RESTART_LOW_EFFORT, que duplica costo y latencia.
+      if (retrieved) { turnRequest.effort = 'low'; }
       var turnResult = _modelTurn(options, runtime, spec.model, spec.role, turnRequest, ToolBroker.contract(grant));
       turns++;
       stopReasons.push(turnResult.stop_reason);
@@ -356,7 +361,8 @@ var Orchestrator = (function () {
       : normalFinalToolContract;
     var finalRequest = {
       system: systemPolicy() + '\n' + _renderExecutionFacts(spec.session, spec.role === 'AUDITOR'),
-      prompt: withProductiveResults(spec.producePrompt(_renderEvidence(spec.session)))
+      prompt: withProductiveResults(spec.producePrompt(_renderEvidence(spec.session))),
+      effort: 'low'
     };
     var finalTurn = _modelTurn(options, runtime, spec.model, spec.role, finalRequest, finalToolContract);
     turns++;

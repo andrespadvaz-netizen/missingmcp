@@ -96,21 +96,40 @@ var Router = (function () {
       return _decision('ABSTAIN', null, 'CURRENCY_CHAIN_OPEN');
     }
 
-    // 5. Cobertura insuficiente: abstenerse o acotar, nunca fingir exhaustividad.
-    if (input.coverage && input.coverage.complete === false) {
-      return _decision('ABSTAIN', null, 'COVERAGE_INCOMPLETE');
-    }
-
-    // 6. Cierre de ciclo: tras una auditoría el veredicto vuelve al originador.
+    // 5. Cierre de ciclo: tras una auditoría el veredicto vuelve al originador.
+    // Se evalúa antes de la cobertura del productor: el auditor tiene una
+    // sesión y particiones propias, por lo que puede completar o confirmar la
+    // carencia. Si bloquea materialmente, ese hecho manda. Si no bloquea pero
+    // la cobertura agregada sigue incompleta, el cierre se abstiene.
     if (input.audit_completed) {
       if (input.audit_blocks_materially) {
         return _decision('REQUIRES_ANDRES', null, 'AUDIT_BLOCKS_MATERIALLY');
+      }
+      if (input.coverage && input.coverage.complete === false) {
+        return _decision('ABSTAIN', null, 'COVERAGE_INCOMPLETE_AFTER_AUDIT');
       }
       return _decision('LOCAL', null, 'CYCLE_CLOSED_RETURN_TO_ORIGIN', null,
         [{ model: current, role: 'LOCAL' }]);
     }
 
-    // 7. Instrucción expresa del operador.
+    // 6. Una auditoría cruzada explícita debe llegar al auditor aunque el
+    // productor no haya logrado cobertura completa. Justamente la sesión
+    // independiente existe para recuperar por sí misma y emitir un bloqueo
+    // verificable si tampoco puede hacerlo. La cobertura incompleta no puede
+    // convertir silenciosamente CROSS_AUDIT en una revisión local.
+    if (input.requires_cross_audit) {
+      var auditor = other(current);
+      return _decision('CROSS_AUDIT', auditor, 'MANDATORY_CROSS_AUDIT', MATERIAL_CAUSES.MANDATORY_CROSS_AUDIT,
+        [{ model: current, role: 'PRODUCER' }, { model: auditor, role: 'AUDITOR' }]);
+    }
+
+    // 7. Cobertura insuficiente fuera de una auditoría: abstenerse o acotar,
+    // nunca fingir exhaustividad.
+    if (input.coverage && input.coverage.complete === false) {
+      return _decision('ABSTAIN', null, 'COVERAGE_INCOMPLETE');
+    }
+
+    // 8. Instrucción expresa del operador.
     if (input.operator_model_instruction) {
       var wanted = input.operator_model_instruction;
       if (wanted === current) {
@@ -119,13 +138,6 @@ var Router = (function () {
       }
       return _decision(wanted, wanted, 'OPERATOR_INSTRUCTION', MATERIAL_CAUSES.OPERATOR_INSTRUCTION,
         [{ model: current, role: 'PRODUCER' }, { model: wanted, role: 'PRODUCER' }]);
-    }
-
-    // 8. Auditoría cruzada obligatoria: productor + auditor independiente.
-    if (input.requires_cross_audit) {
-      var auditor = other(current);
-      return _decision('CROSS_AUDIT', auditor, 'MANDATORY_CROSS_AUDIT', MATERIAL_CAUSES.MANDATORY_CROSS_AUDIT,
-        [{ model: current, role: 'PRODUCER' }, { model: auditor, role: 'AUDITOR' }]);
     }
 
     // 9. Gap de capacidad técnica.
