@@ -155,6 +155,7 @@ class MetisAdapter:
                 text, _, context_project = validate(
                     {"request": args["request"], "idempotency_key": "direct-audit-validation", "context": args["context"]})
                 value = await self.direct_audit.run(self.origin_model, text, context_project)
+                self.queue.record_direct_audit(account_key, self.origin_model, text, value)
             elif params.get("name") == "metis_create_execution":
                 value = self.queue.create(account_key, args, self.origin_model)
             elif params.get("name") == "metis_get_execution":

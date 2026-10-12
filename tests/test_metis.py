@@ -90,7 +90,10 @@ async def test_direct_audit_tool_does_not_create_queue_row(tmp_path, monkeypatch
     adapter = MetisAdapter(cfg)
 
     async def terminal(origin, request, context):
-        return {'status':'COMPLETED', 'final_answer':'ok', 'transport':'DIRECT_API'}
+        return {'status':'COMPLETED', 'final_answer':'ok', 'transport':'DIRECT_API',
+                'receipt_id':'receipt-1', 'context_project':context,
+                'target_model_provider':'OPENAI', 'elapsed_ms':12,
+                'cost_known':True, 'cost_usd':0.001}
 
     monkeypatch.setattr(adapter.direct_audit, 'run', terminal)
     login = adapter.start_login({'metis_key':'o'*32})
@@ -101,6 +104,10 @@ async def test_direct_audit_tool_does_not_create_queue_row(tmp_path, monkeypatch
     result = json.loads(json.loads(data)['result']['content'][0]['text'])
     assert result['status'] == 'COMPLETED'
     assert adapter.queue.db.execute('SELECT count(*) FROM metis_executions').fetchone()[0] == 0
+    receipt = adapter.queue.db.execute('SELECT * FROM metis_direct_audits').fetchone()
+    assert receipt['status'] == 'COMPLETED'
+    assert receipt['context_project'] == 'METIS'
+    assert receipt['origin_model'] == 'ANTHROPIC'
     adapter.queue.close()
 
 

@@ -97,6 +97,14 @@ class Queue:
             status TEXT NOT NULL, created REAL NOT NULL, dispatched REAL,
             result_enc TEXT, UNIQUE(owner, idem))""")
         self.db.execute("CREATE TABLE IF NOT EXISTS metis_pause (execution_id TEXT PRIMARY KEY)")
+        self.db.execute("""CREATE TABLE IF NOT EXISTS metis_direct_audits (
+            receipt_id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+            context_project TEXT NOT NULL, origin_model TEXT NOT NULL,
+            target_provider TEXT NOT NULL, status TEXT NOT NULL,
+            created REAL NOT NULL, elapsed_ms INTEGER NOT NULL,
+            cost_known INTEGER NOT NULL, cost_usd REAL,
+            provider_request_id TEXT, request_sha256 TEXT NOT NULL,
+            receipt_enc TEXT NOT NULL)""")
         writes.initialize(self.db)
         columns = {x[1] for x in self.db.execute("PRAGMA table_info(metis_executions)")}
         if "origin_model" not in columns:
@@ -134,6 +142,27 @@ class Queue:
             self.db.execute("ROLLBACK")
             raise
         return self.view(row)
+
+    def record_direct_audit(self, owner, origin_model, request, result):
+        """Persist the direct relay receipt without creating queue work or external writes."""
+        receipt_id = result.get("receipt_id")
+        if not isinstance(receipt_id, str) or not receipt_id:
+            raise ValueError("direct_receipt_id_required")
+        cost = result.get("cost_usd")
+        self.db.execute("""INSERT OR IGNORE INTO metis_direct_audits
+            (receipt_id,owner,context_project,origin_model,target_provider,status,
+             created,elapsed_ms,cost_known,cost_usd,provider_request_id,
+             request_sha256,receipt_enc)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                receipt_id, owner, result.get("context_project", "UNSCOPED"),
+                origin_model, result.get("target_model_provider", "UNKNOWN"),
+                result.get("status", "FAILED"), time.time(),
+                int(result.get("elapsed_ms") or 0),
+                1 if result.get("cost_known") is True else 0,
+                cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+                result.get("provider_request_id"), hashlib.sha256(request.encode()).hexdigest(),
+                encrypt(self.secret, json.dumps(result, ensure_ascii=False))))
+        return receipt_id
 
     def get(self, owner, eid):
         if not isinstance(eid, str):
