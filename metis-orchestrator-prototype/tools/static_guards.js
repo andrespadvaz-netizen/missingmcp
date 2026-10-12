@@ -10,7 +10,7 @@
  *   G2  cero superficies de escritura productiva: ninguna referencia ejecutable
  *       a GmailApp, ni a métodos de mutación de DriveApp/CalendarApp;
  *   G3  ningún verbo HTTP de mutación (PUT/PATCH/DELETE) en ningún adaptador;
- *   G4  UrlFetchApp sólo existe en los cuatro adaptadores autorizados;
+ *   G4  UrlFetchApp sólo existe en los adaptadores autorizados;
  *   G5  `SimulatedWriteAdapter.gs` no referencia ninguna superficie externa;
  *   G6  `appsscript.json` declara exactamente los scopes de sólo lectura, sin
  *       scope de escritura ni de `script.scriptapp` (que permitiría triggers);
@@ -155,7 +155,8 @@ guard('G3', 'mutaciones sólo en el actuador productivo explícito', () => {
 
 // -------------------------------------------------------------------- G4
 guard('G4', 'UrlFetchApp sólo en los adaptadores autorizados', () => {
-  const allowed = ['NotionReadAdapter.gs', 'AsanaReadAdapter.gs', 'OpenAIAdapter.gs', 'AnthropicAdapter.gs', 'ProductiveAdapter.gs'];
+  const allowed = ['NotionReadAdapter.gs', 'AsanaReadAdapter.gs', 'OpenAIAdapter.gs',
+    'AnthropicAdapter.gs', 'ProductiveAdapter.gs', 'HealthOSBriefAdapter.gs'];
   const fails = [];
   for (const f of files) {
     if (/\bUrlFetchApp\b/.test(f.code) && allowed.indexOf(f.name) === -1) {
