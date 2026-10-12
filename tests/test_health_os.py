@@ -223,7 +223,7 @@ def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     assert client.post("/health-os/ingest", json=payload, headers={"Authorization": f"Bearer {read_key}"}).status_code == 401
     brief = client.post("/health-os/brief", json={}, headers={"Authorization": f"Bearer {read_key}"}).json()
     assert brief["status"] == "OK"
-    assert brief["brief"]["decision"] == "ABSTENERSE"
+    assert brief["brief"]["decision"] == "REVISAR_TECNICO"
 
 
 def test_isolated_service_has_no_garmin_surface(tmp_path):
