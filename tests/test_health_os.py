@@ -635,3 +635,27 @@ def test_short_apple_watch_sleep_stage_segments_are_valid_evidence():
     assert health.ingest_observations([observation("sleep_duration", 0.5, "min", pid="stage")]).accepted == 1
     with pytest.raises(ValueError):
         observation("sleep_duration", 1441, "min", pid="too-long")
+
+
+def test_admin_cli_runs_sanitation_and_transition_with_env_keys(tmp_path, monkeypatch):
+    from missingmcp.health_os import admin_client
+    db, _ = _seed_invalid(tmp_path)
+    client = _service(tmp_path)
+    monkeypatch.setattr(admin_client.httpx, "request",
+                        lambda method, url, json=None, headers=None, timeout=None:
+                        client.request(method, url.replace("https://h.example", ""), json=json, headers=headers))
+    monkeypatch.delenv("HEALTH_OS_INGEST_KEY", raising=False)
+    monkeypatch.setenv("HEALTH_OS_READ_KEY", "r" * 40)
+    base = ["--base-url", "https://h.example"]
+    assert admin_client.run(base + ["report"])["report"]["invalid_records"] == 4
+    with pytest.raises(SystemExit):
+        admin_client.run(base + ["quarantine-apply", "--expected", "4"])
+    monkeypatch.setenv("HEALTH_OS_INGEST_KEY", "i" * 40)
+    assert admin_client.run(base + ["quarantine-apply", "--expected", "3"])["http"] == 400
+    assert admin_client.run(base + ["quarantine-apply", "--expected", "4"])["quarantined"] == 4
+    with pytest.raises(SystemExit):
+        admin_client.run(base + ["transition", "--started-at", "2026-10-04T00:00:00"])
+    assert admin_client.run(base + ["transition", "--started-at", "2026-10-04T00:00:00-06:00"])["http"] == 200
+    verify = admin_client.run(base + ["verify"])
+    assert verify["persisted_invalid_records"] == 0 and verify["legend_present"] is True
+    assert set(verify) == {"http", "status", "decision", "quality_pass", "stale", "persisted_invalid_records", "legend_present"}
