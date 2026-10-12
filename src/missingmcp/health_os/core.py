@@ -27,6 +27,13 @@ APPLE_HEALTH = "APPLE_HEALTH"
 SPEEDIANCE = "SPEEDIANCE"
 GARMIN_LEGACY = "GARMIN_LEGACY"
 
+# The operator approved a narrowly bounded completion extension: the current
+# Apple sleep series has 26 distinct days in the standard 42-day window and
+# may use the two immediately preceding local days.  This alters only whether
+# a historical baseline is mature; it never authorizes a medical decision.
+_BASELINE_DAYS = 28
+_BASELINE_WINDOW_DAYS = 44
+
 
 @dataclass(frozen=True, slots=True)
 class MetricObservation:
@@ -260,7 +267,8 @@ class HealthOS:
             return BaselineEra.APPLE_TRANSITION
         return BaselineEra.APPLE_BASELINE
 
-    def metric_baseline_days(self, metric: str, at: datetime, window_days: int = 42) -> int:
+    def metric_baseline_days(self, metric: str, at: datetime,
+                             window_days: int = _BASELINE_WINDOW_DAYS) -> int:
         """Number of Apple local days supporting one metric's current baseline.
 
         Baselines belong to individual metrics; a long steps history cannot make
@@ -274,7 +282,7 @@ class HealthOS:
                     and x.semantic != "model_interpreted"})
 
     def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
-        return self.metric_baseline_days(metric, at) >= 28
+        return self.metric_baseline_days(metric, at) >= _BASELINE_DAYS
 
     def assess_readiness(self, now: datetime, subjective_flags: Iterable[str] = ()) -> DecisionAssessment:
         """Return a conservative, explainable state; never changes a plan itself."""

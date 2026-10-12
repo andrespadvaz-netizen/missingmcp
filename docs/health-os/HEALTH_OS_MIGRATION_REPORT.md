@@ -30,6 +30,9 @@ espera modo POSIX `0600`; Windows devuelve `0666`. No afecta a Health OS.
 
 1. Usar ChatGPT móvil para consultas y análisis Apple Health, guardando la
    procedencia de cada resultado.
-2. Recibir y validar 14 días de datos reales para cerrar el baseline Apple.
+2. La fuerza detallada de Speediance queda diferida: la fuente oficial confirma
+   historial y análisis en su app, pero no publica una exportación CSV/JSON/API
+   confirmada. Apple Health queda como fuente operativa de sesiones; el
+   adaptador Speediance sólo se habilitará al disponer de evidencia de interfaz.
 3. Ejecutar la auditoría cruzada de Claude cuando el Gateway permita lecturas
    completas. Está diferida por instrucción de Andrés, no se declara aprobada.

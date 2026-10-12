@@ -300,6 +300,17 @@ def test_readiness_abstains_until_metric_specific_baselines_are_stable():
     assert health.assess_readiness(when(29), ["dolor"]).state == DecisionState.DETEN
 
 
+def test_baseline_allows_the_documented_two_day_contiguous_extension():
+    health = make_health()
+    now = datetime(2026, 10, 11, 8, tzinfo=MX)
+    # 26 days live in the ordinary 42-day window; the immediately preceding
+    # two days complete the operator-approved, 44-day historical baseline.
+    for offset in range(17, 45):
+        health.ingest_observations([observation("sleep_duration", 7, "hr", at=now - timedelta(days=offset), pid=f"sleep:{offset}")])
+    assert health.metric_baseline_days("sleep_duration", now) == 28
+    assert health.metric_has_stable_baseline("sleep_duration", now) is True
+
+
 def test_model_interpreted_value_never_drives_readiness():
     health = make_health()
     health.set_apple_transition(when(1))
