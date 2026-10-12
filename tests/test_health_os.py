@@ -311,6 +311,16 @@ def test_baseline_allows_the_documented_two_day_contiguous_extension():
     assert health.metric_has_stable_baseline("sleep_duration", now) is True
 
 
+def test_baseline_window_counts_the_first_eligible_local_sleep_day():
+    health = make_health()
+    now = datetime(2026, 10, 11, 19, tzinfo=MX)
+    # The observation ends early on the first calendar day in the 44-day
+    # window.  It must count even though it predates the time-of-day of now.
+    first_day = datetime(2026, 8, 28, 6, tzinfo=MX)
+    health.ingest_observations([observation("sleep_duration", 7, "hr", at=first_day, pid="first-day")])
+    assert health.metric_baseline_days("sleep_duration", now) == 1
+
+
 def test_model_interpreted_value_never_drives_readiness():
     health = make_health()
     health.set_apple_transition(when(1))

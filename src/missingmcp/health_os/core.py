@@ -276,9 +276,14 @@ class HealthOS:
         """
         if at.tzinfo is None:
             raise ValueError("at must be timezone-aware")
-        lower = at - timedelta(days=window_days)
+        # Baselines are defined in operator-local *calendar days*, not a
+        # rolling number of 24-hour instants.  A night ending at 06:00 on the
+        # first eligible local day must not be discarded merely because the
+        # Brief runs later that afternoon.
+        lower_day = (at.astimezone(self.timezone).date() - timedelta(days=window_days)).isoformat()
         return len({self.local_day(x.observed_at) for x in self._observations.values()
-                    if x.source == APPLE_HEALTH and x.metric == metric and x.observed_at >= lower
+                    if x.source == APPLE_HEALTH and x.metric == metric
+                    and self.local_day(x.observed_at) >= lower_day
                     and x.semantic != "model_interpreted"})
 
     def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
