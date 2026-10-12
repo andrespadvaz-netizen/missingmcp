@@ -6,13 +6,19 @@ import uuid
 import httpx
 
 
-SYSTEM = """You are the independent reviewer in the Metis dual-model system.
-Audit only the self-contained evidence supplied in the request. Keep project
+SYSTEM = """You are the receiving model in the Metis dual-model system.
+Perform the requested transfer, review or audit using only the self-contained evidence supplied. Keep project
 contexts strictly separated. Do not perform writes, send messages, change a
 CANON, or claim access to sources that are not in the request. Distinguish
 verified facts from inferences. If a real decision from Andres is indispensable,
 begin the answer with REQUIRES_ANDRES: and state the single decision needed.
-Otherwise return a complete, actionable audit in Spanish."""
+Otherwise answer in Spanish and use the shortest complete response that satisfies
+the request. Do not invent objections when the request is a simple receipt check."""
+
+PRICE_USD_PER_1K = {
+    "OPENAI": {"input": 0.00125, "output": 0.010},
+    "ANTHROPIC": {"input": 0.002, "output": 0.010},
+}
 
 
 class DirectAuditError(RuntimeError):
@@ -53,10 +59,11 @@ class DirectAudit:
                 "writes_attempted": 0,
             }
         status = "REQUIRES_ANDRES" if answer.lstrip().upper().startswith("REQUIRES_ANDRES:") else "COMPLETED"
+        cost = self._cost(target, usage)
         return {
             "status": status, "final_answer": answer, "model": model,
             "provider_request_id": provider_id, "usage": usage,
-            "cost_known": False, "cost_usd": None,
+            "cost_known": cost is not None, "cost_usd": cost,
             "elapsed_ms": round((time.monotonic() - started) * 1000),
             "receipt_id": receipt_id, "context_project": context_project,
             "target_model_provider": target, "transport": "DIRECT_API",
@@ -66,7 +73,7 @@ class DirectAudit:
     async def _anthropic(self, request, context):
         body = {
             "model": self.config.metis_anthropic_model,
-            "max_tokens": 8192,
+            "max_tokens": 4096,
             "system": SYSTEM,
             "messages": [{"role": "user", "content": f"Contexto: {context}\n\n{request}"}],
         }
@@ -85,7 +92,7 @@ class DirectAudit:
             "model": self.config.metis_openai_model,
             "input": [{"role": "system", "content": SYSTEM},
                       {"role": "user", "content": f"Contexto: {context}\n\n{request}"}],
-            "max_output_tokens": 8192,
+            "max_output_tokens": 4096,
         }
         data, request_id = await self._post("https://api.openai.com/v1/responses", body, {
             "Authorization": f"Bearer {self.config.metis_openai_api_key}",
@@ -120,3 +127,13 @@ class DirectAudit:
             return response.json(), request_id
         except ValueError as exc:
             raise DirectAuditError("PROVIDER_INVALID_JSON", False, request_id) from exc
+
+    @staticmethod
+    def _cost(provider, usage):
+        if not isinstance(usage, dict):
+            return None
+        input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
+        if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+            return None
+        price = PRICE_USD_PER_1K[provider]
+        return round(input_tokens / 1000 * price["input"] + output_tokens / 1000 * price["output"], 12)

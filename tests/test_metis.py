@@ -61,6 +61,8 @@ async def test_direct_audit_calls_opposite_provider_and_returns_terminal(monkeyp
     assert result['final_answer'] == 'Auditoría completa'
     assert result['transport'] == 'DIRECT_API'
     assert result['writes_attempted'] == 0
+    assert result['cost_known'] is True
+    assert result['cost_usd'] == .00007
     assert calls[0][0].endswith('/v1/messages')
 
 
