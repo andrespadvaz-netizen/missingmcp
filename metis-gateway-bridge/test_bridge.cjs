@@ -104,7 +104,7 @@ test('Authenticated run; exact full answer, engine ID, route, cost, restored lev
   assert.equal(r.state,'DONE');assert.equal(r.result.engine_execution_id,'engine-1');
   assert.equal(r.result.final_answer,'Texto íntegro 漢🙂'.repeat(5000));
   assert.equal(r.result.route,'CROSS_AUDIT');assert.equal(r.result.cost_usd,.2);
-  assert.equal(r.result.engine_version,45);assert.equal(r.result.engine_release,9);
+  assert.equal(r.result.engine_version,46);assert.equal(r.result.engine_release,9);
   assert.equal(f.level(),'LEVEL_0');assert.equal(f.calls(),1);
 });
 test('Retry after response loss does not repeat paid run',()=>{
@@ -225,7 +225,7 @@ test('Fail closed on missing secret, invalid signature, stale request and finger
 });
 test('Pin remains immutable and async trigger scope is explicit',()=>{
   const manifest=JSON.parse(fs.readFileSync(__dirname+'/appsscript.json'));
-  assert.equal(manifest.dependencies.libraries[0].version,'45');
+  assert.equal(manifest.dependencies.libraries[0].version,'46');
   assert.equal(manifest.dependencies.libraries[0].developmentMode,false);
   assert.ok(manifest.oauthScopes.includes('https://www.googleapis.com/auth/script.scriptapp'));
   assert.doesNotMatch(fs.readFileSync(__dirname+'/Bridge.gs','utf8'),/Logger\.|console\.|api\.openai\.com|api\.anthropic\.com/);
