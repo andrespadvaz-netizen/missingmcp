@@ -1023,6 +1023,13 @@ var Orchestrator = (function () {
 
   function _composeAnswer(execution, runtime, analysis, routing, producerText, simulations) {
     var lines = [];
+    // Controller-derived registry facts outrank model prose. Put the hard
+    // conflict before the generated answer so a plausible sentence such as
+    // "no hay contradicción" can never be the first or operative conclusion.
+    if (analysis && analysis.currency_conflicts && analysis.currency_conflicts.length) {
+      lines.push('HECHO DEL CONTROLADOR: existe una contradicción de vigencia; la corrida requiere decisión de Andrés.');
+      lines.push('');
+    }
     lines.push(producerText ? String(producerText).trim() : '(sin respuesta del modelo)');
     lines.push('');
     lines.push('Ruta: ' + execution.route + ' (' + routing.reason + ')');

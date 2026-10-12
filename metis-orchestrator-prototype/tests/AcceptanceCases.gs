@@ -200,6 +200,8 @@ function registerAcceptanceCases() {
     t.equals(conflicto.currency_conflicts[0].reason, 'ESTADO_VIGENTE_CON_SUSTITUTA', 'motivo nombrado');
     t.equals(conflicto.route, 'REQUIRES_ANDRES', 'la contradicción no la resuelve un modelo');
     t.equals(conflicto.status, 'REQUIRES_ANDRES', 'la corrida se detiene en Andrés');
+    t.ok(conflicto.final_answer.indexOf('HECHO DEL CONTROLADOR: existe una contradicción') === 0,
+      'el hecho duro precede y domina cualquier prosa incompatible del modelo');
     t.includes(conflicto.final_answer, 'No la resuelvo por juicio propio', 'y lo dice');
   });
 
