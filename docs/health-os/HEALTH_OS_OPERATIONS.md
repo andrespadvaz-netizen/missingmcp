@@ -29,7 +29,13 @@ semántica. Ausencias se rechazan: nunca se convierten en cero.
 ## Runbook de transición
 
 1. Registrar `POST /health-os/transition` con `started_at` ISO-8601 verificable.
-2. Enviar exportaciones Apple Health y, para fuerza, Speediance.
+2. Enviar la exportación nativa Apple Health con `apple_import_client`. Para
+   reanudar sin repetir lotes, se puede limitar a métricas (`--metric
+   sleep_duration`) y conservar un `--checkpoint`; este archivo local contiene
+   sólo identidad del ZIP, alcance y contador reconocido, nunca valores ni
+   identificadores de muestras. Para fuerza, `speediance_import_client` acepta
+   exclusivamente una exportación JSON explícita con `workout_id`, inicio, fin,
+   tipo y detalle de ejercicios cuando exista. No scrapea ni inventa datos.
 3. Revisar `data_quality(now)`: cobertura, antigüedad, mezcla de legado y sesiones.
 4. Tras 14 días locales distintos de datos Apple, cambia a `ERA_APPLE_BASELINE`.
 5. Mantener Garmin sólo como archivo histórico de lectura. Cualquier dato

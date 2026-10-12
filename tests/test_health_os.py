@@ -3,6 +3,7 @@ import io
 import zipfile
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
 from missingmcp.health_os.core import APPLE_HEALTH, GARMIN_LEGACY, SPEEDIANCE, DecisionState, HealthOS, MetricObservation, WorkoutSession
@@ -14,6 +15,7 @@ from missingmcp.health_os.service import build_health_os_app
 from missingmcp.health_os.apple_export import parse_apple_health_export
 from missingmcp.health_os.apple_import_client import _records, _export_entry, _stream_records, import_zip
 from missingmcp.health_os import apple_import_client
+from missingmcp.health_os.speediance_import_client import import_export as import_speediance_export
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -211,6 +213,19 @@ def test_native_apple_sleep_category_uses_only_asleep_intervals():
     assert parsed.observations[0]["value"] == 420
 
 
+def test_native_apple_catalog_includes_clinically_neutral_context_metrics():
+    xml = b'''<HealthData>
+      <Record type="HKQuantityTypeIdentifierBloodPressureSystolic" value="118" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierWalkingStepLength" value="62" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierDietaryProtein" value="120" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKCategoryTypeIdentifierMindfulSession" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:15:00 -0600"/>
+    </HealthData>'''
+    parsed = parse_apple_health_export(xml)
+    assert {x["metric"] for x in parsed.observations} == {
+        "systolic_blood_pressure", "step_length", "dietary_protein", "mindfulness_duration",
+    }
+
+
 def test_streaming_import_reader_accepts_renamed_apple_export(tmp_path):
     archive_path = tmp_path / "exportar.zip"
     with zipfile.ZipFile(archive_path, "w") as archive:
@@ -254,6 +269,20 @@ def test_resumable_import_filters_metrics_and_never_puts_phi_in_checkpoint(tmp_p
     assert "55" not in saved and "Apple Watch" not in saved and "secret" not in saved
     second = import_zip(archive_path, "https://health.example", "secret", metrics=["sleep_duration"], checkpoint=checkpoint)
     assert second["checkpoint_skipped"] == 1 and len(posted) == 1
+
+
+def test_speediance_export_requires_real_workout_identity_before_transport(tmp_path):
+    export = tmp_path / "speediance.json"
+    export.write_text(json.dumps({"workouts": [{
+        "workout_id": "speediance:1", "start_time": "2026-10-01T18:00:00-06:00",
+        "end_time": "2026-10-01T19:00:00-06:00", "activity_type": "strength",
+        "exercises": [{"name": "squat", "sets": 3}],
+    }]}), encoding="utf-8")
+    with pytest.raises(httpx.HTTPError):
+        import_speediance_export(export, "https://127.0.0.1:1", "key")
+    export.write_text(json.dumps({"workouts": [{"activity_type": "strength"}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="workout_id"):
+        import_speediance_export(export, "https://127.0.0.1:1", "key")
 
 
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():

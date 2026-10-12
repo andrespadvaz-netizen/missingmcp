@@ -21,6 +21,8 @@ _METRICS: dict[str, tuple[str, str]] = {
     "HKQuantityTypeIdentifierHeartRateVariabilitySDNN": ("hrv", "ms"),
     "HKQuantityTypeIdentifierOxygenSaturation": ("oxygen_saturation", "%"),
     "HKQuantityTypeIdentifierRespiratoryRate": ("respiratory_rate", "breaths/min"),
+    "HKQuantityTypeIdentifierBloodPressureSystolic": ("systolic_blood_pressure", "mmHg"),
+    "HKQuantityTypeIdentifierBloodPressureDiastolic": ("diastolic_blood_pressure", "mmHg"),
     "HKQuantityTypeIdentifierBodyMass": ("weight", "kg"),
     "HKQuantityTypeIdentifierBodyFatPercentage": ("body_fat_percentage", "%"),
     "HKQuantityTypeIdentifierLeanBodyMass": ("lean_body_mass", "kg"),
@@ -31,11 +33,33 @@ _METRICS: dict[str, tuple[str, str]] = {
     "HKQuantityTypeIdentifierDistanceWalkingRunning": ("distance", "km"),
     "HKQuantityTypeIdentifierActiveEnergyBurned": ("active_energy", "kcal"),
     "HKQuantityTypeIdentifierAppleExerciseTime": ("exercise_time", "min"),
+    "HKQuantityTypeIdentifierAppleStandTime": ("stand_time", "min"),
     "HKQuantityTypeIdentifierWalkingSpeed": ("walking_speed", "km/h"),
+    "HKQuantityTypeIdentifierWalkingAsymmetryPercentage": ("walking_asymmetry", "%"),
+    "HKQuantityTypeIdentifierWalkingDoubleSupportPercentage": ("double_support_percentage", "%"),
+    "HKQuantityTypeIdentifierWalkingStepLength": ("step_length", "cm"),
+    "HKQuantityTypeIdentifierStairAscentSpeed": ("stair_ascent_speed", "km/h"),
+    "HKQuantityTypeIdentifierStairDescentSpeed": ("stair_descent_speed", "km/h"),
     "HKQuantityTypeIdentifierSixMinuteWalkTestDistance": ("distance", "km"),
+    "HKQuantityTypeIdentifierEnvironmentalAudioExposure": ("environmental_noise", "dBA"),
+    "HKQuantityTypeIdentifierHeadphoneAudioExposure": ("headphone_noise", "dBA"),
+    "HKQuantityTypeIdentifierDietaryProtein": ("dietary_protein", "g"),
+    "HKQuantityTypeIdentifierDietaryCarbohydrates": ("dietary_carbohydrates", "g"),
+    "HKQuantityTypeIdentifierDietaryFatTotal": ("dietary_fat", "g"),
+    "HKQuantityTypeIdentifierDietaryFiber": ("dietary_fiber", "g"),
+    "HKQuantityTypeIdentifierDietarySugar": ("dietary_sugar", "g"),
+    "HKQuantityTypeIdentifierDietaryFatSaturated": ("dietary_saturated_fat", "g"),
+    "HKQuantityTypeIdentifierDietarySodium": ("dietary_sodium", "mg"),
+    "HKQuantityTypeIdentifierDietaryPotassium": ("dietary_potassium", "mg"),
+    "HKQuantityTypeIdentifierDietaryCalcium": ("dietary_calcium", "mg"),
+    "HKQuantityTypeIdentifierDietaryMagnesium": ("dietary_magnesium", "mg"),
+    "HKQuantityTypeIdentifierDietaryPhosphorus": ("dietary_phosphorus", "mg"),
+    "HKQuantityTypeIdentifierDietaryIron": ("dietary_iron", "mg"),
+    "HKQuantityTypeIdentifierDietaryVitaminC": ("dietary_vitamin_c", "mg"),
 }
 
 _SLEEP_ANALYSIS = "HKCategoryTypeIdentifierSleepAnalysis"
+_MINDFUL_SESSION = "HKCategoryTypeIdentifierMindfulSession"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +104,15 @@ def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] 
         if minutes > 0:
             return {
                 "metric": "sleep_duration", "value": minutes, "unit": "min",
+                "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+            }
+    if apple_type == _MINDFUL_SESSION:
+        start = datetime.fromisoformat(attributes["startDate"])
+        end = datetime.fromisoformat(attributes["endDate"])
+        minutes = (end - start).total_seconds() / 60
+        if minutes > 0:
+            return {
+                "metric": "mindfulness_duration", "value": minutes, "unit": "min",
                 "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
             }
     return None
