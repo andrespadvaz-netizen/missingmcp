@@ -724,3 +724,23 @@ def test_monthly_history_keeps_families_apart_and_coverage_has_no_values(tmp_pat
     read = {"Authorization": "Bearer " + "r" * 40}
     assert client.get("/health-os/history", headers={"Authorization": "Bearer " + "i" * 40}).status_code == 401
     assert client.get("/health-os/coverage", headers=read).json()["status"] == "OK"
+
+
+def test_checkpoint_write_survives_transient_windows_locks(tmp_path, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(apple_import_client, "_CHECKPOINT_BACKOFF_SECONDS", 0)
+    real_replace = Path.replace
+    calls = {"n": 0}
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError("locked")
+        return real_replace(self, target)
+    monkeypatch.setattr(Path, "replace", flaky)
+    checkpoint = tmp_path / "resume.json"
+    apple_import_client._write_checkpoint(checkpoint, {"archive": "x"}, 807202)
+    assert json.loads(checkpoint.read_text())["completed_records"] == 807202
+    monkeypatch.setattr(Path, "replace", lambda self, target: (_ for _ in ()).throw(PermissionError("locked")))
+    with pytest.raises(OSError) as raised:
+        apple_import_client._write_checkpoint(checkpoint, {"archive": "x"}, 1)
+    assert raised.value.stage == "checkpoint_write"

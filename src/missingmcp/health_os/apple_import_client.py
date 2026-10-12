@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import zipfile
 from collections import Counter
 from datetime import datetime
@@ -23,6 +24,18 @@ import httpx
 
 from .apple_export import _provenance, observation_from_apple_record
 from .core import APPLE_HEALTH
+
+_CHECKPOINT_RETRIES = 12
+_CHECKPOINT_BACKOFF_SECONDS = 0.25
+
+
+class _ImportStageError(OSError):
+    """Names the import stage that failed without exposing paths or values."""
+
+    def __init__(self, stage: str) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
 
 # Keep each request comfortably below the API limit and short enough for the
 # encrypted SQLite writer to remain responsive on a single Railway replica.
@@ -143,11 +156,23 @@ def _load_checkpoint(path: Path, identity: dict[str, Any]) -> int:
 
 
 def _write_checkpoint(path: Path, identity: dict[str, Any], completed: int) -> None:
-    """Atomically persist only an acknowledged record count, never PHI."""
+    """Atomically persist only an acknowledged record count, never PHI.
+
+    On Windows, ``os.replace`` fails with PermissionError while an antivirus,
+    indexer or sync client briefly holds the target file open.  The count is
+    retried with backoff instead of aborting a long import.
+    """
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps({"identity": identity, "completed_records": completed},
                                     sort_keys=True), encoding="utf-8")
-    temporary.replace(path)
+    for attempt in range(_CHECKPOINT_RETRIES):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == _CHECKPOINT_RETRIES - 1:
+                raise _ImportStageError("checkpoint_write") from None
+            time.sleep(_CHECKPOINT_BACKOFF_SECONDS * (attempt + 1))
 
 
 def import_zip(zip_path: Path, endpoint: str, key: str, since: datetime | None = None,
@@ -239,7 +264,10 @@ def main() -> None:
         print(json.dumps(import_zip(arguments.zip_path, arguments.endpoint, key, since,
                                    arguments.metric, arguments.checkpoint), sort_keys=True))
     except (OSError, ValueError, ET.ParseError, httpx.HTTPError, RuntimeError) as exc:
-        print(json.dumps({"status": "FAILED", "error": type(exc).__name__}), file=sys.stderr)
+        failure = {"status": "FAILED", "error": type(exc).__name__}
+        if isinstance(exc, _ImportStageError):
+            failure["stage"] = exc.stage
+        print(json.dumps(failure), file=sys.stderr)
         raise SystemExit(1) from exc
 
 
