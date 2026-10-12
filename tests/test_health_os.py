@@ -803,3 +803,68 @@ def test_tagged_copy_of_a_measurement_wins_over_an_untagged_legacy_copy():
     assert next(iter(health._observations.values())).device_source == "garmin"
     health.ingest_observations([legacy])  # an untagged copy never erases the tag
     assert next(iter(health._observations.values())).device_source == "garmin"
+
+
+# --- Health Auto Export (iPhone REST automation) ---
+
+def _hae_payload():
+    return {"data": {
+        "metrics": [
+            {"name": "resting_heart_rate", "units": "count/min",
+             "data": [{"date": "2026-10-12 06:30:00 -0600", "qty": 61, "source": "Apple Watch de Andrés"}]},
+            {"name": "heart_rate_variability", "units": "ms",
+             "data": [{"date": "2026-10-12 03:10:00 -0600", "qty": 44.5, "source": "Apple Watch de Andrés"}]},
+            {"name": "blood_oxygen_saturation", "units": "%",
+             "data": [{"date": "2026-10-12 03:20:00 -0600", "qty": 0.97, "source": "Apple Watch de Andrés"}]},
+            {"name": "weight_&_body_mass", "units": "lb",
+             "data": [{"date": "2026-10-12 07:00:00 -0600", "qty": 126.0, "source": "Renpho"}]},
+            {"name": "sleep_analysis", "units": "hr", "data": [
+                {"startDate": "2026-10-12 00:00:00 -0600", "endDate": "2026-10-12 01:30:00 -0600", "value": "Core", "qty": 1.5, "source": "Apple Watch de Andrés"},
+                {"startDate": "2026-10-12 01:30:00 -0600", "endDate": "2026-10-12 01:40:00 -0600", "value": "Awake", "qty": 0.17, "source": "Apple Watch de Andrés"},
+                {"startDate": "2026-10-12 01:40:00 -0600", "endDate": "2026-10-12 02:40:00 -0600", "value": "Deep", "qty": 1.0, "source": "Apple Watch de Andrés"}]},
+            {"name": "mystery_metric", "units": "x", "data": [{"date": "2026-10-12 07:00:00 -0600", "qty": 1}]},
+        ],
+        "workouts": [{"id": "abc", "name": "Traditional Strength Training",
+                      "start": "2026-10-11 18:00:00 -0600", "end": "2026-10-11 19:00:00 -0600", "duration": 3600}],
+    }}
+
+
+def test_health_auto_export_maps_raw_samples_without_inventing_values():
+    from missingmcp.health_os.health_auto_export import parse_health_auto_export
+    observations, workouts, skipped = parse_health_auto_export(_hae_payload())
+    by_metric = {}
+    for o in observations:
+        by_metric.setdefault(o["metric"], []).append(o)
+    assert [o["value"] for o in by_metric["sleep_duration"]] == [90.0, 60.0]  # awake excluded
+    assert by_metric["resting_heart_rate"][0]["device_source"] == "apple_watch"
+    assert by_metric["weight"][0]["device_source"] == "other_app" and by_metric["weight"][0]["unit"] == "lb"
+    assert skipped == {"ignored_metric:mystery_metric": 1}
+    assert workouts[0]["activity_type"] == "Traditional Strength Training"
+    with pytest.raises(ValueError):
+        parse_health_auto_export({"metrics": []})
+
+
+def test_health_auto_export_refuses_aggregated_sleep():
+    from missingmcp.health_os.health_auto_export import parse_health_auto_export
+    payload = {"data": {"metrics": [{"name": "sleep_analysis", "units": "hr",
+                                     "data": [{"date": "2026-10-12 00:00:00 -0600", "totalSleep": 7.1}]}]}}
+    observations, _, skipped = parse_health_auto_export(payload)
+    assert observations == [] and skipped == {"sleep_aggregated_not_supported": 1}
+
+
+def test_health_auto_export_route_ingests_and_deduplicates_against_the_native_export(tmp_path):
+    client = _service(tmp_path)
+    ingest = {"Authorization": "Bearer " + "i" * 40}
+    assert client.post("/health-os/ingest/health-auto-export", headers={"Authorization": "Bearer " + "r" * 40}, json=_hae_payload()).status_code == 401
+    # The same sleep segment already imported from export.xml (minutes, observed at the end).
+    native = {"metric": "sleep_duration", "value": 90.0, "unit": "min", "observed_at": "2026-10-12T01:30:00-06:00",
+              "provenance_id": "apple-export:x", "semantic": "measured", "device_source": "apple_watch"}
+    assert client.post("/health-os/ingest", headers=ingest, json={"source": "APPLE_HEALTH", "observations": [native]}).json()["accepted"] == 1
+    body = client.post("/health-os/ingest/health-auto-export", headers=ingest, json=_hae_payload()).json()
+    assert body["status"] == "OK" and body["rejected"] == 0
+    assert body["duplicates"] == 1  # the Core segment matched the native row
+    assert body["accepted"] == 6     # 1 more sleep segment, RHR, HRV, SpO2, weight, workout
+    assert "126" not in json.dumps(body) and "61" not in json.dumps(body)
+    again = client.post("/health-os/ingest/health-auto-export", headers=ingest, json=_hae_payload()).json()
+    assert again["accepted"] == 0
+    assert client.post("/health-os/ingest/health-auto-export", headers=ingest, content=b"{").status_code == 400

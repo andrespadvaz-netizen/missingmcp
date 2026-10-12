@@ -18,6 +18,7 @@ from .. import security, store
 from ..config import Config, load_config
 from ..log import resolve_log_level, setup_logging
 from .persistence import HealthOSRepository
+from .health_auto_export import parse_health_auto_export
 from .apple_export import parse_apple_health_export
 from .core import APPLE_HEALTH, SPEEDIANCE
 
@@ -49,6 +50,26 @@ def build_health_os_app(config: Config) -> Starlette:
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **result}, headers={"Cache-Control": "no-store"})
+
+    async def health_auto_export(request):
+        """Scheduled REST automation of the iPhone app "Health Auto Export" (JSON)."""
+        if not authorized_ingest(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=16 * 1024 * 1024)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            observations, workouts, skipped = parse_health_auto_export(json.loads(raw.decode("utf-8")))
+            result = repo.ingest(APPLE_HEALTH, observations, workouts)
+        except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        # Counts and reason names only: no submitted value ever echoes back.
+        reasons: dict[str, int] = {}
+        for reason in result["rejected"]:
+            reasons[reason] = reasons.get(reason, 0) + 1
+        return JSONResponse({"status": "OK", "accepted": result["accepted"], "duplicates": result["duplicates"],
+                             "rejected": len(result["rejected"]), "rejected_by_reason": reasons, "skipped": skipped},
+                            headers={"Cache-Control": "no-store"})
 
     async def quality(request):
         if not authorized_read(request):
@@ -142,6 +163,7 @@ def build_health_os_app(config: Config) -> Starlette:
     return Starlette(routes=[
         Route("/healthz", healthz), Route("/health-os/ingest", ingest, methods=["POST"]),
         Route("/health-os/import/apple-export", apple_export, methods=["POST"]),
+        Route("/health-os/ingest/health-auto-export", health_auto_export, methods=["POST"]),
         Route("/health-os/quality", quality), Route("/health-os/brief", brief, methods=["POST"]),
         Route("/health-os/transition", transition, methods=["POST"]),
         Route("/health-os/trends", trends), Route("/health-os/quarantine", quarantine_report),
