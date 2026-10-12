@@ -53,7 +53,8 @@ var Config = (function () {
     OPENAI_API_KEY: 'METIS_OPENAI_API_KEY',
     ANTHROPIC_API_KEY: 'METIS_ANTHROPIC_API_KEY',
     NOTION_API_KEY: 'METIS_NOTION_API_KEY',
-    ASANA_API_KEY: 'METIS_ASANA_API_KEY'
+    ASANA_API_KEY: 'METIS_ASANA_API_KEY',
+    HEALTH_OS_INGEST_KEY: 'METIS_HEALTH_OS_INGEST_KEY'
   };
 
   /** Parámetros no secretos, también en Script Properties. */
@@ -61,7 +62,8 @@ var Config = (function () {
     SOURCE_PARTITIONS: 'METIS_SOURCE_PARTITIONS',
     PRICING: 'METIS_PRICING',
     LIMITS: 'METIS_LIMITS',
-    DECISIONS_DATA_SOURCE_ID: 'METIS_DECISIONS_DATA_SOURCE_ID'
+    DECISIONS_DATA_SOURCE_ID: 'METIS_DECISIONS_DATA_SOURCE_ID',
+    HEALTH_OS_BASE_URL: 'METIS_HEALTH_OS_BASE_URL'
   };
 
   /** Capacidades abstractas visibles para los modelos (spec §12). */
