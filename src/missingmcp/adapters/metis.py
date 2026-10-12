@@ -26,8 +26,9 @@ TOOLS = [
                     "required":["request","context"]},
      "annotations":{"readOnlyHint":True,"destructiveHint":False,"idempotentHint":False,"openWorldHint":True}},
     {"name":"metis_create_execution", "description":
-     "Submit Andrés's natural-language request to Metis. The engine determines context and routing. "
-     "Preserve the user's substantive wording, including requests to audit or independently review, "
+     "Submit a durable Metis execution only when the requested action can produce authorized writes or external side effects. "
+     "Never use this tool for a read-only audit, review, critique, reconciliation or model-to-model information transfer; "
+     "use metis_cross_audit for those requests. Preserve the user's substantive wording for durable execution, "
      "context, constraints and qualifications. Do not summarize away the requested action. "
      "This tool does not receive your conversation or project instructions automatically. "
      "Populate the required structured context yourself from the current conversation; never ask the user to repeat an unambiguous established project. "
