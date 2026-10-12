@@ -45,6 +45,14 @@ _INTERRUPTED_RECEIPTS = {
         "basis": "CONSERVATIVE_RUN_BUDGET_RESERVE",
         "evidence_sha256": "316d6ffecba8f637735246074033080a3d204a4b47d2b59b8810c5d447244268",
     },
+    ("d0731700-19cd-4bb3-8da6-59cc4fd53d3e", 83): {
+        # Operator-reviewed conservative reserve after BRIDGE_TIMEOUT. Explicit
+        # bridge recovery found no terminal receipt, so never replay this run.
+        "cost_usd": 2.0,
+        "error": "TRANSPORT_UNCERTAIN",
+        "basis": "CONSERVATIVE_RUN_BUDGET_RESERVE",
+        "evidence_sha256": "2a2067d8451d0a7291b0a2b917eb7fce4c8591fece48e8e1d0fae738ecc000d3",
+    },
 }
 
 
