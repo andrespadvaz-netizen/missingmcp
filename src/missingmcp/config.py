@@ -55,6 +55,10 @@ class Config:
     # Read-only credential for presentation consumers such as the Daily Brief.
     # It must never be accepted by an ingestion endpoint.
     health_os_read_key: str = ""
+    # Dedicated encryption key for Health OS evidence at rest.  This is
+    # intentionally separate from the generic gateway credential and from the
+    # two bearer credentials used at the API boundary.
+    health_os_data_key: str = ""
     health_os_timezone: str = "America/Mexico_City"
 
 
@@ -76,6 +80,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
     health_os_read_key = env.get("HEALTH_OS_READ_KEY", "")
+    health_os_data_key = env.get("HEALTH_OS_DATA_KEY", "")
     health_os_timezone = env.get("HEALTH_OS_TIMEZONE", "America/Mexico_City")
     try:
         ZoneInfo(health_os_timezone)
@@ -97,6 +102,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         raise ValueError("HEALTH_OS_INGEST_KEY must be distinct from GATEWAY_SECRET and at least 32 characters")
     if health_os_read_key and (len(health_os_read_key) < 32 or health_os_read_key in {secret, health_os_ingest_key}):
         raise ValueError("HEALTH_OS_READ_KEY must be distinct from GATEWAY_SECRET and HEALTH_OS_INGEST_KEY and at least 32 characters")
+    health_os_configured = any((health_os_ingest_key, health_os_read_key, health_os_data_key))
+    if health_os_configured and not all((health_os_ingest_key, health_os_read_key, health_os_data_key)):
+        raise ValueError("HEALTH_OS_INGEST_KEY, HEALTH_OS_READ_KEY and HEALTH_OS_DATA_KEY must be set together")
+    if health_os_data_key and (len(health_os_data_key) < 32 or health_os_data_key in {secret, health_os_ingest_key, health_os_read_key}):
+        raise ValueError("HEALTH_OS_DATA_KEY must be distinct from all Health OS boundary and gateway secrets and at least 32 characters")
     return Config(
         gateway_secret=secret,
         public_url=public_url,
@@ -110,6 +120,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_lens_context_key=metis_lens_context_key,
         health_os_ingest_key=health_os_ingest_key,
         health_os_read_key=health_os_read_key,
+        health_os_data_key=health_os_data_key,
         health_os_timezone=health_os_timezone,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),

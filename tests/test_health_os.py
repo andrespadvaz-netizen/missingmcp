@@ -142,18 +142,20 @@ def test_speediance_workout_export_keeps_exercises_and_rejects_garmin():
 
 def test_repository_encrypts_and_deduplicates_records():
     conn = store.init_db(":memory:")
-    repo = HealthOSRepository(conn, "s" * 40)
+    repo = HealthOSRepository(conn, "d" * 40)
     payload = {"metric": "heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-01T08:00:00-06:00", "provenance_id": "hk:1"}
     assert repo.ingest(APPLE_HEALTH, [payload], []) == {"accepted": 1, "duplicates": 0, "rejected": []}
     assert repo.ingest(APPLE_HEALTH, [payload], [])["duplicates"] == 1
     encrypted = conn.execute("SELECT payload_enc FROM health_os_observations").fetchone()[0]
     assert encrypted != json.dumps(payload, sort_keys=True)
-    assert store.decrypt("s" * 40, encrypted) == json.dumps(payload, sort_keys=True)
+    assert store.decrypt("d" * 40, encrypted) == json.dumps(payload, sort_keys=True)
+    with pytest.raises(Exception):
+        store.decrypt("s" * 40, encrypted)
 
 
 def test_repository_uses_operator_timezone_and_persists_apple_transition():
     conn = store.init_db(":memory:")
-    repo = HealthOSRepository(conn, "s" * 40, "America/Mexico_City")
+    repo = HealthOSRepository(conn, "d" * 40, "America/Mexico_City")
     repo.set_apple_transition(datetime(2026, 10, 1, 6, tzinfo=timezone.utc))
     payload = {"metric": "heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-02T05:00:00+00:00", "provenance_id": "hk:local-day"}
     repo.ingest(APPLE_HEALTH, [payload], [])
@@ -162,10 +164,42 @@ def test_repository_uses_operator_timezone_and_persists_apple_transition():
     assert health.baseline_era(datetime(2026, 10, 2, 12, tzinfo=timezone.utc)).value == "ERA_APPLE_TRANSITION"
 
 
+def test_repository_reencrypts_existing_health_rows_with_dedicated_data_key():
+    conn = store.init_db(":memory:")
+    legacy_key, data_key = "s" * 40, "d" * 40
+    conn.executescript("""
+        CREATE TABLE health_os_observations (
+          event_key TEXT PRIMARY KEY, source TEXT NOT NULL, payload_enc TEXT NOT NULL,
+          received_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE health_os_workouts (
+          event_key TEXT PRIMARY KEY, source TEXT NOT NULL, payload_enc TEXT NOT NULL,
+          received_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE health_os_state (
+          state_key TEXT PRIMARY KEY, payload_enc TEXT NOT NULL,
+          updated_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    payload = {"metric": "heart_rate", "value": 55, "unit": "bpm",
+               "observed_at": "2026-10-01T08:00:00-06:00", "provenance_id": "hk:legacy"}
+    conn.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)",
+                 ("legacy", APPLE_HEALTH, store.encrypt(legacy_key, json.dumps(payload, sort_keys=True))))
+    conn.execute("INSERT INTO health_os_state(state_key, payload_enc) VALUES (?, ?)",
+                 ("apple_transition_started_at", store.encrypt(legacy_key, when(1).isoformat())))
+    conn.commit()
+    repo = HealthOSRepository(conn, data_key, legacy_key=legacy_key)
+    encrypted = conn.execute("SELECT payload_enc FROM health_os_observations").fetchone()[0]
+    assert store.decrypt(data_key, encrypted) == json.dumps(payload, sort_keys=True)
+    with pytest.raises(Exception):
+        store.decrypt(legacy_key, encrypted)
+    assert repo._load_health(when(2)).baseline_era(when(2)).value == "ERA_APPLE_TRANSITION"
+
+
 def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     key = "h" * 40
     read_key = "r" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": read_key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": read_key, "HEALTH_OS_DATA_KEY": "d" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     client = TestClient(build_app(config))
     payload = {"source": APPLE_HEALTH, "observations": [{"metric": "heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-01T08:00:00-06:00", "provenance_id": "hk:1"}]}
     assert client.post("/health-os/ingest", json=payload).status_code == 401
@@ -181,7 +215,7 @@ def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
 
 def test_isolated_service_has_no_garmin_surface(tmp_path):
     key = "h" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "HEALTH_OS_DATA_KEY": "d" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     client = TestClient(build_health_os_app(config))
     assert client.get("/healthz").json() == {"status": "OK"}
     assert client.get("/garmin").status_code == 404
@@ -200,7 +234,7 @@ def test_native_apple_export_is_raw_provenance_bearing_input(tmp_path):
     assert parsed.observations[1]["value"] == 97
     assert parsed.ignored_types == ("HKQuantityTypeIdentifierUnknown",)
     key = "h" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "HEALTH_OS_DATA_KEY": "d" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     response = TestClient(build_health_os_app(config)).post("/health-os/import/apple-export", content=xml, headers={"Authorization": f"Bearer {key}"})
     assert response.json()["accepted"] == 2
 
@@ -328,10 +362,9 @@ def test_readiness_abstains_until_metric_specific_baselines_are_stable():
             observation("sleep_duration", 7, "hr", at=when(day), pid=f"sleep:{day}"),
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
-    assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
-    # No developer-owned keyword list may emit a clinical state.  Until a
-    # clinician-reviewed policy exists, every subjective flag remains a safe
-    # abstention.
+    assert health.assess_readiness(when(29)).state == DecisionState.INFORMATIVO
+    # No developer-owned keyword list may emit a clinical state.  Subjective
+    # flags stay outside the automated operational policy.
     assert health.assess_readiness(when(29), ["dizziness"]).state == DecisionState.ABSTENERSE
     assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ABSTENERSE
     assert health.assess_readiness(when(29), ["fatiga"]).state == DecisionState.ABSTENERSE
@@ -368,4 +401,4 @@ def test_model_interpreted_value_never_drives_readiness():
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
     health.ingest_observations([MetricObservation("heart_rate", 60, "bpm", when(29), APPLE_HEALTH, "summary", semantic="model_interpreted")])
-    assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
+    assert health.assess_readiness(when(29)).state == DecisionState.REVISAR_TECNICO

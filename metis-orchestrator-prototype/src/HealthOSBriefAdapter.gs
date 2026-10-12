@@ -7,7 +7,7 @@
  * prompt, ledger or Notion.
  */
 var HealthOSBriefAdapter = (function () {
-  var ALLOWED_DECISIONS = ['ACTIVA', 'AJUSTA', 'DETEN', 'ABSTENERSE', 'ESCALAR'];
+  var ALLOWED_DECISIONS = ['INFORMATIVO', 'REVISAR_TECNICO', 'ABSTENERSE'];
   var ALLOWED_CONFIDENCE = ['low', 'medium', 'high'];
 
   function unavailable(reason) {

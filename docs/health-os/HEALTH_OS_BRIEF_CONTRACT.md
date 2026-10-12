@@ -13,7 +13,7 @@ la sustenta. No replica el almacén de datos ni realiza diagnóstico.
    Speediance, sin doble conteo.
 4. **Cambio relevante:** composición, movilidad, nutrición histórica, ruido o
    mindfulness sólo si cambia la decisión.
-5. **Estado:** `ACTIVA`, `AJUSTA`, `DETEN`, `ABSTENERSE` o `ESCALAR`, con
+5. **Estado:** `INFORMATIVO`, `REVISAR_TECNICO` o `ABSTENERSE`, con
    factores, confianza, limitación y dato faltante.
 
 El Brief se abstiene si la sincronización está atrasada, hay conflicto de
@@ -22,7 +22,7 @@ fuentes, falta baseline de sueño/FC reposo o sólo existe información
 hechos de fuente y se escalan; nunca reciben interpretación diagnóstica.
 
 La implementación expone este contrato como `POST /health-os/brief`, protegido
-por la clave dedicada de ingestión. Esta es la única fuente técnica del bloque
+por la clave dedicada de lectura. Esta es la única fuente técnica del bloque
 Health del Brief diario: el protocolo en Notion debe consumir este snapshot y no
 una segunda lógica ni narrativa de ChatGPT. Su respuesta no contiene mediciones
 crudas.

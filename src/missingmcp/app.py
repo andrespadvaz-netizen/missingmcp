@@ -72,7 +72,9 @@ def build_app(config: Config) -> Starlette:
     # Health OS is intended for the isolated service.  Retain this compatibility
     # surface only when both distinct keys are explicitly configured; a generic
     # gateway must not accidentally expose a write-capable Brief credential.
-    health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if (config.health_os_ingest_key and config.health_os_read_key) else None
+    health_os = HealthOSRepository(conn, config.health_os_data_key, config.health_os_timezone,
+                                   legacy_key=config.gateway_secret) if (
+        config.health_os_ingest_key and config.health_os_read_key and config.health_os_data_key) else None
 
     def _health_os_ingest_authorized(request):
         return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)

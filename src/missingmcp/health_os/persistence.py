@@ -28,11 +28,42 @@ CREATE TABLE IF NOT EXISTS health_os_state (
 
 
 class HealthOSRepository:
-    def __init__(self, conn: sqlite3.Connection, secret: str,
-                 health_timezone: str | tzinfo = "America/Mexico_City") -> None:
-        self.conn, self.secret, self.health_timezone = conn, secret, health_timezone
+    def __init__(self, conn: sqlite3.Connection, data_key: str,
+                 health_timezone: str | tzinfo = "America/Mexico_City", *,
+                 legacy_key: str | None = None) -> None:
+        self.conn, self.data_key, self.health_timezone = conn, data_key, health_timezone
         conn.executescript(_SCHEMA)
         conn.commit()
+        # Existing deployments encrypted the three private Health OS tables
+        # with GATEWAY_SECRET.  Re-encrypt those rows atomically on first start
+        # with the dedicated data key; new deployments have nothing to move.
+        self._migrate_legacy_encryption(legacy_key)
+
+    def _migrate_legacy_encryption(self, legacy_key: str | None) -> None:
+        if not legacy_key or legacy_key == self.data_key:
+            return
+        updates: list[tuple[str, tuple[str, str]]] = []
+        for table, key_column in (("health_os_observations", "event_key"),
+                                  ("health_os_workouts", "event_key"),
+                                  ("health_os_state", "state_key")):
+            for row in self.conn.execute(f"SELECT {key_column}, payload_enc FROM {table}"):
+                try:
+                    store.decrypt(self.data_key, row["payload_enc"])
+                except Exception:
+                    plaintext = store.decrypt(legacy_key, row["payload_enc"])
+                    updates.append((
+                        f"UPDATE {table} SET payload_enc=? WHERE {key_column}=?",
+                        (store.encrypt(self.data_key, plaintext), row[key_column]),
+                    ))
+        if updates:
+            try:
+                self.conn.execute("BEGIN")
+                for statement, params in updates:
+                    self.conn.execute(statement, params)
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
 
     @staticmethod
     def _key(source: str, value: str) -> str:
@@ -49,7 +80,7 @@ class HealthOSRepository:
                 if check.rejected:
                     raise ValueError(check.rejected[0])
                 key = HealthOS._observation_key(item)
-                encrypted = store.encrypt(self.secret, json.dumps(dict(raw), sort_keys=True))
+                encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
                 cur = self.conn.execute("INSERT OR IGNORE INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
                 accepted += bool(cur.rowcount)
                 duplicates += not bool(cur.rowcount)
@@ -59,7 +90,7 @@ class HealthOSRepository:
             try:
                 item = workout_from_export(source, raw)
                 key = self._key(source, item.workout_id)
-                encrypted = store.encrypt(self.secret, json.dumps(dict(raw), sort_keys=True))
+                encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
                 cur = self.conn.execute("INSERT OR IGNORE INTO health_os_workouts(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
                 accepted += bool(cur.rowcount)
                 duplicates += not bool(cur.rowcount)
@@ -75,13 +106,13 @@ class HealthOSRepository:
             ("apple_transition_started_at",),
         ).fetchone()
         if transition:
-            started_at = datetime.fromisoformat(store.decrypt(self.secret, transition["payload_enc"]))
+            started_at = datetime.fromisoformat(store.decrypt(self.data_key, transition["payload_enc"]))
             health.set_apple_transition(started_at)
         for row in self.conn.execute("SELECT source, payload_enc FROM health_os_observations"):
-            raw = json.loads(store.decrypt(self.secret, row["payload_enc"]))
+            raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
             health.ingest_observations(observations_from_export(row["source"], [raw]))
         for row in self.conn.execute("SELECT source, payload_enc FROM health_os_workouts"):
-            raw = json.loads(store.decrypt(self.secret, row["payload_enc"]))
+            raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
             health.ingest_workout(workout_from_export(row["source"], raw))
         return health
 
@@ -89,7 +120,7 @@ class HealthOSRepository:
         """Persist the operator-confirmed start of the Apple baseline era."""
         if started_at.tzinfo is None:
             raise ValueError("started_at must be timezone-aware")
-        payload = store.encrypt(self.secret, started_at.isoformat())
+        payload = store.encrypt(self.data_key, started_at.isoformat())
         self.conn.execute(
             "INSERT INTO health_os_state(state_key, payload_enc, updated_at) VALUES (?, ?, datetime('now')) "
             "ON CONFLICT(state_key) DO UPDATE SET payload_enc=excluded.payload_enc, updated_at=datetime('now')",

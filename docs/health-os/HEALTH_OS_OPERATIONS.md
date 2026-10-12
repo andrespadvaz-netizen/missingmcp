@@ -10,10 +10,12 @@ fecha ISO-8601 con offset, unidad, valor crudo y `provenance_id` de HealthKit.
 
 El adaptador aislado está implementado como servicio `health-os` (sin Garmin,
 login Garmin ni worker Garmin) con `Dockerfile.health-os`: `POST /health-os/ingest` y
-`GET /health-os/quality`. Ambos exigen `Authorization: Bearer <HEALTH_OS_INGEST_KEY>`;
-la clave debe ser distinta de `GATEWAY_SECRET` y tener 32 caracteres o más.
-Los eventos se cifran localmente antes de persistirse y las respuestas no
-devuelven datos personales.
+`GET /health-os/quality` exige `Authorization: Bearer <HEALTH_OS_READ_KEY>`;
+la ingesta exige `Authorization: Bearer <HEALTH_OS_INGEST_KEY>`. Ambas claves
+deben ser distintas de `GATEWAY_SECRET` y tener 32 caracteres o más. La
+persistencia usa además `HEALTH_OS_DATA_KEY`, distinta de las tres anteriores,
+para cifrar los eventos y el estado de Health OS. Las respuestas no devuelven
+datos personales.
 
 `POST /health-os/brief` genera el snapshot operativo mínimo. Devuelve estado
 de decisión, confianza, factores, faltantes y calidad; no devuelve registros
@@ -53,6 +55,7 @@ era explícitamente, nunca reactivar el puente Garmin de producción.
 Health OS es de apoyo personal, no dispositivo médico ni motor de diagnóstico.
 Las conclusiones deben mostrar procedencia y calidad; datos faltantes,
 antiguos o en conflicto no habilitan recomendaciones automáticas.
-`ACTIVA` no se emite hasta configurar una política de seguridad revisada por un
-clínico; los límites físicos de sensor sólo rechazan registros imposibles, no
-determinan seguridad médica.
+Una política operativa aprobada por el titular limita el bloque a
+`INFORMATIVO`, `REVISAR_TECNICO` y `ABSTENERSE`; no requiere firma médica ni
+convierte métricas en indicaciones clínicas. Los límites físicos de sensor sólo
+rechazan registros imposibles, no determinan seguridad médica.

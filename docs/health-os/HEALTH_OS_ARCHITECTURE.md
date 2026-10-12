@@ -17,8 +17,9 @@ strength detail. A five-minute temporal overlap plus matching activity type is
 required before an Apple strength workout and a Speediance session become one
 logical workout. They remain separate raw records with their own provenance.
 
-The core emits only ACTIVA, AJUSTA, DETEN, ABSTENERSE or ESCALAR with factors,
-confidence and missing evidence. It never diagnoses, prescribes, changes
+The core emits only `INFORMATIVO`, `REVISAR_TECNICO` or `ABSTENERSE`, with
+factors, confidence and missing evidence. These are operational data states,
+never medical or training directives. It never diagnoses, prescribes, changes
 medication, alters a calendar, or modifies a training plan.
 
 ## Integration boundary

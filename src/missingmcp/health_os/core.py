@@ -16,11 +16,10 @@ class BaselineEra(StrEnum):
 
 
 class DecisionState(StrEnum):
-    ACTIVA = "ACTIVA"
-    AJUSTA = "AJUSTA"
-    DETEN = "DETEN"
+    # These are operational data states, not medical or training directives.
+    INFORMATIVO = "INFORMATIVO"
+    REVISAR_TECNICO = "REVISAR_TECNICO"
     ABSTENERSE = "ABSTENERSE"
-    ESCALAR = "ESCALAR"
 
 
 APPLE_HEALTH = "APPLE_HEALTH"
@@ -313,7 +312,7 @@ class HealthOS:
         flags_present = any(str(flag).strip() for flag in subjective_flags)
         quality = self.data_quality(now)
         if quality["stale"] or quality["legacy_after_transition"]:
-            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("data quality does not support a readiness decision",), ("recent Apple Health coverage",), False)
+            return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("data quality needs technical review",), ("recent Apple Health coverage",), False)
         required = ("sleep_duration", "resting_heart_rate")
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
         if missing:
@@ -322,13 +321,12 @@ class HealthOS:
                         if x.semantic in {"model_interpreted", "chatgpt_health_transcription"}
                         and x.observed_at >= now - timedelta(days=3)]
         if non_evidence:
-            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("non-evidence values cannot drive readiness",), (), False)
+            return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("non-evidence values cannot drive the operational snapshot",), (), False)
         if flags_present:
-            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("subjective flags require a clinician-reviewed policy",), (), False)
-        # A stable personal baseline alone does not establish a safe medical
-        # range.  A clinician-reviewed policy is intentionally required before
-        # ACTIVA can be emitted from physiological data.
-        return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("no clinician-reviewed safety policy is configured",), (), False)
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("subjective flags are outside the automated operational policy",), (), False)
+        # A stable baseline allows only an informational presentation.  It is
+        # not a medical clearance, diagnosis, prescription or training order.
+        return DecisionAssessment(DecisionState.INFORMATIVO, "medium", ("Apple Health coverage and metric-specific baselines are stable",), (), False)
 
     def local_day(self, at: datetime) -> str:
         return at.astimezone(self.timezone).date().isoformat()
