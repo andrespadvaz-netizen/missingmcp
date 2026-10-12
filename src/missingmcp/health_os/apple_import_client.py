@@ -140,3 +140,7 @@ def main() -> None:
     except (OSError, ValueError, ET.ParseError, httpx.HTTPError, RuntimeError) as exc:
         print(json.dumps({"status": "FAILED", "error": type(exc).__name__}), file=sys.stderr)
         raise SystemExit(1) from exc
+
+
+if __name__ == "__main__":
+    main()
