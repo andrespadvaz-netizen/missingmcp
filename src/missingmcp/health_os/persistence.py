@@ -109,11 +109,19 @@ class HealthOSRepository:
             started_at = datetime.fromisoformat(store.decrypt(self.data_key, transition["payload_enc"]))
             health.set_apple_transition(started_at)
         for row in self.conn.execute("SELECT source, payload_enc FROM health_os_observations"):
-            raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
-            health.ingest_observations(observations_from_export(row["source"], [raw]))
+            try:
+                raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
+                health.ingest_observations(observations_from_export(row["source"], [raw]))
+            except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+                # Do not delete or normalize away historical evidence.  It is
+                # excluded from the snapshot and visibly fails data quality.
+                health.record_persisted_invalid()
         for row in self.conn.execute("SELECT source, payload_enc FROM health_os_workouts"):
-            raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
-            health.ingest_workout(workout_from_export(row["source"], raw))
+            try:
+                raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
+                health.ingest_workout(workout_from_export(row["source"], raw))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                health.record_persisted_invalid()
         return health
 
     def set_apple_transition(self, started_at: datetime) -> None:

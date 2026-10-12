@@ -196,6 +196,19 @@ def test_repository_reencrypts_existing_health_rows_with_dedicated_data_key():
     assert repo._load_health(when(2)).baseline_era(when(2)).value == "ERA_APPLE_TRANSITION"
 
 
+def test_historical_invalid_evidence_is_retained_but_forces_technical_review():
+    conn = store.init_db(":memory:")
+    repo = HealthOSRepository(conn, "d" * 40)
+    raw = {"metric": "sleep_duration", "value": 1800, "unit": "min",
+           "observed_at": "2026-10-01T08:00:00-06:00", "provenance_id": "legacy:invalid"}
+    conn.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)",
+                 ("legacy-invalid", APPLE_HEALTH, store.encrypt("d" * 40, json.dumps(raw, sort_keys=True))))
+    conn.commit()
+    snapshot = repo.brief(when(2))
+    assert snapshot["decision"] == DecisionState.REVISAR_TECNICO
+    assert snapshot["quality"]["persisted_invalid_records"] == 1
+
+
 def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     key = "h" * 40
     read_key = "r" * 40

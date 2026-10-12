@@ -180,6 +180,13 @@ class HealthOS:
         self._workouts: dict[str, WorkoutSession] = {}
         self._workout_links: dict[str, set[str]] = {}
         self._apple_baseline_started: datetime | None = None
+        # Historical rows may predate a stricter validation release.  They are
+        # retained as encrypted evidence, but cannot silently influence the
+        # operational snapshot.
+        self._persisted_invalid_records = 0
+
+    def record_persisted_invalid(self) -> None:
+        self._persisted_invalid_records += 1
 
     @staticmethod
     def _observation_key(item: MetricObservation) -> str:
@@ -311,7 +318,7 @@ class HealthOS:
         # lists; the service remains conservative until a policy is supplied.
         flags_present = any(str(flag).strip() for flag in subjective_flags)
         quality = self.data_quality(now)
-        if quality["stale"] or quality["legacy_after_transition"]:
+        if quality["stale"] or quality["legacy_after_transition"] or quality["persisted_invalid_records"]:
             return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("data quality needs technical review",), ("recent Apple Health coverage",), False)
         required = ("sleep_duration", "resting_heart_rate")
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
@@ -345,5 +352,6 @@ class HealthOS:
             "legacy_after_transition": sorted(set(mixed)),
             "logical_workouts": len(self.logical_workouts()),
             "raw_workouts": len(self._workouts),
-            "pass": not stale and not mixed,
+            "persisted_invalid_records": self._persisted_invalid_records,
+            "pass": not stale and not mixed and not self._persisted_invalid_records,
         }
