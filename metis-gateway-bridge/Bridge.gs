@@ -46,7 +46,7 @@ function dispatch_(p) {
   if (!lock.tryLock(100)) { return {id:p.id, seq:p.seq, state:'BUSY'}; }
   try {
     var receipt = JSON.parse(props.getProperty('receipt') || '{"seq":0}');
-    if (p.seq < receipt.seq) { return {id:p.id, seq:p.seq, state:'GONE'}; }
+    if (p.seq < receipt.seq) { return archived_(props,p) || {id:p.id, seq:p.seq, state:'GONE'}; }
     if (p.seq === receipt.seq) {
       if (p.id !== receipt.id || p.fingerprint !== receipt.fingerprint) return {id:p.id,seq:p.seq,state:'CONFLICT'};
       if (receipt.state === 'DONE') return cached_(props, receipt);
@@ -156,7 +156,7 @@ function execute_(p) {
   try {
     var receipt = JSON.parse(props.getProperty('receipt') || '{"seq":0}');
     var resuming = false;
-    if (p.seq < receipt.seq) { return {id:p.id, seq:p.seq, state:'GONE'}; }
+    if (p.seq < receipt.seq) { return archived_(props,p) || {id:p.id, seq:p.seq, state:'GONE'}; }
     if (p.seq === receipt.seq) {
       if (p.id !== receipt.id || p.fingerprint !== receipt.fingerprint) {
         return {id:p.id, seq:p.seq, state:'CONFLICT'};
@@ -222,10 +222,19 @@ function execute_(p) {
       var productive = props.getProperty('GATEWAY_PRODUCTIVE_ENABLED') === 'true';
       Engine.Config._setRunLevel(productive ? 'LEVEL_3' : Engine.Config.LEVELS.LEVEL_2);
       var durableState = loadDurable_(props, receipt);
-      if (durableState.calls.some(function(c){return c.state === 'STARTED';})) {
+      var uncertain=durableState.calls.filter(function(c){return c.state === 'STARTED';});
+      if (uncertain.length) {
+        var reservable=uncertain.every(function(c){return Number.isFinite(c.cost_bound_usd) && c.cost_bound_usd>=0;});
+        var accounted=durableState.calls.filter(function(c){return c.state==='ACCOUNTED';}).reduce(function(total,c){
+          var cost=c.response && c.response.usage && c.response.usage.estimated_cost_usd;
+          return total+(Number.isFinite(cost)?cost:0);
+        },0);
+        var reserve=uncertain.reduce(function(total,c){return total+(Number.isFinite(c.cost_bound_usd)?c.cost_bound_usd:0);},0);
         finish_(props, receipt, {status:'FAILED', error:'DURABLE_PROVIDER_UNCERTAIN',
-          cost_usd:null, cost_known:false, engine_execution_id:null,
-          final_answer:null, requires_review:true});
+          cost_usd:reservable ? accounted+reserve : null, cost_known:reservable,
+          cost_basis:reservable ? 'AUTOMATIC_CONSERVATIVE_CALL_BOUND' : null,
+          reserved_cost_usd:reservable ? reserve : null,
+          engine_execution_id:null, final_answer:null, requires_review:!reservable});
         return cached_(props, receipt);
       }
       var replay = durableReplay_(props, receipt, durableState);
@@ -299,6 +308,7 @@ function durableReplay_(props, receipt, state) {
   var newCalls = 0;
   var lastWasReplay = false;
   var pendingIndex = null;
+  var prepared = null;
 
   function save() { storeDurable_(props, receipt, state); }
   function invoke(base, method, args) {
@@ -312,7 +322,10 @@ function durableReplay_(props, receipt, state) {
       var y = new Error('DURABLE_YIELD'); y.code = 'CONFIG'; throw y;
     }
     state.calls.push({state:'STARTED', provider:base.name || null, method:method,
-      started_at:Date.now()});
+      started_at:Date.now(),cost_bound_usd:prepared && prepared.provider===base.name ? prepared.cost_bound_usd : null,
+      model:prepared && prepared.provider===base.name ? prepared.model : null,
+      max_output_tokens:prepared && prepared.provider===base.name ? prepared.max_output_tokens : null});
+    prepared=null;
     pendingIndex = index;
     newCalls++;
     lastWasReplay = false;
@@ -338,6 +351,7 @@ function durableReplay_(props, receipt, state) {
   return {
     wrap: wrap,
     hooks: {
+      onPrepared: function(value) { prepared=JSON.parse(JSON.stringify(value)); },
       isReplay: function() { return lastWasReplay; },
       onAccounted: function(normalized, replayed) {
         if (replayed) { return; }
@@ -389,6 +403,29 @@ function finish_(props, receipt, result) {
   for (var i=0; i<chunks; i++) { props.setProperty('result_'+i, packed.slice(i*8000,(i+1)*8000)); }
   receipt.state = 'DONE'; receipt.chunks = chunks;
   props.setProperty('receipt', JSON.stringify(receipt));
+  // A context-scoped pause must remain reconcilable after another context
+  // advances the global sequence. Archive only review-required receipts; the
+  // ordinary history already lives in encrypted SQLite on Railway.
+  if (result.requires_review === true) { archive_(props,receipt,packed); }
+}
+
+function archive_(props,receipt,packed) {
+  var prefix='review_'+receipt.seq+'_';
+  var chunks=Math.ceil(packed.length/8000);
+  for(var i=0;i<chunks;i++) props.setProperty(prefix+i,packed.slice(i*8000,(i+1)*8000));
+  props.setProperty(prefix+'meta',JSON.stringify({id:receipt.id,fingerprint:receipt.fingerprint,chunks:chunks}));
+}
+
+function archived_(props,p) {
+  var prefix='review_'+p.seq+'_', raw=props.getProperty(prefix+'meta');
+  if(!raw) return null;
+  var meta=JSON.parse(raw);
+  if(meta.id!==p.id || meta.fingerprint!==p.fingerprint) return {id:p.id,seq:p.seq,state:'CONFLICT'};
+  var packed='';
+  for(var i=0;i<meta.chunks;i++) packed+=props.getProperty(prefix+i)||'';
+  if(!packed) return {id:p.id,seq:p.seq,state:'ARCHIVE_CORRUPT'};
+  return {id:p.id,seq:p.seq,state:'DONE',result:JSON.parse(Utilities.ungzip(
+    Utilities.newBlob(Utilities.base64Decode(packed),'application/x-gzip')).getDataAsString('UTF-8'))};
 }
 
 function cached_(props, receipt) {

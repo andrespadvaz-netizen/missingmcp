@@ -116,6 +116,18 @@ test('Old sequence never runs after cache advances',()=>{
 test('A higher sequence may skip a context-scoped paused lane',()=>{
   const f=fixture();f.request();assert.equal(f.request(3).state,'DONE');assert.equal(f.calls(),2);
 });
+test('A review-required receipt survives later contexts',()=>{
+  const f=fixture();
+  f.context.Engine.Orchestrator.run=()=>({status:'FAILED',execution_id:'uncertain',route:'CROSS_AUDIT',
+    final_answer:null,limits:{estimated_cost_usd:null,cost_known:false}});
+  const first=f.request();assert.equal(first.result.requires_review,true);
+  f.context.Engine.Orchestrator.run=()=>({status:'COMPLETED',execution_id:'later',route:'LOCAL',
+    final_answer:'ok',limits:{estimated_cost_usd:0,cost_known:true}});
+  assert.equal(f.request(2).state,'DONE');
+  const recovered=f.rawRequest(1,'status');
+  assert.equal(recovered.state,'DONE');assert.equal(recovered.result.engine_execution_id,'uncertain');
+  assert.equal(recovered.result.requires_review,true);
+});
 test('Conflicting identity or payload cannot reuse receipt',()=>{
   const f=fixture();f.request();assert.equal(f.request(1,'run',{fingerprint:'0'.repeat(64)}).state,'CONFLICT');assert.equal(f.calls(),1);
 });
@@ -183,6 +195,20 @@ test('Durable receipt records provider checkpoint duration',()=>{
   assert.equal(state.calls[0].state,'ACCOUNTED');
   assert.equal(typeof state.calls[0].duration_ms,'number');
   assert.ok(state.calls[0].duration_ms>=0);
+});
+test('Interrupted prepared provider call closes with conservative reserve and no pause',()=>{
+  const f=fixture();
+  const state={request:'Consulta Metis',origin_model:'ANTHROPIC',context_project:'METIS',calls:[
+    {state:'STARTED',provider:'ANTHROPIC',method:'complete',cost_bound_usd:.75,started_at:1}
+  ]};
+  const receipt={seq:1,id:'11111111-1111-4111-8111-111111111111',
+    fingerprint:crypto.createHash('sha256').update('Consulta Metis').digest('hex'),state:'CHECKPOINT',chunks:0,durable_chunks:0};
+  f.data.receipt=JSON.stringify(receipt);f.context.storeDurable_(f.context.PropertiesService.getScriptProperties(),receipt,state);
+  const done=f.rawRequest(1,'advance');
+  assert.equal(done.state,'DONE');assert.equal(done.result.error,'DURABLE_PROVIDER_UNCERTAIN');
+  assert.equal(done.result.cost_known,true);assert.equal(done.result.cost_usd,.75);
+  assert.equal(done.result.cost_basis,'AUTOMATIC_CONSERVATIVE_CALL_BOUND');
+  assert.equal(done.result.requires_review,false);
 });
 test('Engine human decision and budget failure retained, not substituted',()=>{
   for (const status of ['REQUIRES_ANDRES','FAILED']) {

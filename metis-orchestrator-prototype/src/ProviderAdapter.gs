@@ -167,6 +167,10 @@ var ProviderAdapter = (function () {
         runtime.active_provider_attempt.max_output_tokens = outputLimit;
         if (request.completion_recovery) runtime.active_provider_attempt.recovery_cost_bound_usd = bound;
       }
+      if (runtime.provider_replay && typeof runtime.provider_replay.onPrepared === 'function') {
+        runtime.provider_replay.onPrepared({provider:provider.name,model:model,
+          cost_bound_usd:bound,max_output_tokens:outputLimit});
+      }
     }
 
     // Guardas previas de los adaptadores. El código solo NO demuestra la fase:

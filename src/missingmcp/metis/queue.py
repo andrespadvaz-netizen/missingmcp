@@ -219,8 +219,12 @@ class Queue:
                                       (row["id"], row["seq"])).fetchone()
             paused = self.db.execute("SELECT 1 FROM metis_pause WHERE execution_id=?", (row["id"],)).fetchone()
             original = json.loads(decrypt(self.secret, current["result_enc"])) if current and current["result_enc"] else {}
+            uncertain_errors = {
+                "TRANSPORT_UNCERTAIN", "ENGINE_INTERRUPTED",
+                "ENGINE_WORKER_INTERRUPTED", "DURABLE_PROVIDER_UNCERTAIN",
+            }
             if (not current or current["status"] != "FAILED" or not paused
-                    or original.get("error") != "TRANSPORT_UNCERTAIN"):
+                    or original.get("error") not in uncertain_errors):
                 self.db.execute("COMMIT")
                 return False
             reviewed = {**result, "transport_reconciliation": {

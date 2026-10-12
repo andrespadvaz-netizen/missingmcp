@@ -327,10 +327,13 @@ async def test_accounting_review_reads_only_and_preserves_failure(queue, monkeyp
     assert not queue.reconcile_accounting(row, reviewed)
 
 
-def test_signed_terminal_receipt_replaces_transport_timeout(queue):
+@pytest.mark.parametrize('uncertain_error', [
+    'TRANSPORT_UNCERTAIN', 'ENGINE_INTERRUPTED',
+    'ENGINE_WORKER_INTERRUPTED', 'DURABLE_PROVIDER_UNCERTAIN'])
+def test_signed_terminal_receipt_replaces_any_uncertain_failure(queue, uncertain_error):
     first = queue.create('operator', REQUEST)
     row = queue.next(); queue.claim(row)
-    queue.finish(row, {'status':'FAILED','error':'TRANSPORT_UNCERTAIN',
+    queue.finish(row, {'status':'FAILED','error':uncertain_error,
                        'cost_known':False,'cost_usd':None,'requires_review':True,
                        'failure_stage':'BRIDGE_DELIVERY','final_answer':None})
     terminal = {'status':'COMPLETED','cost_known':True,'cost_usd':.27065225,
@@ -342,7 +345,7 @@ def test_signed_terminal_receipt_replaces_transport_timeout(queue):
     assert answer['status'] == 'COMPLETED'
     assert answer['cost_known'] is True and answer['cost_usd'] == .27065225
     assert answer['transport_reconciliation']['basis'] == 'SIGNED_TERMINAL_BRIDGE_RECEIPT'
-    assert answer['original_failure']['error'] == 'TRANSPORT_UNCERTAIN'
+    assert answer['original_failure']['error'] == uncertain_error
     assert answer['context_paused'] is False and answer['gateway_paused'] is False
 
 
