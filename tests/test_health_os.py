@@ -628,3 +628,10 @@ def test_new_routes_enforce_their_keys(tmp_path):
     assert client.get("/health-os/quarantine", headers=read).json()["report"]["invalid_records"] == 0
     assert client.post("/health-os/quarantine/apply", headers=ingest, json={"expected": 0}).status_code == 400
     assert client.post("/health-os/quarantine/apply", headers=ingest, json={"confirm": "QUARANTINE", "expected": 0}).json()["quarantined"] == 0
+
+
+def test_short_apple_watch_sleep_stage_segments_are_valid_evidence():
+    health = make_health()
+    assert health.ingest_observations([observation("sleep_duration", 0.5, "min", pid="stage")]).accepted == 1
+    with pytest.raises(ValueError):
+        observation("sleep_duration", 1441, "min", pid="too-long")

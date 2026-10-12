@@ -111,10 +111,15 @@ class MetricObservation:
             raise ValueError("oxygen-saturation observation is outside sensor bounds")
         bounds = {
             "weight": (1, 500), "body_mass": (1, 500), "lean_body_mass": (1, 500),
-            "respiratory_rate": (4, 60), "sleep_duration": (1, 24 * 60),
+            "respiratory_rate": (4, 60),
         }
         if self.metric in bounds and not bounds[self.metric][0] <= self.value <= bounds[self.metric][1]:
             raise ValueError(f"{self.metric} observation is outside sensor bounds")
+        # Apple Watch sleep stages arrive as short segments (often under a
+        # minute).  Política Operativa v0.5: total >= 0 and <= 1,440 minutes,
+        # so any positive segment up to a full day is valid evidence.
+        if self.metric == "sleep_duration" and not 0 < self.value <= 24 * 60:
+            raise ValueError("sleep_duration observation is outside sensor bounds")
 
 
 @dataclass(frozen=True, slots=True)
