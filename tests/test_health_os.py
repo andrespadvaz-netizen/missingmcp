@@ -12,7 +12,8 @@ from missingmcp import store
 from missingmcp.app import build_app
 from missingmcp.health_os.service import build_health_os_app
 from missingmcp.health_os.apple_export import parse_apple_health_export
-from missingmcp.health_os.apple_import_client import _records, _export_entry, _stream_records
+from missingmcp.health_os.apple_import_client import _records, _export_entry, _stream_records, import_zip
+from missingmcp.health_os import apple_import_client
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -234,6 +235,25 @@ def test_sax_reader_streams_records_without_a_document_tree():
       <Workout workoutActivityType="HKWorkoutActivityTypeRunning" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:30:00 -0600"/>
     </HealthData>'''), lambda kind, item: received.append((kind, item)))
     assert [kind for kind, _ in received] == ["observation", "workout"]
+
+
+def test_resumable_import_filters_metrics_and_never_puts_phi_in_checkpoint(tmp_path, monkeypatch):
+    archive_path = tmp_path / "exportar.zip"
+    checkpoint = tmp_path / "resume.json"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr("export.xml", b'''<HealthData>
+          <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" unit="count/min" value="55" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+          <Record type="HKCategoryTypeIdentifierSleepAnalysis" value="HKCategoryValueSleepAnalysisAsleepCore" startDate="2026-10-01 23:00:00 -0600" endDate="2026-10-02 06:00:00 -0600"/>
+        </HealthData>''')
+    posted = []
+    monkeypatch.setattr(apple_import_client, "_post_batch", lambda *args: posted.append(args[3:]) or {"status": "OK", "accepted": 1})
+    result = import_zip(archive_path, "https://health.example", "secret", metrics=["sleep_duration"], checkpoint=checkpoint)
+    assert result["observations_seen"] == 1 and result["outside_metrics"] == 1
+    assert len(posted) == 1
+    saved = checkpoint.read_text(encoding="utf-8")
+    assert "55" not in saved and "Apple Watch" not in saved and "secret" not in saved
+    second = import_zip(archive_path, "https://health.example", "secret", metrics=["sleep_duration"], checkpoint=checkpoint)
+    assert second["checkpoint_skipped"] == 1 and len(posted) == 1
 
 
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():
