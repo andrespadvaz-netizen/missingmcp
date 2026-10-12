@@ -72,6 +72,8 @@ def build_health_os_app(config: Config) -> Starlette:
         if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=8_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
         try:
             body = json.loads(raw.decode("utf-8")) if raw else {}
             flags = body.get("subjective_flags", [])
@@ -84,16 +86,23 @@ def build_health_os_app(config: Config) -> Starlette:
     async def transition(request):
         if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=8_000)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
         try:
-            body = json.loads((await security.read_body_limited(request, max_bytes=8_000)).decode("utf-8"))
+            body = json.loads(raw.decode("utf-8"))
             started_at = datetime.fromisoformat(body["started_at"])
             repo.set_apple_transition(started_at)
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "baseline_era": repo._load_health(started_at).baseline_era(started_at).value}, headers={"Cache-Control": "no-store"})
 
+    # Railway injects the deployed commit; exposing its short SHA lets anyone
+    # verify which code is live without holding a Health OS credential.
+    deployed_commit = os.environ.get("RAILWAY_GIT_COMMIT_SHA", "")[:7] or "unknown"
+
     async def healthz(request):
-        return JSONResponse({"status": "OK"})
+        return JSONResponse({"status": "OK", "service": "health-os", "commit": deployed_commit})
 
     return Starlette(routes=[
         Route("/healthz", healthz), Route("/health-os/ingest", ingest, methods=["POST"]),

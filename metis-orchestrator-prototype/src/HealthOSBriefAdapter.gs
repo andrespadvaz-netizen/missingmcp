@@ -7,7 +7,12 @@
  * prompt, ledger or Notion.
  */
 var HealthOSBriefAdapter = (function () {
-  var ALLOWED_DECISIONS = ['INFORMATIVO', 'REVISAR_TECNICO', 'ABSTENERSE'];
+  // Política Operativa v0.5: URGENTE only from the closed symptom list.
+  var ALLOWED_DECISIONS = ['INFORMATIVO', 'REVISAR_TECNICO', 'ABSTENERSE', 'URGENTE'];
+  // Fixed v0.5 legend: shown on every output, including failures.
+  var LEGEND = 'Health OS apoya la decisión; no diagnostica ni sustituye el juicio clínico ni los ' +
+    'servicios de urgencia (911). Ante dolor o presión en el pecho, debilidad súbita, alteración del ' +
+    'habla, falta de aire intensa o pérdida de respuesta, llama al 911 sin esperar al sistema.';
   var ALLOWED_CONFIDENCE = ['low', 'medium', 'high'];
 
   function unavailable(reason) {
@@ -15,7 +20,8 @@ var HealthOSBriefAdapter = (function () {
       available: false,
       status: 'HEALTH_OS_NO_DISPONIBLE',
       reason: reason,
-      snapshot: null
+      snapshot: null,
+      legend: LEGEND
     };
   }
 
@@ -38,8 +44,14 @@ var HealthOSBriefAdapter = (function () {
       return null;
     }
     var quality = value.quality || {};
+    var urgent = value.decision === 'URGENTE';
+    if (urgent && (typeof value.instruction !== 'string' || value.instruction.indexOf('911') < 0)) {
+      return null;
+    }
     return {
       decision: value.decision,
+      instruction: urgent ? value.instruction.slice(0, 280) : null,
+      legend: LEGEND,
       confidence: ALLOWED_CONFIDENCE.indexOf(value.confidence) >= 0 ? value.confidence : 'low',
       factors: _strings(value.factors, 2),
       missing: _strings(value.missing, 3),
@@ -72,7 +84,7 @@ var HealthOSBriefAdapter = (function () {
       if (response.getResponseCode() !== 200) { return unavailable('Health OS no respondio'); }
       var body = JSON.parse(response.getContentText());
       var snapshot = body && body.status === 'OK' ? _snapshot(body.brief) : null;
-      return snapshot ? { available: true, status: 'OK', reason: null, snapshot: snapshot } :
+      return snapshot ? { available: true, status: 'OK', reason: null, snapshot: snapshot, legend: LEGEND } :
         unavailable('respuesta Health OS invalida');
     } catch (e) {
       return unavailable('Health OS no respondio');

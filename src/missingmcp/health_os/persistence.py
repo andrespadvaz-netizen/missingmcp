@@ -7,9 +7,25 @@ from datetime import datetime, tzinfo
 from hashlib import sha256
 from typing import Any, Mapping
 
+from cryptography.exceptions import InvalidTag
+
 from .. import store
-from .core import HealthOS
+from .core import EMERGENCY_INSTRUCTION, EMERGENCY_LEGEND, NON_EVIDENCE_SEMANTICS, DecisionState, HealthOS, MetricObservation, _canonical_unit
 from .importers import observations_from_export, workout_from_export
+
+# Anything that can go wrong while opening one stored row.  A row that cannot
+# be decrypted or parsed is evidence of a fault, never evidence of health.
+_UNREADABLE = (IndexError, TypeError, ValueError, KeyError, UnicodeError, json.JSONDecodeError, InvalidTag)
+
+
+def _safe_reason(exc: Exception) -> str:
+    """Rejection reason that never echoes a submitted value back."""
+    message = str(exc)
+    if message.startswith(("could not convert", "invalid literal")):
+        return "observation value must be numeric"
+    if message.startswith("Invalid isoformat"):
+        return "timestamp must be ISO-8601 with an offset"
+    return message
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS health_os_observations (
@@ -49,12 +65,19 @@ class HealthOSRepository:
             for row in self.conn.execute(f"SELECT {key_column}, payload_enc FROM {table}"):
                 try:
                     store.decrypt(self.data_key, row["payload_enc"])
-                except Exception:
+                    continue
+                except _UNREADABLE:
+                    pass
+                try:
                     plaintext = store.decrypt(legacy_key, row["payload_enc"])
-                    updates.append((
-                        f"UPDATE {table} SET payload_enc=? WHERE {key_column}=?",
-                        (store.encrypt(self.data_key, plaintext), row[key_column]),
-                    ))
+                except _UNREADABLE:
+                    # Unreadable with either key: keep the row untouched.  It is
+                    # quarantined at read time (REVISAR_TECNICO), never a crash loop.
+                    continue
+                updates.append((
+                    f"UPDATE {table} SET payload_enc=? WHERE {key_column}=?",
+                    (store.encrypt(self.data_key, plaintext), row[key_column]),
+                ))
         if updates:
             try:
                 self.conn.execute("BEGIN")
@@ -75,17 +98,21 @@ class HealthOSRepository:
         for raw in observations:
             try:
                 item = observations_from_export(source, [raw])[0]
+                if item.semantic in NON_EVIDENCE_SEMANTICS:
+                    raise ValueError("model-interpreted or transcribed values are not evidence")
                 # Validate canonical units before persisting encrypted raw evidence.
                 check = HealthOS(item.observed_at.tzinfo).ingest_observations([item])
                 if check.rejected:
                     raise ValueError(check.rejected[0])
-                key = HealthOS._observation_key(item)
+                value, unit = _canonical_unit(item.metric, item.value, item.unit)
+                key = HealthOS._observation_key(MetricObservation(
+                    item.metric, value, unit, item.observed_at, item.source, item.provenance_id, item.semantic))
                 encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
                 cur = self.conn.execute("INSERT OR IGNORE INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
                 accepted += bool(cur.rowcount)
                 duplicates += not bool(cur.rowcount)
             except (TypeError, ValueError) as exc:
-                rejected.append(str(exc))
+                rejected.append(_safe_reason(exc))
         for raw in workouts:
             try:
                 item = workout_from_export(source, raw)
@@ -95,7 +122,7 @@ class HealthOSRepository:
                 accepted += bool(cur.rowcount)
                 duplicates += not bool(cur.rowcount)
             except (TypeError, ValueError) as exc:
-                rejected.append(str(exc))
+                rejected.append(_safe_reason(exc))
         self.conn.commit()
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
 
@@ -106,13 +133,19 @@ class HealthOSRepository:
             ("apple_transition_started_at",),
         ).fetchone()
         if transition:
-            started_at = datetime.fromisoformat(store.decrypt(self.data_key, transition["payload_enc"]))
-            health.set_apple_transition(started_at)
+            try:
+                started_at = datetime.fromisoformat(store.decrypt(self.data_key, transition["payload_enc"]))
+                health.set_apple_transition(started_at)
+            except _UNREADABLE:
+                health.record_persisted_invalid()
         for row in self.conn.execute("SELECT source, payload_enc FROM health_os_observations"):
             try:
                 raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
+                if str(raw.get("semantic", "measured")) in NON_EVIDENCE_SEMANTICS:
+                    # Isolated: retained encrypted, but never baseline, freshness or state.
+                    continue
                 health.ingest_observations(observations_from_export(row["source"], [raw]))
-            except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            except _UNREADABLE:
                 # Do not delete or normalize away historical evidence.  It is
                 # excluded from the snapshot and visibly fails data quality.
                 health.record_persisted_invalid()
@@ -120,7 +153,7 @@ class HealthOSRepository:
             try:
                 raw = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
                 health.ingest_workout(workout_from_export(row["source"], raw))
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except _UNREADABLE:
                 health.record_persisted_invalid()
         return health
 
@@ -145,11 +178,16 @@ class HealthOSRepository:
         health = self._load_health(now)
         decision = health.assess_readiness(now, subjective_flags)
         quality = health.data_quality(now)
-        return {
+        snapshot = {
             "decision": decision.state.value,
             "confidence": decision.confidence,
             "factors": list(decision.factors),
             "missing": list(decision.missing),
             "automated_action": decision.automated_action,
             "quality": quality,
+            # Política Operativa v0.5, section 7: always present, every output.
+            "legend": EMERGENCY_LEGEND,
         }
+        if decision.state == DecisionState.URGENTE:
+            snapshot["instruction"] = EMERGENCY_INSTRUCTION
+        return snapshot

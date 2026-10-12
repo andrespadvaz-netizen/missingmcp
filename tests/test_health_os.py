@@ -230,7 +230,7 @@ def test_isolated_service_has_no_garmin_surface(tmp_path):
     key = "h" * 40
     config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "HEALTH_OS_DATA_KEY": "d" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     client = TestClient(build_health_os_app(config))
-    assert client.get("/healthz").json() == {"status": "OK"}
+    assert client.get("/healthz").json() == {"status": "OK", "service": "health-os", "commit": "unknown"}
     assert client.get("/garmin").status_code == 404
     transition = client.post("/health-os/transition", json={"started_at": "2026-10-01T08:00:00-06:00"}, headers={"Authorization": f"Bearer {key}"})
     assert transition.json()["baseline_era"] == "ERA_APPLE_TRANSITION"
@@ -291,7 +291,10 @@ def test_subjective_flags_and_chatgpt_transcriptions_cannot_drive_a_decision():
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
     health.ingest_observations([MetricObservation("heart_rate", 60, "bpm", when(29), APPLE_HEALTH, "transcript", semantic="chatgpt_health_transcription")])
-    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ABSTENERSE
+    # Política Operativa v0.5: a closed-list alarm symptom is URGENTE; the
+    # transcription neither blocks nor changes that outcome.
+    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.URGENTE
+    assert health.assess_readiness(when(29)).state == DecisionState.INFORMATIVO
     assert health.metric_baseline_days("heart_rate", when(29)) == 0
 
 
@@ -376,10 +379,10 @@ def test_readiness_abstains_until_metric_specific_baselines_are_stable():
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
     assert health.assess_readiness(when(29)).state == DecisionState.INFORMATIVO
-    # No developer-owned keyword list may emit a clinical state.  Subjective
-    # flags stay outside the automated operational policy.
+    # Only the operator-approved closed list (Política Operativa v0.5, 6.0)
+    # yields URGENTE; every other self-report abstains.
     assert health.assess_readiness(when(29), ["dizziness"]).state == DecisionState.ABSTENERSE
-    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ABSTENERSE
+    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.URGENTE
     assert health.assess_readiness(when(29), ["fatiga"]).state == DecisionState.ABSTENERSE
     assert health.assess_readiness(when(29), ["dolor"]).state == DecisionState.ABSTENERSE
 
@@ -389,6 +392,7 @@ def test_baseline_allows_the_documented_two_day_contiguous_extension():
     now = datetime(2026, 10, 11, 8, tzinfo=MX)
     # 26 days live in the ordinary 42-day window; the immediately preceding
     # two days complete the operator-approved, 44-day historical baseline.
+    health.set_apple_transition(now - timedelta(days=60))
     for offset in range(17, 45):
         health.ingest_observations([observation("sleep_duration", 7, "hr", at=now - timedelta(days=offset), pid=f"sleep:{offset}")])
     assert health.metric_baseline_days("sleep_duration", now) == 28
@@ -401,6 +405,7 @@ def test_baseline_window_counts_the_first_eligible_local_sleep_day():
     # The observation ends early on the first calendar day in the 44-day
     # window.  It must count even though it predates the time-of-day of now.
     first_day = datetime(2026, 8, 28, 6, tzinfo=MX)
+    health.set_apple_transition(datetime(2026, 8, 1, tzinfo=MX))
     health.ingest_observations([observation("sleep_duration", 7, "hr", at=first_day, pid="first-day")])
     assert health.metric_baseline_days("sleep_duration", now) == 1
 
@@ -414,4 +419,123 @@ def test_model_interpreted_value_never_drives_readiness():
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
     health.ingest_observations([MetricObservation("heart_rate", 60, "bpm", when(29), APPLE_HEALTH, "summary", semantic="model_interpreted")])
-    assert health.assess_readiness(when(29)).state == DecisionState.REVISAR_TECNICO
+    # Isolated: a model-interpreted value cannot alter the state at all.
+    assert health.assess_readiness(when(29)).state == DecisionState.INFORMATIVO
+
+
+# --- DoD closing requirements (audit of b35f09b, Política Operativa v0.5) ---
+
+def _mature(health, start_day=1):
+    for day in range(start_day, start_day + 28):
+        health.ingest_observations([
+            observation("sleep_duration", 7, "hr", at=when(day), pid=f"sleep:{day}"),
+            observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
+        ])
+
+
+def test_without_apple_era_start_the_state_is_abstain_never_informative():
+    health = make_health()
+    _mature(health)
+    assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
+
+
+def test_baseline_counts_only_evidence_after_the_apple_era_start():
+    health = make_health()
+    _mature(health)
+    health.set_apple_transition(when(20))
+    assert health.metric_baseline_days("sleep_duration", when(29)) == 9
+    assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
+
+
+@pytest.mark.parametrize("report", ["Dolor de PECHO", "presión en el pecho", "chest pain", "I can\u2019t breathe", "Pérdida   del equilibrio"])
+def test_closed_alarm_list_is_bilingual_and_overrides_everything(report):
+    health = make_health()  # no data at all: urgency never waits for metrics
+    result = health.assess_readiness(when(29), [report])
+    assert result.state == DecisionState.URGENTE
+    assert "911" in result.factors[0]
+
+
+def test_symptoms_outside_the_closed_list_abstain():
+    health = make_health()
+    health.set_apple_transition(when(1))
+    _mature(health)
+    for report in ("mareo", "palpitaciones", "algo raro", "fatiga"):
+        assert health.assess_readiness(when(29), [report]).state == DecisionState.ABSTENERSE
+
+
+def test_metrics_alone_can_never_produce_urgency():
+    health = make_health()
+    health.set_apple_transition(when(1))
+    _mature(health)
+    health.ingest_observations([observation("resting_heart_rate", 140, "bpm", at=when(28, 9), pid="high")])
+    assert health.assess_readiness(when(29)).state != DecisionState.URGENTE
+
+
+def test_native_healthkit_strength_names_link_apple_and_speediance():
+    health = make_health()
+    health.ingest_workout(WorkoutSession("hk-1", when(1, 18), when(1, 19), APPLE_HEALTH, "HKWorkoutActivityTypeTraditionalStrengthTraining"))
+    health.ingest_workout(WorkoutSession("sp-1", when(1, 18, ), when(1, 19), SPEEDIANCE, "strength"))
+    health.ingest_workout(WorkoutSession("hk-2", when(1, 18), when(1, 19), APPLE_HEALTH, "traditionalStrengthTraining"))
+    assert len(health.logical_workouts()) == 1
+
+
+def test_v05_integrity_limits_and_spo2_fraction():
+    with pytest.raises(ValueError):
+        observation("respiratory_rate", 80, "breaths/min", pid="rr")
+    with pytest.raises(ValueError):
+        observation("resting_heart_rate", 290, "bpm", pid="hr")
+    health = make_health()
+    assert health.ingest_observations([observation("oxygen_saturation", 0.97, "%", pid="spo2")]).accepted == 1
+    assert [o.value for o in health._observations.values()] == [97.0]
+
+
+def _service(tmp_path):
+    keys = {"GATEWAY_SECRET": "g" * 40, "HEALTH_OS_INGEST_KEY": "i" * 40, "HEALTH_OS_READ_KEY": "r" * 40,
+            "HEALTH_OS_DATA_KEY": "d" * 40, "DB_PATH": str(tmp_path / "h.db"), "DATA_DIR": str(tmp_path)}
+    return TestClient(build_health_os_app(load_config(keys)), raise_server_exceptions=False)
+
+
+def test_undecryptable_rows_are_quarantined_not_a_500_or_a_crash_loop(tmp_path):
+    db = store.init_db(str(tmp_path / "h.db"))
+    HealthOSRepository(db, "d" * 40)
+    alien = store.encrypt("z" * 40, "{}")
+    db.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES ('x', 'APPLE_HEALTH', ?)", (alien,))
+    db.execute("INSERT INTO health_os_state(state_key, payload_enc) VALUES ('apple_transition_started_at', ?)", (alien,))
+    db.commit()
+    # Startup migration must survive a row unreadable with both keys.
+    HealthOSRepository(db, "d" * 40, legacy_key="g" * 40)
+    client = _service(tmp_path)
+    read = {"Authorization": "Bearer " + "r" * 40}
+    brief = client.post("/health-os/brief", headers=read, json={})
+    assert brief.status_code == 200
+    body = brief.json()["brief"]
+    assert body["decision"] == "REVISAR_TECNICO" and body["quality"]["pass"] is False
+    assert client.get("/health-os/quality", headers=read).status_code == 200
+
+
+def test_ingest_rejects_non_evidence_and_never_echoes_values(tmp_path):
+    client = _service(tmp_path)
+    ingest = {"Authorization": "Bearer " + "i" * 40}
+    base = {"metric": "heart_rate", "unit": "bpm", "observed_at": "2026-10-11T08:00:00-06:00"}
+    response = client.post("/health-os/ingest", headers=ingest, json={"source": "APPLE_HEALTH", "observations": [
+        {**base, "value": 60, "provenance_id": "t", "semantic": "chatgpt_health_transcription"},
+        {**base, "value": 61, "provenance_id": "m", "semantic": "model_interpreted"},
+        {**base, "value": "SECRETO-123", "provenance_id": "s"},
+    ]}).json()
+    assert response["accepted"] == 0 and len(response["rejected"]) == 3
+    assert "SECRETO-123" not in json.dumps(response)
+
+
+def test_brief_always_carries_the_legend_and_urgency_instruction(tmp_path):
+    client = _service(tmp_path)
+    read = {"Authorization": "Bearer " + "r" * 40}
+    calm = client.post("/health-os/brief", headers=read, json={}).json()["brief"]
+    assert "911" in calm["legend"] and "instruction" not in calm
+    urgent = client.post("/health-os/brief", headers=read, json={"subjective_flags": ["chest pain"]}).json()["brief"]
+    assert urgent["decision"] == "URGENTE" and "911" in urgent["instruction"] and "911" in urgent["legend"]
+
+
+def test_oversized_bodies_return_413_not_500(tmp_path):
+    client = _service(tmp_path)
+    assert client.post("/health-os/transition", headers={"Authorization": "Bearer " + "i" * 40}, content=b"x" * 9000).status_code == 413
+    assert client.post("/health-os/brief", headers={"Authorization": "Bearer " + "r" * 40}, content=b"x" * 9000).status_code == 413

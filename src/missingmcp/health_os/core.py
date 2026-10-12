@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, tzinfo, timezone
 from enum import StrEnum
 from hashlib import sha256
+import re
+import unicodedata
 from math import isfinite
 from typing import Iterable
 from zoneinfo import ZoneInfo
@@ -20,6 +22,50 @@ class DecisionState(StrEnum):
     INFORMATIVO = "INFORMATIVO"
     REVISAR_TECNICO = "REVISAR_TECNICO"
     ABSTENERSE = "ABSTENERSE"
+    # Política Operativa v0.5, section 6.0: emitted ONLY when the operator
+    # self-reports a symptom from the closed list below.  Never from metrics,
+    # never from model inference.  The system calls and notifies no one.
+    URGENTE = "URGENTE"
+
+
+# Política Operativa v0.5, sections 6.0 and 7.  Fixed operator-approved text.
+EMERGENCY_INSTRUCTION = ("Detén la actividad y llama al 911 ahora. No esperes una lectura del "
+                         "dispositivo ni respuesta de tu médico.")
+EMERGENCY_LEGEND = ("Health OS apoya la decisión; no diagnostica ni sustituye el juicio clínico ni los "
+                    "servicios de urgencia (911). Ante dolor o presión en el pecho, debilidad súbita, "
+                    "alteración del habla, falta de aire intensa o pérdida de respuesta, llama al 911 "
+                    "sin esperar al sistema.")
+NON_EVIDENCE_SEMANTICS = frozenset({"model_interpreted", "chatgpt_health_transcription"})
+
+# Closed, bilingual alarm list (Política Operativa v0.5, section 6.0).  Matching
+# is case-, accent- and whitespace-insensitive on the operator's self-report.
+_ALARM_TERMS = (
+    # Chest pain or pressure
+    "dolor en el pecho", "dolor de pecho", "presion en el pecho", "opresion en el pecho",
+    "chest pain", "chest pressure", "chest tightness",
+    # Sudden one-sided weakness, facial droop, speech, vision or balance change
+    "debilidad subita", "cara caida", "alteracion del habla", "no puedo hablar",
+    "perdida de vision", "perdida del equilibrio",
+    "sudden weakness", "face drooping", "slurred speech", "speech difficulty",
+    "vision loss", "loss of balance",
+    # Loss of response with absent or abnormal breathing
+    "perdida de respuesta", "no responde", "inconsciente",
+    "unresponsive", "loss of consciousness", "not breathing",
+    # Severe or worsening shortness of breath
+    "falta de aire intensa", "no puedo respirar", "ahogo",
+    "severe shortness of breath", "can't breathe", "cant breathe", "cannot breathe",
+)
+
+
+def _normalize_report(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", str(text))
+    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", plain.replace("\u2019", "'")).strip().lower()
+
+
+def is_alarm_report(text: str) -> bool:
+    normalized = _normalize_report(text)
+    return any(term in normalized for term in _ALARM_TERMS)
 
 
 APPLE_HEALTH = "APPLE_HEALTH"
@@ -57,13 +103,15 @@ class MetricObservation:
         # These are data-integrity limits, not medical alert thresholds.  They
         # only discard values a sensor cannot plausibly encode; escalation
         # thresholds remain a clinician-owned policy.
-        if self.metric in {"heart_rate", "resting_heart_rate", "walking_heart_rate_average"} and not 0 < self.value <= 300:
+        if self.metric in {"heart_rate", "resting_heart_rate", "walking_heart_rate_average"} and not 20 <= self.value <= 250:
             raise ValueError("heart-rate observation is outside sensor bounds")
+        if self.metric == "hrv" and not 0 < self.value <= 300:
+            raise ValueError("hrv observation is outside sensor bounds")
         if self.metric == "oxygen_saturation" and not 0 < self.value <= 100:
             raise ValueError("oxygen-saturation observation is outside sensor bounds")
         bounds = {
             "weight": (1, 500), "body_mass": (1, 500), "lean_body_mass": (1, 500),
-            "respiratory_rate": (1, 100), "sleep_duration": (1, 24 * 60),
+            "respiratory_rate": (4, 60), "sleep_duration": (1, 24 * 60),
         }
         if self.metric in bounds and not bounds[self.metric][0] <= self.value <= bounds[self.metric][1]:
             raise ValueError(f"{self.metric} observation is outside sensor bounds")
@@ -131,7 +179,11 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
         return round(value / 4.184, 6), "kcal"
     # Apple Health / ChatGPT Health catalog. Keep this explicit: accepting an
     # unknown unit would make a plausible-looking Health OS conclusion unsafe.
-    if metric in {"oxygen_saturation", "body_fat_percentage", "walking_asymmetry", "double_support_percentage"} and key in {"%", "percent", "percentage"}:
+    if metric in {"oxygen_saturation", "body_fat_percentage"} and key in {"%", "percent", "percentage"}:
+        # Apple stores these proportions as 0.0-1.0; a real reading is never
+        # at or below one percent, so a fraction is converted, not mixed in.
+        return (round(value * 100, 6) if value <= 1 else value), "%"
+    if metric in {"walking_asymmetry", "double_support_percentage"} and key in {"%", "percent", "percentage"}:
         return value, "%"
     if metric in {"respiratory_rate"} and key in {"breaths/min", "breaths_per_minute", "brpm"}:
         return value, "breaths/min"
@@ -230,8 +282,11 @@ class HealthOS:
 
     @staticmethod
     def _activity_family(value: str) -> str:
-        normalized = value.lower().replace("-", "_").replace(" ", "_")
-        if normalized in {"strength", "strength_training", "functional_strength_training", "traditional_strength_training", "weight_training"}:
+        raw = re.sub(r"^HKWorkoutActivityType", "", value.strip())
+        snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw)
+        normalized = re.sub(r"[\s\-]+", "_", snake).lower()
+        if normalized in {"strength", "strength_training", "functional_strength_training",
+                          "traditional_strength_training", "weight_training", "core_training"}:
             return "strength"
         return normalized
 
@@ -246,6 +301,11 @@ class HealthOS:
         if key in self._workouts:
             return key
         for existing_key, existing in self._workouts.items():
+            same_family = self._activity_family(existing.activity_type) == self._activity_family(session.activity_type)
+            if (existing.source == session.source and same_family
+                    and existing.start_time == session.start_time and existing.end_time == session.end_time):
+                # The same producer re-sent one session under a new identifier.
+                return existing_key
             compatible_sources = {existing.source, session.source} == {APPLE_HEALTH, SPEEDIANCE}
             overlap = self._overlap(existing, session)
             shorter = min(existing.end_time - existing.start_time, session.end_time - session.start_time)
@@ -282,7 +342,7 @@ class HealthOS:
             return BaselineEra.GARMIN
         coverage = {o.observed_at.astimezone(self.timezone).date() for o in self._observations.values()
                     if o.source == APPLE_HEALTH and o.observed_at >= self._apple_baseline_started
-                    and o.semantic not in {"model_interpreted", "chatgpt_health_transcription"}}
+                    and o.semantic not in NON_EVIDENCE_SEMANTICS}
         if len(coverage) < 14:
             return BaselineEra.APPLE_TRANSITION
         return BaselineEra.APPLE_BASELINE
@@ -300,37 +360,44 @@ class HealthOS:
         # rolling number of 24-hour instants.  A night ending at 06:00 on the
         # first eligible local day must not be discarded merely because the
         # Brief runs later that afternoon.
+        if self._apple_baseline_started is None:
+            # Without an operator-confirmed Apple era there is no baseline.
+            return 0
         lower_day = (at.astimezone(self.timezone).date() - timedelta(days=window_days)).isoformat()
         return len({self.local_day(x.observed_at) for x in self._observations.values()
                     if x.source == APPLE_HEALTH and x.metric == metric
+                    and x.observed_at >= self._apple_baseline_started
                     and self.local_day(x.observed_at) >= lower_day
-                    and x.semantic not in {"model_interpreted", "chatgpt_health_transcription"}})
+                    and x.semantic not in NON_EVIDENCE_SEMANTICS})
 
     def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
         return self.metric_baseline_days(metric, at) >= _BASELINE_DAYS
 
     def assess_readiness(self, now: datetime, subjective_flags: Iterable[str] = ()) -> DecisionAssessment:
-        """Return a conservative, explainable state; never changes a plan itself."""
+        """Return a conservative, explainable state; never changes a plan itself.
+
+        Order (Política Operativa v0.5): an alarm symptom from the closed list
+        overrides everything; any other self-reported symptom abstains; then
+        data quality, the Apple era, and metric-specific baselines.  Values
+        interpreted by a model or transcribed from ChatGPT Health are isolated:
+        they never count as evidence and never change the state.
+        """
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        # Subjective language is not a clinician-approved symptom triage
-        # policy.  Do not make a medical decision from developer-owned keyword
-        # lists; the service remains conservative until a policy is supplied.
-        flags_present = any(str(flag).strip() for flag in subjective_flags)
+        flags = [str(flag) for flag in subjective_flags if str(flag).strip()]
+        if any(is_alarm_report(flag) for flag in flags):
+            return DecisionAssessment(DecisionState.URGENTE, "high", (EMERGENCY_INSTRUCTION,), (), False)
+        if flags:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("self-reported symptom outside the closed alarm list",), (), False)
         quality = self.data_quality(now)
         if quality["stale"] or quality["legacy_after_transition"] or quality["persisted_invalid_records"]:
             return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("data quality needs technical review",), ("recent Apple Health coverage",), False)
+        if self._apple_baseline_started is None:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple era start is not recorded",), ("apple_transition_started_at",), False)
         required = ("sleep_duration", "resting_heart_rate")
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
         if missing:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
-        non_evidence = [x for x in self._observations.values()
-                        if x.semantic in {"model_interpreted", "chatgpt_health_transcription"}
-                        and x.observed_at >= now - timedelta(days=3)]
-        if non_evidence:
-            return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("non-evidence values cannot drive the operational snapshot",), (), False)
-        if flags_present:
-            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("subjective flags are outside the automated operational policy",), (), False)
         # A stable baseline allows only an informational presentation.  It is
         # not a medical clearance, diagnosis, prescription or training order.
         return DecisionAssessment(DecisionState.INFORMATIVO, "medium", ("Apple Health coverage and metric-specific baselines are stable",), (), False)
@@ -342,7 +409,7 @@ class HealthOS:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
         apple = [x for x in self._observations.values()
-                 if x.source == APPLE_HEALTH and x.semantic not in {"model_interpreted", "chatgpt_health_transcription"}]
+                 if x.source == APPLE_HEALTH and x.semantic not in NON_EVIDENCE_SEMANTICS]
         days = {self.local_day(x.observed_at) for x in apple}
         stale = not apple or max(x.observed_at for x in apple) < now - timedelta(days=2)
         mixed = [x.metric for x in self._observations.values() if x.source == GARMIN_LEGACY and self.baseline_era(x.observed_at) != BaselineEra.GARMIN]
