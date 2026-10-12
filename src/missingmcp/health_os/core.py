@@ -398,6 +398,13 @@ class HealthOS:
     def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
         return self.metric_baseline_days(metric, at) >= _BASELINE_DAYS
 
+    READINESS_METRICS = ("sleep_duration", "resting_heart_rate")
+
+    def baseline_coverage(self, at: datetime) -> list[dict[str, object]]:
+        """Valid days against required days per readiness metric: counts only, no values."""
+        return [{"metric": metric, "valid_days": min(self.metric_baseline_days(metric, at), _BASELINE_DAYS),
+                 "required_days": _BASELINE_DAYS} for metric in self.READINESS_METRICS]
+
     def assess_readiness(self, now: datetime, subjective_flags: Iterable[str] = ()) -> DecisionAssessment:
         """Return a conservative, explainable state; never changes a plan itself.
 
@@ -419,7 +426,7 @@ class HealthOS:
             return DecisionAssessment(DecisionState.REVISAR_TECNICO, "low", ("data quality needs technical review",), ("recent Apple Health coverage",), False)
         if self._apple_baseline_started is None:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple era start is not recorded",), ("apple_transition_started_at",), False)
-        required = ("sleep_duration", "resting_heart_rate")
+        required = self.READINESS_METRICS
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
         if missing:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
@@ -451,6 +458,8 @@ class HealthOS:
             buckets.setdefault(self.local_day(item.observed_at), []).append(item.value)
         return {day: (sum(v) if how == "sum" else sum(v) / len(v)) for day, v in buckets.items()}
 
+    WEIGHT_TREND_WEEKS = 12
+
     def weekly_trends(self, now: datetime, weeks: int = 4) -> dict[str, object]:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
@@ -480,6 +489,33 @@ class HealthOS:
                     "change_vs_baseline": round(mean - baseline, 1) if baseline is not None else None,
                     "rule": "tendencia-descriptiva v0.1",
                 })
+        # Body weight comes from a scale, not the watch, so it is comparable
+        # across the Garmin/Apple transition and is read from every Apple
+        # Health producer.  It gets a longer window: the goal is a trajectory.
+        weight_daily: dict[str, list[float]] = {}
+        for item in self._observations.values():
+            if (item.metric == "weight" and item.source == APPLE_HEALTH
+                    and item.semantic not in NON_EVIDENCE_SEMANTICS):
+                weight_daily.setdefault(self.local_day(item.observed_at), []).append(item.value)
+        weight_means = {day: sum(v) / len(v) for day, v in weight_daily.items()}
+        for back in range(self.WEIGHT_TREND_WEEKS - 1, -1, -1):
+            week_start = this_monday - timedelta(weeks=back)
+            days = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
+            values = [weight_means[d] for d in days if d in weight_means]
+            if not values:
+                continue
+            prior = [weight_means[(week_start - timedelta(days=i)).isoformat()] for i in range(1, 29)
+                     if (week_start - timedelta(days=i)).isoformat() in weight_means]
+            mean = sum(values) / len(values)
+            baseline = sum(prior) / len(prior) if len(prior) >= 3 else None
+            rows.append({
+                "metric": "weight", "unit": "kg", "week_start": week_start.isoformat(),
+                "aggregate": "mean_of_daily_means", "value": round(mean, 1), "valid_days": len(values),
+                "baseline_value": round(baseline, 1) if baseline is not None else None,
+                "baseline_days": len(prior),
+                "change_vs_baseline": round(mean - baseline, 1) if baseline is not None else None,
+                "rule": "tendencia-descriptiva v0.1",
+            })
         for back in range(weeks - 1, -1, -1):
             week_start = this_monday - timedelta(weeks=back)
             week_end = week_start + timedelta(days=7)

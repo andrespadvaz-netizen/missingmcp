@@ -54,6 +54,10 @@ class HealthOSRepository:
                  health_timezone: str | tzinfo = "America/Mexico_City", *,
                  legacy_key: str | None = None) -> None:
         self.conn, self.data_key, self.health_timezone = conn, data_key, health_timezone
+        # Decrypting every stored row took ~35 s in production (Oct 2026).  The
+        # service is single-process and every write goes through this object,
+        # so the scan is cached in memory and dropped on each write.
+        self._scan_cache: tuple[HealthOS, list[dict[str, str]]] | None = None
         conn.executescript(_SCHEMA)
         conn.commit()
         # Existing deployments encrypted the three private Health OS tables
@@ -99,6 +103,7 @@ class HealthOSRepository:
         return sha256(f"{source}|{value}".encode()).hexdigest()
 
     def ingest(self, source: str, observations: list[Mapping[str, Any]], workouts: list[Mapping[str, Any]]) -> dict[str, Any]:
+        self._invalidate()
         accepted = duplicates = 0
         rejected: list[str] = []
         for raw in observations:
@@ -135,12 +140,21 @@ class HealthOSRepository:
             except (TypeError, ValueError) as exc:
                 rejected.append(_safe_reason(exc))
         self.conn.commit()
+        self._invalidate()  # also drops a scan that raced with this write
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
 
     def _load_health(self, now: datetime) -> HealthOS:
         return self._scan()[0]
 
+    def _invalidate(self) -> None:
+        self._scan_cache = None
+
     def _scan(self) -> tuple[HealthOS, list[dict[str, str]]]:
+        if self._scan_cache is None:
+            self._scan_cache = self._scan_uncached()
+        return self._scan_cache
+
+    def _scan_uncached(self) -> tuple[HealthOS, list[dict[str, str]]]:
         """Load valid evidence and list every stored row that cannot count.
 
         Each invalid row is described only by table, key and a fixed reason
@@ -237,6 +251,7 @@ class HealthOSRepository:
         transaction.  Nothing is deleted from the database.  ``expected`` must
         match the current count so a stale report can never move other rows.
         """
+        self._invalidate()  # count against fresh rows, never a cached scan
         _, invalid = self._scan()
         if expected != len(invalid):
             raise ValueError("expected count does not match the current invalid records")
@@ -259,6 +274,8 @@ class HealthOSRepository:
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            self._invalidate()
         return {"quarantined": len(invalid)}
 
     def set_apple_transition(self, started_at: datetime) -> None:
@@ -272,6 +289,7 @@ class HealthOSRepository:
             ("apple_transition_started_at", payload),
         )
         self.conn.commit()
+        self._invalidate()
 
     def quality(self, now: datetime) -> dict[str, object]:
         health = self._load_health(now)
@@ -305,6 +323,8 @@ class HealthOSRepository:
             "missing": list(decision.missing),
             "automated_action": decision.automated_action,
             "quality": quality,
+            # Section 7: coverage travels in the e-mail block as day counts only.
+            "coverage": health.baseline_coverage(now),
             # Política Operativa v0.5, section 7: always present, every output.
             "legend": EMERGENCY_LEGEND,
         }

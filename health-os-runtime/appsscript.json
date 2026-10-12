@@ -4,6 +4,8 @@
   "exceptionLogging": "STACKDRIVER",
   "executionApi": { "access": "MYSELF" },
   "oauthScopes": [
-    "https://www.googleapis.com/auth/script.external_request"
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/script.scriptapp"
   ]
 }

@@ -71,3 +71,15 @@ crudas.
 - Re-importing the same export refreshes the stored payload of measurements already present, so a
   full re-import tags the existing history. Quarantined rows are not re-admitted: current integrity
   rules reject them before persistence.
+
+## Daily snapshot for the Brief (Oct 2026)
+
+- `brief.coverage`: per readiness metric (`sleep_duration`, `resting_heart_rate`) `valid_days` against
+  `required_days` (28). Day counts only; travels in the e-mail block (Política Operativa v0.5, section 7).
+- `trends.weeks` adds `weight` (12 weeks, mean of daily means, every Apple Health producer: a scale is
+  not a watch, so the Garmin/Apple transition does not reset it; baseline needs 3 prior weigh-in days).
+- Apps Script `writeHealthOSDailySnapshot()` writes `Metis_HealthOS_Snapshot_Diario.json` (private,
+  `drive.file`) with blocks `correo` and `vista_app`; the Metis Daily Briefing reads it via the Drive
+  connector and never holds a key. An unattended snapshot carries no self-reported symptoms, so it can
+  never be URGENTE; the 911 legend is present in every block, including failures.
+- The repository caches the decrypted scan in memory and drops it on every write (scan took ~35 s).

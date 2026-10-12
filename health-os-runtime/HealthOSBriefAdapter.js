@@ -28,6 +28,11 @@ var HealthOSBriefAdapter = (function () {
       confidence: ALLOWED_CONFIDENCE.indexOf(value.confidence) >= 0 ? value.confidence : 'low',
       factors: strings(value.factors, 2),
       missing: strings(value.missing, 3),
+      // Section 7: coverage is day counts per readiness metric, never values.
+      coverage: (Object.prototype.toString.call(value.coverage) === '[object Array]' ? value.coverage : [])
+        .slice(0, 4).filter(function (c) {
+          return c && typeof c.metric === 'string' && typeof c.valid_days === 'number' && typeof c.required_days === 'number';
+        }).map(function (c) { return { metric: c.metric.slice(0, 40), valid_days: c.valid_days, required_days: c.required_days }; }),
       quality: { pass: quality.pass === true, stale: quality.stale === true,
         legacy_after_transition: strings(quality.legacy_after_transition, 3) }
     };

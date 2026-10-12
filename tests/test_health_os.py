@@ -534,6 +534,8 @@ def test_brief_always_carries_the_legend_and_urgency_instruction(tmp_path):
     read = {"Authorization": "Bearer " + "r" * 40}
     calm = client.post("/health-os/brief", headers=read, json={}).json()["brief"]
     assert "911" in calm["legend"] and "instruction" not in calm
+    assert [c["metric"] for c in calm["coverage"]] == ["sleep_duration", "resting_heart_rate"]
+    assert all(set(c) == {"metric", "valid_days", "required_days"} and c["required_days"] == 28 for c in calm["coverage"])
     urgent = client.post("/health-os/brief", headers=read, json={"subjective_flags": ["chest pain"]}).json()["brief"]
     assert urgent["decision"] == "URGENTE" and "911" in urgent["instruction"] and "911" in urgent["legend"]
 
@@ -612,6 +614,38 @@ def test_weekly_trends_are_aggregates_against_a_provisional_baseline():
     workouts = [r for r in trends["weeks"] if r["metric"] == "workouts"]
     assert workouts[-1]["value"] == 1 and workouts[-1]["strength_sessions"] == 1
     assert all("observed_at" not in r and "provenance_id" not in r for r in trends["weeks"])
+
+
+def test_weight_trend_reads_every_apple_health_producer_across_the_transition():
+    health = make_health()
+    start = datetime(2026, 10, 4, tzinfo=MX)
+    health.set_apple_transition(start)
+    rows = []
+    for back in range(30, -1, -3):  # a weigh-in every three days, mostly before the transition
+        at = start + timedelta(days=8 - back, hours=7)
+        rows.append(MetricObservation("weight", 60.0 + (30 - back) * 0.03, "kg", at, APPLE_HEALTH,
+                                      f"w:{back}", device_source="iphone"))
+    health.ingest_observations(rows)
+    weights = [r for r in health.weekly_trends(start + timedelta(days=8, hours=12))["weeks"] if r["metric"] == "weight"]
+    assert len(weights) >= 4
+    assert all(r["unit"] == "kg" and r["aggregate"] == "mean_of_daily_means" for r in weights)
+    assert weights[-1]["baseline_value"] is not None and weights[-1]["change_vs_baseline"] > 0
+    assert all("observed_at" not in r for r in weights)
+
+
+def test_scan_is_cached_until_a_write(tmp_path, monkeypatch):
+    repo = HealthOSRepository(store.init_db(str(tmp_path / "c.db")), "k" * 40)
+    calls = []
+    original = repo._scan_uncached
+    monkeypatch.setattr(repo, "_scan_uncached", lambda: calls.append(1) or original())
+    repo.quality(when(1)); repo.quality(when(1))
+    assert len(calls) == 1
+    repo.set_apple_transition(when(1))
+    repo.quality(when(1))
+    assert len(calls) == 2
+    assert repo.quarantine_invalid(expected=0) == {"quarantined": 0}
+    repo.quality(when(1))
+    assert len(calls) == 4  # apply rescans fresh rows, then drops the cache again
 
 
 def test_trends_require_the_apple_era_start():
