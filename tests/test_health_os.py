@@ -266,7 +266,12 @@ def test_resumable_import_filters_metrics_and_never_puts_phi_in_checkpoint(tmp_p
     assert result["observations_seen"] == 1 and result["outside_metrics"] == 1
     assert len(posted) == 1
     saved = checkpoint.read_text(encoding="utf-8")
-    assert "55" not in saved and "Apple Watch" not in saved and "secret" not in saved
+    checkpoint_data = json.loads(saved)
+    assert set(checkpoint_data) == {"identity", "completed_records"}
+    assert set(checkpoint_data["identity"]) == {
+        "archive_name", "archive_bytes", "archive_mtime_ns", "since", "metrics"}
+    assert checkpoint_data["identity"]["metrics"] == ["sleep_duration"]
+    assert "Apple Watch" not in saved and "secret" not in saved
     second = import_zip(archive_path, "https://health.example", "secret", metrics=["sleep_duration"], checkpoint=checkpoint)
     assert second["checkpoint_skipped"] == 1 and len(posted) == 1
 
