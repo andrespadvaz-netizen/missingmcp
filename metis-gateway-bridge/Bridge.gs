@@ -68,12 +68,9 @@ function dispatch_(p) {
     props.setProperty('receipt',JSON.stringify(receipt));
     clearDurable_(props,receipt);
     storeDurable_(props,receipt,{request:p.request,origin_model:p.origin_model || 'ANTHROPIC',context_project:p.context_project,calls:[]});
-    // Railway is the single normal checkpoint driver. Scheduling an Apps
-    // Script trigger here created two concurrent drivers for the same durable
-    // receipt: the trigger and Railway repeatedly competed for ScriptLock,
-    // turning seconds of provider time into minutes of wall time. A trigger
-    // remains available through repairBridgeRuntime() as an explicit recovery
-    // path when Railway is unavailable.
+    // Railway is the single normal checkpoint driver. Apps Script triggers
+    // remain an explicit recovery path because Web App executions cannot be
+    // relied on to install and start a trigger under the deployment identity.
     return {id:p.id,seq:p.seq,state:'ACCEPTED'};
   } finally { lock.releaseLock(); }
 }
@@ -277,8 +274,8 @@ function execute_(p) {
             duration_ms:Number.isFinite(c.duration_ms) ? c.duration_ms : null};
         }),
         requires_review:result.limits.cost_known !== true,
-        engine_version:48,
-        engine_release:10,
+        engine_version:49,
+        engine_release:12,
         resolved_context:result.resolved_context,
         write_plan:result.write_plan || [],
         write_plan_verified:productive && result.status === 'COMPLETED' && !!result.action_plan && result.action_plan.valid === true
@@ -442,7 +439,7 @@ function cached_(props, receipt) {
 
 /** Read-only capability probe: no credential values and no provider calls. */
 function inspectBridge() {
-  return {engine_version:48, engine_release:11, level:Engine.Config.runLevel(),
+  return {engine_version:49, engine_release:12, bridge_version:76, level:Engine.Config.runLevel(),
     productive_enabled:PropertiesService.getScriptProperties().getProperty('GATEWAY_PRODUCTIVE_ENABLED')==='true',
     providers_ready:Engine.Config.hasSecret('OPENAI_API_KEY') && Engine.Config.hasSecret('ANTHROPIC_API_KEY'),
     signing_ready:!!PropertiesService.getScriptProperties().getProperty('GATEWAY_BRIDGE_SECRET')};

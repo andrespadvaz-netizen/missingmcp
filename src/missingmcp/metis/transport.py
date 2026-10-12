@@ -187,10 +187,9 @@ class Worker:
             # From this commit onward a transport failure NEVER causes another run.
             action, request = "run", self.queue.request(row)
         else:
-            # Railway drives the next durable provider checkpoint directly.
-            # Apps Script time triggers remain a recovery path, not the normal
-            # latency path. Repeating advance cannot duplicate an accounted
-            # call because the bridge replays the durable receipt first.
+            # Railway drives the next durable checkpoint. Repeating advance
+            # cannot duplicate an accounted call: the bridge replays the
+            # durable provider receipt before permitting another dispatch.
             action, request = "advance", None
         try:
             reply = await self.bridge.call(action, row, request)
