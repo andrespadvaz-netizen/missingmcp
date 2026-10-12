@@ -47,7 +47,9 @@ function fixture() {
     assert.ok(guard>0,'background worker did not terminate');
   }
   function request(seq=1,action='run',override={}) {
-    const first=rawRequest(seq,action,override);if(first.state==='ACCEPTED'){drain();return rawRequest(seq,'status',override);}return first;
+    const first=rawRequest(seq,action,override);
+    if(first.state==='ACCEPTED') return rawRequest(seq,'advance',override);
+    return first;
   }
   return {context,data,request,rawRequest,drain,calls:()=>calls,level:()=>level,triggers:()=>triggers.length};
 }
@@ -73,7 +75,7 @@ test('Bridge rejects a missing context before durable receipt or engine spend',(
 });
 test('Run returns durable ACK, status is read-only, and advance drives work immediately',()=>{
   const f=fixture();const ack=f.rawRequest();
-  assert.equal(ack.state,'ACCEPTED');assert.equal(f.calls(),0);assert.equal(f.triggers(),1);
+  assert.equal(ack.state,'ACCEPTED');assert.equal(f.calls(),0);assert.equal(f.triggers(),0);
   assert.equal(f.rawRequest(1,'status').state,'ACCEPTED');assert.equal(f.calls(),0);
   assert.equal(f.rawRequest(1,'advance').state,'DONE');assert.equal(f.calls(),1);
   assert.equal(f.rawRequest(1,'status').state,'DONE');assert.equal(f.calls(),1);

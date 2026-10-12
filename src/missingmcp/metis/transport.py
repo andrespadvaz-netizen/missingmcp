@@ -171,10 +171,10 @@ class Worker:
         await self.write_worker.reconcile_known_object()
         row = self.queue.next()
         if not row:
-            return
+            return "IDLE"
         if row["status"] == "APPLYING":
             await self.write_worker.step(row)
-            return
+            return "ACTIVE"
         if row["status"] == "QUEUED" and self.queue.claim(row):
             # From this commit onward a transport failure NEVER causes another run.
             action, request = "run", self.queue.request(row)
@@ -188,14 +188,16 @@ class Worker:
             reply = await self.bridge.call(action, row, request)
         except (httpx.HTTPError, ValueError, TypeError) as exc:
             self.expire_uncertain(row, _transport_failure_class(exc))
-            return  # keep the durable dispatch receipt and reconcile later
+            return "BACKOFF"  # keep the durable dispatch receipt and reconcile later
         if reply.get("state") == "DONE":
             result = reply.get("result")
             if isinstance(result, dict) and result.get("status") in {"COMPLETED", "FAILED", "REQUIRES_ANDRES"}:
                 self.queue.finish(row, result)
-                return
+                return "TERMINAL"
         if reply.get("state") in {"ACCEPTED", "RUNNING"}:
-            return
+            return "ACTIVE"
+        if reply.get("state") == "BUSY":
+            return "BACKOFF"
         self.expire_uncertain(row, "BRIDGE_CONTRACT_REJECTED")
         # Missing/expired bridge receipts are NOT proof no paid call happened.
         # The row remains DISPATCHED; block subsequent spend until inspected.
@@ -209,13 +211,19 @@ class Worker:
 
     async def run(self, stop):
         while not stop.is_set():
+            cadence = 1.0
             try:
-                await self.step()
+                outcome = await self.step()
+                # Advance the next durable checkpoint promptly. Five seconds
+                # per pass was pure orchestration latency and accumulated once
+                # for every model intervention. BUSY/transport outcomes back
+                # off so the recovery path cannot hammer Apps Script.
+                cadence = 0.1 if outcome in {"ACTIVE", "TERMINAL"} else 1.0
             except Exception:
                 # No exception body (could contain payload/keys) reaches logs.
-                pass
+                cadence = 1.0
             try:
-                await asyncio.wait_for(stop.wait(), timeout=5)
+                await asyncio.wait_for(stop.wait(), timeout=cadence)
             except asyncio.TimeoutError:
                 pass
 

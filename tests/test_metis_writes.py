@@ -13,9 +13,9 @@ SECRET = 'synthetic-storage-secret-' * 3
 
 def plan(count=1):
     return {"status": "COMPLETED", "cost_known": True, "cost_usd": 0,
-            "resolved_context": "PROJECT/SUBPROJECT", "write_plan_verified": True,
+            "resolved_context": "METIS", "write_plan_verified": True,
             "final_answer": "Plan pendiente.", "write_plan": [
-        {"ordinal": n, "action": {"context": "PROJECT/SUBPROJECT", "destination": "notes", "provider": "NOTION",
+        {"ordinal": n, "action": {"context": "METIS", "destination": "notes", "provider": "NOTION",
           "object_id": f"root-{n}", "operation": "create", "payload": {"title": "Private title", "text": "PRIVATE BUSINESS CONTENT"},
           "snapshot": {}, "policy_revision": "one", "policy_hash": "a" * 64}}
         for n in range(1, count+1)]}
@@ -29,7 +29,8 @@ def q(tmp_path):
 
 
 def schedule(q, count=1, key='write-request-0001'):
-    value = q.create('operator', {'request': 'Create a note', 'idempotency_key': key})
+    value = q.create('operator', {'request': 'Create a note', 'idempotency_key': key,
+        'context': {'project': 'METIS', 'source': 'current_request'}})
     row = q.next()
     q.claim(row)
     q.finish(row, plan(count))
@@ -68,12 +69,17 @@ def test_plan_is_durable_encrypted_and_not_reported_complete(q):
     assert q.db.execute('SELECT count(*) FROM metis_write_actions').fetchone()[0] == 2
 
 
-@pytest.mark.parametrize('damage', ['scope', 'verified', 'operation', 'duplicate', 'ordinal'])
+@pytest.mark.parametrize('damage', ['scope', 'execution_context', 'verified', 'operation', 'duplicate', 'ordinal'])
 def test_invalid_whole_plan_records_no_intents(q, damage):
-    q.create('operator', {'request': 'Create note', 'idempotency_key': 'write-request-0001'})
+    q.create('operator', {'request': 'Create note', 'idempotency_key': 'write-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}})
     row = q.next(); q.claim(row)
     result = plan(2)
     if damage == 'scope': result['write_plan'][1]['action']['context'] = 'OTHER'
+    if damage == 'execution_context':
+        result['resolved_context'] = 'ANDREA'
+        for item in result['write_plan']:
+            item['action']['context'] = 'ANDREA'
     if damage == 'verified': result['write_plan_verified'] = False
     if damage == 'operation': result['write_plan'][1]['action']['operation'] = 'delete'
     if damage == 'duplicate': result['write_plan'][1]['action']['object_id'] = 'root-1'
@@ -96,7 +102,8 @@ async def test_all_writes_verify_and_retry_create_returns_same_receipts(q):
     assert view['status'] == 'COMPLETED'
     assert all(x['verified'] for x in view['write_receipts'])
     assert bridge.calls == [('write', 1), ('write', 2)]
-    assert q.create('operator', {'request': 'Create a note', 'idempotency_key': 'write-request-0001'}) == view
+    assert q.create('operator', {'request': 'Create a note', 'idempotency_key': 'write-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}}) == view
 
 
 @pytest.mark.asyncio
@@ -124,7 +131,8 @@ async def test_uncertain_write_stops_rest_pauses_writes_but_not_reads(q):
     view = q.get('operator', eid)
     assert view['status'] == 'REQUIRES_ANDRES' and view['writes_paused']
     assert [x['status'] for x in receipts(q, eid)] == ['UNCERTAIN', 'SKIPPED']
-    read = q.create('operator', {'request': 'Read project', 'idempotency_key': 'read-request-0001'})
+    read = q.create('operator', {'request': 'Read project', 'idempotency_key': 'read-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}})
     read_row = q.next(); q.claim(read_row)
     q.finish(read_row, {'status': 'COMPLETED', 'cost_known': True, 'final_answer': 'Read result'})
     assert q.get('operator', read['execution_id'])['status'] == 'COMPLETED'
@@ -152,9 +160,11 @@ async def test_unverified_success_never_claims_completion(q):
 
 
 def test_origin_is_persisted_by_client_not_request(q):
-    value = q.create('operator', {'request': 'Read', 'idempotency_key': 'read-request-0001'}, 'OPENAI')
+    value = q.create('operator', {'request': 'Read', 'idempotency_key': 'read-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}}, 'OPENAI')
     assert q.next()['origin_model'] == 'OPENAI'
-    duplicate = q.create('operator', {'request': 'Read', 'idempotency_key': 'read-request-0001'}, 'ANTHROPIC')
+    duplicate = q.create('operator', {'request': 'Read', 'idempotency_key': 'read-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}}, 'ANTHROPIC')
     assert duplicate['execution_id'] == value['execution_id']
     assert q.next()['origin_model'] == 'OPENAI'
 
@@ -177,7 +187,8 @@ async def test_readback_reconciliation_unpauses_without_replaying(q):
     assert view['status'] == 'COMPLETED' and not view['writes_paused']
     assert view['write_receipts'][0]['reconciliation']['prior_error'] == 'PROVIDER_HTTP_403'
     assert bridge.calls == ['write_status']
-    assert q.create('operator', {'request': 'Create a note', 'idempotency_key': 'write-request-0001'}) == view
+    assert q.create('operator', {'request': 'Create a note', 'idempotency_key': 'write-request-0001',
+        'context': {'project': 'METIS', 'source': 'current_request'}}) == view
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('known,returned,verified', [(None,'known',True),('known','different',True),('known','known',False)])

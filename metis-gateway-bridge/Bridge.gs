@@ -68,7 +68,12 @@ function dispatch_(p) {
     props.setProperty('receipt',JSON.stringify(receipt));
     clearDurable_(props,receipt);
     storeDurable_(props,receipt,{request:p.request,origin_model:p.origin_model || 'ANTHROPIC',context_project:p.context_project,calls:[]});
-    scheduleBridgeWorker_();
+    // Railway is the single normal checkpoint driver. Scheduling an Apps
+    // Script trigger here created two concurrent drivers for the same durable
+    // receipt: the trigger and Railway repeatedly competed for ScriptLock,
+    // turning seconds of provider time into minutes of wall time. A trigger
+    // remains available through repairBridgeRuntime() as an explicit recovery
+    // path when Railway is unavailable.
     return {id:p.id,seq:p.seq,state:'ACCEPTED'};
   } finally { lock.releaseLock(); }
 }

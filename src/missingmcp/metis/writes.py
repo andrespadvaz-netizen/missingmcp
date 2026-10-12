@@ -26,7 +26,7 @@ def initialize(db):
     db.execute("CREATE TABLE IF NOT EXISTS metis_write_pause (execution_id TEXT PRIMARY KEY)")
 
 
-def validate_plan(result):
+def validate_plan(result, expected_context=None):
     plan = result.get("write_plan", [])
     if not isinstance(plan, list) or len(plan) > 8:
         raise ValueError("invalid_write_plan")
@@ -36,6 +36,8 @@ def validate_plan(result):
             or result.get("cost_known") is not True or result.get("requires_review")
             or not result.get("resolved_context")):
         raise ValueError("unverified_write_plan")
+    if expected_context is not None and result["resolved_context"] != expected_context:
+        raise ValueError("write_context_mismatch")
     seen = set()
     for index, item in enumerate(plan, 1):
         if not isinstance(item, dict) or set(item) != {"ordinal", "action"} or item["ordinal"] != index or isinstance(item["ordinal"], bool):
@@ -59,7 +61,12 @@ def validate_plan(result):
 
 def schedule(queue, execution_id, result):
     """Called inside Queue.finish's transaction: all or no intents are recorded."""
-    plan = validate_plan(result)
+    execution = queue.db.execute(
+        "SELECT context_project FROM metis_executions WHERE id=?", (execution_id,)
+    ).fetchone()
+    if not execution:
+        raise ValueError("execution_not_found")
+    plan = validate_plan(result, execution["context_project"])
     if not plan:
         return result["status"]
     if queue.db.execute("SELECT 1 FROM metis_write_pause LIMIT 1").fetchone():

@@ -152,6 +152,9 @@ class Queue:
         result["writes_paused"] = bool(self.db.execute("SELECT 1 FROM metis_write_pause LIMIT 1").fetchone())
         return {**result, "execution_id": row["id"], "correlation_id": row["id"],
                 "status": row["status"], "created_at": row["created"],
+                "dispatched_at": row["dispatched"],
+                "queue_wait_ms": (round((row["dispatched"] - row["created"]) * 1000)
+                                  if row["dispatched"] is not None else None),
                 "context_project": row["context_project"],
                 "context_paused": bool(self.db.execute("SELECT 1 FROM metis_pause p JOIN metis_executions e ON e.id=p.execution_id WHERE e.context_project=? LIMIT 1", (row["context_project"],)).fetchone()),
                 "gateway_paused": False,

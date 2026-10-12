@@ -179,6 +179,48 @@ async def test_client_disconnect_does_not_own_worker(queue):
     assert queue.get('operator',one['execution_id'])['status'] == 'COMPLETED'
 
 
+@pytest.mark.asyncio
+async def test_worker_advances_checkpoints_without_five_second_tax(queue, monkeypatch):
+    one = queue.create('operator', REQUEST)
+    class CheckpointBridge(FakeBridge):
+        async def call(self, action, row, request=None):
+            self.calls.append(action)
+            if action == 'run':
+                return {'state':'ACCEPTED','seq':row['seq'],'id':row['id']}
+            return {'state':'DONE','seq':row['seq'],'id':row['id'],'result':self.result}
+    bridge = CheckpointBridge()
+    worker = Worker(queue, bridge)
+    sleeps = []
+    real_wait_for = asyncio.wait_for
+
+    async def observed_wait(awaitable, timeout):
+        sleeps.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, 'wait_for', observed_wait)
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    for _ in range(100):
+        if queue.get('operator', one['execution_id'])['status'] == 'COMPLETED':
+            break
+        await asyncio.sleep(.01)
+    stop.set()
+    await task
+    assert queue.get('operator', one['execution_id'])['status'] == 'COMPLETED'
+    assert bridge.calls == ['run', 'advance']
+    assert .1 in sleeps
+
+
+def test_receipt_exposes_queue_timing(queue):
+    one = queue.create('operator', REQUEST)
+    queued = queue.get('operator', one['execution_id'])
+    assert queued['dispatched_at'] is None and queued['queue_wait_ms'] is None
+    row = queue.next(); queue.claim(row)
+    active = queue.get('operator', one['execution_id'])
+    assert active['dispatched_at'] is not None
+    assert active['queue_wait_ms'] >= 0
+
+
 def test_capacity_fail_closed(queue):
     for i in range(5):
         queue.create('operator',{**REQUEST,'idempotency_key':f'request-number-{i:04d}'})
@@ -187,7 +229,8 @@ def test_capacity_fail_closed(queue):
 
 
 def test_legacy_canonical_context_header_preserves_subproject_isolation(queue):
-    request = {**REQUEST, 'request': 'Contexto: PERSONAL/HEALTH_OS\nAudita el gate A.'}
+    request = {'request': 'Contexto: PERSONAL/HEALTH_OS\nAudita el gate A.',
+               'idempotency_key': REQUEST['idempotency_key']}
     created = queue.create('operator', request)
     assert created['context_project'] == 'PERSONAL/HEALTH_OS'
 
