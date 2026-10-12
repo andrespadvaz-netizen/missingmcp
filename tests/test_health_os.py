@@ -744,3 +744,28 @@ def test_checkpoint_write_survives_transient_windows_locks(tmp_path, monkeypatch
     with pytest.raises(OSError) as raised:
         apple_import_client._write_checkpoint(checkpoint, {"archive": "x"}, 1)
     assert raised.value.stage == "checkpoint_write"
+
+
+@pytest.mark.parametrize("metric, value, unit, expected_unit", [
+    ("walking_speed", 4.8, "km/hr", "km/h"),
+    ("stair_ascent_speed", 0.5, "m/s", "km/h"),
+    ("headphone_noise", 70, "dBASPL", "dBA"),
+    ("environmental_noise", 55, "dBASPL", "dBA"),
+    ("respiratory_rate", 14, "count/min", "breaths/min"),
+    ("bmi", 21.5, "count", "kg/m2"),
+])
+def test_native_apple_units_seen_in_a_real_export_are_accepted(metric, value, unit, expected_unit):
+    health = make_health()
+    assert health.ingest_observations([observation(metric, value, unit, pid=metric)]).accepted == 1
+    assert next(iter(health._observations.values())).unit == expected_unit
+
+
+def test_tagged_copy_of_a_measurement_wins_over_an_untagged_legacy_copy():
+    health = make_health()
+    legacy = MetricObservation("heart_rate", 60, "bpm", when(1), APPLE_HEALTH, "old")
+    tagged = MetricObservation("heart_rate", 60, "bpm", when(1), APPLE_HEALTH, "new", device_source="garmin")
+    health.ingest_observations([legacy])
+    assert health.ingest_observations([tagged]).duplicates == 1
+    assert next(iter(health._observations.values())).device_source == "garmin"
+    health.ingest_observations([legacy])  # an untagged copy never erases the tag
+    assert next(iter(health._observations.values())).device_source == "garmin"

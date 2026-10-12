@@ -198,7 +198,7 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
         return (round(value * 100, 6) if value <= 1 else value), "%"
     if metric in {"walking_asymmetry", "double_support_percentage"} and key in {"%", "percent", "percentage"}:
         return value, "%"
-    if metric in {"respiratory_rate"} and key in {"breaths/min", "breaths_per_minute", "brpm"}:
+    if metric in {"respiratory_rate"} and key in {"breaths/min", "breaths_per_minute", "brpm", "count/min"}:
         return value, "breaths/min"
     if metric in {"systolic_blood_pressure", "diastolic_blood_pressure"} and key in {"mmhg", "mm hg"}:
         return value, "mmHg"
@@ -215,17 +215,21 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
             return round(value * 100, 6), "cm"
         if key in {"cm", "centimeter", "centimeters"}:
             return value, "cm"
-    if metric == "bmi" and key in {"kg/m2", "kg/m²"}:
+    # HealthKit stores BMI as a dimensionless "count".
+    if metric == "bmi" and key in {"kg/m2", "kg/m²", "count"}:
         return value, "kg/m2"
-    if metric in {"walking_speed", "stair_ascent_speed", "stair_descent_speed"} and key in {"km/h", "kph"}:
+    if metric in {"walking_speed", "stair_ascent_speed", "stair_descent_speed"} and key in {"km/h", "kph", "km/hr"}:
         return value, "km/h"
+    if metric in {"walking_speed", "stair_ascent_speed", "stair_descent_speed"} and key in {"m/s", "m/sec"}:
+        return round(value * 3.6, 6), "km/h"
     if metric == "step_length" and key in {"cm", "centimeter", "centimeters"}:
         return value, "cm"
     if metric in {"dietary_protein", "dietary_carbohydrates", "dietary_fat", "dietary_fiber", "dietary_sugar", "dietary_saturated_fat"} and key in {"g", "gram", "grams"}:
         return value, "g"
     if metric in {"dietary_sodium", "dietary_potassium", "dietary_calcium", "dietary_magnesium", "dietary_phosphorus", "dietary_iron", "dietary_vitamin_c"} and key in {"mg", "milligram", "milligrams"}:
         return value, "mg"
-    if metric in {"environmental_noise", "headphone_noise"} and key in {"db", "dba", "db(a)"}:
+    # Apple writes audio exposure as "dBASPL" (A-weighted sound pressure level).
+    if metric in {"environmental_noise", "headphone_noise"} and key in {"db", "dba", "db(a)", "dbaspl"}:
         return value, "dBA"
     raise ValueError(f"unsupported unit {unit!r} for metric {metric!r}")
 
@@ -284,6 +288,11 @@ class HealthOS:
                 continue
             key = self._observation_key(item)
             if key in self._observations:
+                existing = self._observations[key]
+                if existing.device_source is None and item.device_source is not None:
+                    # The same measurement re-imported with its producer family:
+                    # the tagged copy wins so device separation is not lost.
+                    self._observations[key] = item
                 result.duplicates += 1
             else:
                 self._observations[key] = item
