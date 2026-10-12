@@ -34,20 +34,11 @@ def _records(stream: BinaryIO) -> Iterator[tuple[str, dict[str, Any] | str]]:
     for _, node in ET.iterparse(stream, events=("end",)):
         if node.tag == "Record":
             attributes = node.attrib
-            apple_type = attributes.get("type", "")
-            spec = _METRICS.get(apple_type)
-            if spec is None:
-                yield "ignored", apple_type or "unknown"
+            observation = observation_from_apple_record(attributes)
+            if observation is None:
+                yield "ignored", attributes.get("type", "") or "unknown"
             else:
-                metric, unit = spec
-                yield "observation", {
-                    "metric": metric,
-                    "value": _value(attributes["value"], apple_type),
-                    "unit": unit,
-                    "observed_at": attributes["endDate"],
-                    "provenance_id": _provenance(attributes),
-                    "semantic": "measured",
-                }
+                yield "observation", observation
             node.clear()
         elif node.tag == "Workout":
             attributes = node.attrib
