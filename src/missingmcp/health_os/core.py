@@ -62,6 +62,12 @@ class MetricObservation:
             raise ValueError("heart-rate observation is outside sensor bounds")
         if self.metric == "oxygen_saturation" and not 0 < self.value <= 100:
             raise ValueError("oxygen-saturation observation is outside sensor bounds")
+        bounds = {
+            "weight": (1, 500), "body_mass": (1, 500), "lean_body_mass": (1, 500),
+            "respiratory_rate": (1, 100), "sleep_duration": (1, 24 * 60),
+        }
+        if self.metric in bounds and not bounds[self.metric][0] <= self.value <= bounds[self.metric][1]:
+            raise ValueError(f"{self.metric} observation is outside sensor bounds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,7 +184,12 @@ class HealthOS:
 
     @staticmethod
     def _observation_key(item: MetricObservation) -> str:
-        raw = "|".join((item.source, item.provenance_id, item.metric, item.observed_at.astimezone(timezone.utc).isoformat()))
+        # Apple may mirror an identical sample from iPhone and Watch with
+        # distinct provenance IDs.  Idempotence belongs to the measurement,
+        # not the device label; source remains part of the key to avoid
+        # collapsing independently produced Speediance evidence.
+        raw = "|".join((item.source, item.metric, str(item.value), item.unit,
+                        item.observed_at.astimezone(timezone.utc).isoformat()))
         return sha256(raw.encode()).hexdigest()
 
     def ingest_observations(self, observations: Iterable[MetricObservation]) -> IngestResult:

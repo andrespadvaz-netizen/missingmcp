@@ -57,7 +57,7 @@ var HealthOSBriefAdapter = (function () {
    */
   function read(subjectiveFlags) {
     var base = _baseUrl();
-    if (!base || !Config.hasSecret('HEALTH_OS_INGEST_KEY')) {
+    if (!base || !Config.hasSecret('HEALTH_OS_READ_KEY')) {
       return unavailable('configuracion Health OS ausente');
     }
     var flags = _strings(subjectiveFlags, 8);
@@ -67,7 +67,7 @@ var HealthOSBriefAdapter = (function () {
         contentType: 'application/json',
         payload: JSON.stringify({ subjective_flags: flags }),
         muteHttpExceptions: true,
-        headers: { Authorization: 'Bearer ' + Config.secret('HEALTH_OS_INGEST_KEY') }
+        headers: { Authorization: 'Bearer ' + Config.secret('HEALTH_OS_READ_KEY') }
       });
       if (response.getResponseCode() !== 200) { return unavailable('Health OS no respondio'); }
       var body = JSON.parse(response.getContentText());

@@ -54,7 +54,7 @@ var Config = (function () {
     ANTHROPIC_API_KEY: 'METIS_ANTHROPIC_API_KEY',
     NOTION_API_KEY: 'METIS_NOTION_API_KEY',
     ASANA_API_KEY: 'METIS_ASANA_API_KEY',
-    HEALTH_OS_INGEST_KEY: 'METIS_HEALTH_OS_INGEST_KEY'
+    HEALTH_OS_READ_KEY: 'METIS_HEALTH_OS_READ_KEY'
   };
 
   /** Parámetros no secretos, también en Script Properties. */
