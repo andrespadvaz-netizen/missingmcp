@@ -164,21 +164,24 @@ def test_repository_uses_operator_timezone_and_persists_apple_transition():
 
 def test_private_ingest_endpoint_requires_dedicated_key_and_persists(tmp_path):
     key = "h" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    read_key = "r" * 40
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": read_key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     client = TestClient(build_app(config))
     payload = {"source": APPLE_HEALTH, "observations": [{"metric": "heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-01T08:00:00-06:00", "provenance_id": "hk:1"}]}
     assert client.post("/health-os/ingest", json=payload).status_code == 401
     response = client.post("/health-os/ingest", json=payload, headers={"Authorization": f"Bearer {key}"})
     assert response.json() == {"status": "OK", "accepted": 1, "duplicates": 0, "rejected": []}
-    assert client.get("/health-os/quality", headers={"Authorization": f"Bearer {key}"}).json()["status"] == "OK"
-    brief = client.post("/health-os/brief", json={}, headers={"Authorization": f"Bearer {key}"}).json()
+    assert client.get("/health-os/quality", headers={"Authorization": f"Bearer {key}"}).status_code == 401
+    assert client.get("/health-os/quality", headers={"Authorization": f"Bearer {read_key}"}).json()["status"] == "OK"
+    assert client.post("/health-os/ingest", json=payload, headers={"Authorization": f"Bearer {read_key}"}).status_code == 401
+    brief = client.post("/health-os/brief", json={}, headers={"Authorization": f"Bearer {read_key}"}).json()
     assert brief["status"] == "OK"
     assert brief["brief"]["decision"] == "ABSTENERSE"
 
 
 def test_isolated_service_has_no_garmin_surface(tmp_path):
     key = "h" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     client = TestClient(build_health_os_app(config))
     assert client.get("/healthz").json() == {"status": "OK"}
     assert client.get("/garmin").status_code == 404
@@ -197,7 +200,7 @@ def test_native_apple_export_is_raw_provenance_bearing_input(tmp_path):
     assert parsed.observations[1]["value"] == 97
     assert parsed.ignored_types == ("HKQuantityTypeIdentifierUnknown",)
     key = "h" * 40
-    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
+    config = load_config({"GATEWAY_SECRET": "s" * 40, "HEALTH_OS_INGEST_KEY": key, "HEALTH_OS_READ_KEY": "r" * 40, "DB_PATH": str(tmp_path / "health.db"), "DATA_DIR": str(tmp_path)})
     response = TestClient(build_health_os_app(config)).post("/health-os/import/apple-export", content=xml, headers={"Authorization": f"Bearer {key}"})
     assert response.json()["accepted"] == 2
 
@@ -211,6 +214,38 @@ def test_native_apple_sleep_category_uses_only_asleep_intervals():
     assert len(parsed.observations) == 1
     assert parsed.observations[0]["metric"] == "sleep_duration"
     assert parsed.observations[0]["value"] == 420
+
+
+def test_native_apple_export_preserves_declared_units_for_safe_normalization():
+    xml = b'''<HealthData>
+      <Record type="HKQuantityTypeIdentifierBodyMass" value="180" unit="lb" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierDistanceWalkingRunning" value="3" unit="mi" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierActiveEnergyBurned" value="2000" unit="kJ" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierSixMinuteWalkTestDistance" value="0.5" unit="km" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600"/>
+    </HealthData>'''
+    parsed = parse_apple_health_export(xml)
+    assert [(x["metric"], x["unit"]) for x in parsed.observations] == [
+        ("weight", "lb"), ("distance", "mi"), ("active_energy", "kJ"), ("six_minute_walk_distance", "km"),
+    ]
+    health = make_health()
+    assert health.ingest_observations(observations_from_export(APPLE_HEALTH, parsed.observations)).accepted == 4
+    normalized = {(x.metric, x.unit): x.value for x in health._observations.values()}
+    assert normalized[("weight", "kg")] == pytest.approx(81.646627)
+    assert normalized[("distance", "km")] == pytest.approx(4.828032)
+    assert normalized[("active_energy", "kcal")] == pytest.approx(478.011472)
+
+
+def test_subjective_flags_and_chatgpt_transcriptions_cannot_drive_a_decision():
+    health = make_health()
+    health.set_apple_transition(when(1))
+    for day in range(1, 29):
+        health.ingest_observations([
+            observation("sleep_duration", 7, "hr", at=when(day), pid=f"sleep:{day}"),
+            observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
+        ])
+    health.ingest_observations([MetricObservation("heart_rate", 60, "bpm", when(29), APPLE_HEALTH, "transcript", semantic="chatgpt_health_transcription")])
+    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ABSTENERSE
+    assert health.metric_baseline_days("heart_rate", when(29)) == 0
 
 
 def test_native_apple_catalog_includes_clinically_neutral_context_metrics():
@@ -294,10 +329,13 @@ def test_readiness_abstains_until_metric_specific_baselines_are_stable():
             observation("resting_heart_rate", 55, "bpm", at=when(day), pid=f"rhr:{day}"),
         ])
     assert health.assess_readiness(when(29)).state == DecisionState.ABSTENERSE
-    assert health.assess_readiness(when(29), ["dizziness"]).state == DecisionState.ESCALAR
-    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ESCALAR
-    assert health.assess_readiness(when(29), ["fatiga"]).state == DecisionState.AJUSTA
-    assert health.assess_readiness(when(29), ["dolor"]).state == DecisionState.DETEN
+    # No developer-owned keyword list may emit a clinical state.  Until a
+    # clinician-reviewed policy exists, every subjective flag remains a safe
+    # abstention.
+    assert health.assess_readiness(when(29), ["dizziness"]).state == DecisionState.ABSTENERSE
+    assert health.assess_readiness(when(29), ["dolor de pecho"]).state == DecisionState.ABSTENERSE
+    assert health.assess_readiness(when(29), ["fatiga"]).state == DecisionState.ABSTENERSE
+    assert health.assess_readiness(when(29), ["dolor"]).state == DecisionState.ABSTENERSE
 
 
 def test_baseline_allows_the_documented_two_day_contiguous_extension():

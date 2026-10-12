@@ -49,7 +49,7 @@ class MetricObservation:
     def __post_init__(self) -> None:
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
-        if self.semantic not in {"measured", "estimated", "manual", "derived", "model_interpreted"}:
+        if self.semantic not in {"measured", "estimated", "manual", "derived", "model_interpreted", "chatgpt_health_transcription"}:
             raise ValueError("semantic must identify the kind of observation")
         if not self.source or not self.provenance_id or not self.unit:
             raise ValueError("source, provenance_id, and unit are required")
@@ -106,7 +106,7 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
             return round(value * 0.45359237, 6), "kg"
         if key == "kg":
             return value, "kg"
-    if metric == "distance":
+    if metric in {"distance", "six_minute_walk_distance"}:
         if key in {"mi", "mile", "miles"}:
             return round(value * 1.609344, 6), "km"
         if key == "km":
@@ -116,16 +116,16 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
             return round(value * 60, 6), "min"
         if key in {"min", "minute", "minutes"}:
             return value, "min"
-    if metric == "heart_rate" and key == "bpm":
+    if metric in {"heart_rate", "resting_heart_rate", "walking_heart_rate_average"} and key in {"bpm", "count/min"}:
         return value, "bpm"
     if metric == "hrv" and key == "ms":
         return value, "ms"
     if metric == "active_energy" and key in {"kcal", "cal"}:
         return value, "kcal"
+    if metric == "active_energy" and key in {"kj", "kilojoule", "kilojoules"}:
+        return round(value / 4.184, 6), "kcal"
     # Apple Health / ChatGPT Health catalog. Keep this explicit: accepting an
     # unknown unit would make a plausible-looking Health OS conclusion unsafe.
-    if metric in {"resting_heart_rate", "walking_heart_rate_average"} and key == "bpm":
-        return value, "bpm"
     if metric in {"oxygen_saturation", "body_fat_percentage", "walking_asymmetry", "double_support_percentage"} and key in {"%", "percent", "percentage"}:
         return value, "%"
     if metric in {"respiratory_rate"} and key in {"breaths/min", "breaths_per_minute", "brpm"}:
@@ -138,6 +138,8 @@ def _canonical_unit(metric: str, value: float, unit: str) -> tuple[float, str]:
         return value, "min"
     if metric in {"lean_body_mass"} and key == "kg":
         return value, "kg"
+    if metric in {"distance", "six_minute_walk_distance"} and key in {"m", "meter", "meters"}:
+        return round(value / 1000, 6), "km"
     if metric == "height":
         if key in {"m", "meter", "meters"}:
             return round(value * 100, 6), "cm"
@@ -262,7 +264,8 @@ class HealthOS:
         if self._apple_baseline_started is None or at < self._apple_baseline_started:
             return BaselineEra.GARMIN
         coverage = {o.observed_at.astimezone(self.timezone).date() for o in self._observations.values()
-                    if o.source == APPLE_HEALTH and o.observed_at >= self._apple_baseline_started}
+                    if o.source == APPLE_HEALTH and o.observed_at >= self._apple_baseline_started
+                    and o.semantic not in {"model_interpreted", "chatgpt_health_transcription"}}
         if len(coverage) < 14:
             return BaselineEra.APPLE_TRANSITION
         return BaselineEra.APPLE_BASELINE
@@ -284,7 +287,7 @@ class HealthOS:
         return len({self.local_day(x.observed_at) for x in self._observations.values()
                     if x.source == APPLE_HEALTH and x.metric == metric
                     and self.local_day(x.observed_at) >= lower_day
-                    and x.semantic != "model_interpreted"})
+                    and x.semantic not in {"model_interpreted", "chatgpt_health_transcription"}})
 
     def metric_has_stable_baseline(self, metric: str, at: datetime) -> bool:
         return self.metric_baseline_days(metric, at) >= _BASELINE_DAYS
@@ -293,14 +296,10 @@ class HealthOS:
         """Return a conservative, explainable state; never changes a plan itself."""
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        flags = {flag.strip().lower().replace(" ", "_") for flag in subjective_flags}
-        urgent = flags & {"chest_pain", "dolor_de_pecho", "dizziness", "mareo", "shortness_of_breath", "falta_de_aire"}
-        if urgent:
-            return DecisionAssessment(DecisionState.ESCALAR, "high", ("acute subjective safety flag",), (), False)
-        if flags & {"pain", "dolor", "injury", "lesion", "illness", "fever", "fiebre"}:
-            return DecisionAssessment(DecisionState.DETEN, "medium", ("subjective stop flag",), (), False)
-        if flags & {"fatigue", "fatiga", "soreness", "muscle_soreness", "poor_sleep", "mal_sueno"}:
-            return DecisionAssessment(DecisionState.AJUSTA, "medium", ("subjective adjustment flag",), (), False)
+        # Subjective language is not a clinician-approved symptom triage
+        # policy.  Do not make a medical decision from developer-owned keyword
+        # lists; the service remains conservative until a policy is supplied.
+        flags_present = any(str(flag).strip() for flag in subjective_flags)
         quality = self.data_quality(now)
         if quality["stale"] or quality["legacy_after_transition"]:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("data quality does not support a readiness decision",), ("recent Apple Health coverage",), False)
@@ -308,9 +307,13 @@ class HealthOS:
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
         if missing:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
-        interpreted = [x for x in self._observations.values() if x.semantic == "model_interpreted" and x.observed_at >= now - timedelta(days=3)]
-        if interpreted:
-            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("model-interpreted values cannot drive readiness",), (), False)
+        non_evidence = [x for x in self._observations.values()
+                        if x.semantic in {"model_interpreted", "chatgpt_health_transcription"}
+                        and x.observed_at >= now - timedelta(days=3)]
+        if non_evidence:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("non-evidence values cannot drive readiness",), (), False)
+        if flags_present:
+            return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("subjective flags require a clinician-reviewed policy",), (), False)
         # A stable personal baseline alone does not establish a safe medical
         # range.  A clinician-reviewed policy is intentionally required before
         # ACTIVA can be emitted from physiological data.
@@ -322,7 +325,8 @@ class HealthOS:
     def data_quality(self, now: datetime) -> dict[str, object]:
         if now.tzinfo is None:
             raise ValueError("now must be timezone-aware")
-        apple = [x for x in self._observations.values() if x.source == APPLE_HEALTH]
+        apple = [x for x in self._observations.values()
+                 if x.source == APPLE_HEALTH and x.semantic not in {"model_interpreted", "chatgpt_health_transcription"}]
         days = {self.local_day(x.observed_at) for x in apple}
         stale = not apple or max(x.observed_at for x in apple) < now - timedelta(days=2)
         mixed = [x.metric for x in self._observations.values() if x.source == GARMIN_LEGACY and self.baseline_era(x.observed_at) != BaselineEra.GARMIN]

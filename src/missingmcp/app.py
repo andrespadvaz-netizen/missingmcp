@@ -69,13 +69,19 @@ def build_app(config: Config) -> Starlette:
     rate = security.RateLimiter()
     bk = backup.Backup(config)
     dr = report.DailyReport(config)
-    health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if config.health_os_ingest_key else None
+    # Health OS is intended for the isolated service.  Retain this compatibility
+    # surface only when both distinct keys are explicitly configured; a generic
+    # gateway must not accidentally expose a write-capable Brief credential.
+    health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if (config.health_os_ingest_key and config.health_os_read_key) else None
 
-    def _health_os_authorized(request):
+    def _health_os_ingest_authorized(request):
         return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
 
+    def _health_os_read_authorized(request):
+        return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_read_key)
+
     async def health_os_ingest(request):
-        if not _health_os_authorized(request):
+        if not _health_os_ingest_authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=256_000)
         if raw is None:
@@ -87,18 +93,20 @@ def build_app(config: Config) -> Starlette:
             workouts = body.get("workouts", [])
             if not isinstance(source, str) or not isinstance(observations, list) or not isinstance(workouts, list):
                 raise ValueError("invalid payload shape")
+            if source not in {"APPLE_HEALTH", "SPEEDIANCE"}:
+                raise ValueError("unsupported producer")
             result = health_os.ingest(source, observations, workouts)
         except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **result}, headers={"Cache-Control": "no-store"})
 
     async def health_os_quality(request):
-        if not _health_os_authorized(request):
+        if not _health_os_read_authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "quality": health_os.quality(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
 
     async def health_os_transition(request):
-        if not _health_os_authorized(request):
+        if not _health_os_ingest_authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=8_000)
         if raw is None:
@@ -108,11 +116,11 @@ def build_app(config: Config) -> Starlette:
             started_at = datetime.fromisoformat(body["started_at"])
             health_os.set_apple_transition(started_at)
         except (KeyError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "baseline_era": health_os._load_health(started_at).baseline_era(started_at).value}, headers={"Cache-Control": "no-store"})
 
     async def health_os_brief(request):
-        if not _health_os_authorized(request):
+        if not _health_os_read_authorized(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=8_000)
         if raw is None:
@@ -123,7 +131,7 @@ def build_app(config: Config) -> Starlette:
             if not isinstance(flags, list) or not all(isinstance(flag, str) for flag in flags):
                 raise ValueError("subjective_flags must be a string list")
         except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "brief": health_os.brief(datetime.now(timezone.utc), tuple(flags))}, headers={"Cache-Control": "no-store"})
 
     def _render(name: str, title: str, desc: str | None = None,

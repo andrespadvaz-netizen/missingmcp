@@ -19,36 +19,43 @@ from ..config import Config, load_config
 from ..log import resolve_log_level, setup_logging
 from .persistence import HealthOSRepository
 from .apple_export import parse_apple_health_export
+from .core import APPLE_HEALTH, SPEEDIANCE
 
 
 def build_health_os_app(config: Config) -> Starlette:
-    if not config.health_os_ingest_key:
-        raise ValueError("HEALTH_OS_INGEST_KEY is required for the isolated Health OS service")
+    if not config.health_os_ingest_key or not config.health_os_read_key:
+        raise ValueError("HEALTH_OS_INGEST_KEY and HEALTH_OS_READ_KEY are required for the isolated Health OS service")
     repo = HealthOSRepository(store.init_db(config.db_path), config.gateway_secret, config.health_os_timezone)
 
-    def authorized(request) -> bool:
+    def authorized_ingest(request) -> bool:
         return hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
 
+    def authorized_read(request) -> bool:
+        return hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_read_key)
+
     async def ingest(request):
-        if not authorized(request):
+        if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=256_000)
         if raw is None:
             return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
         try:
             body = json.loads(raw.decode("utf-8"))
-            result = repo.ingest(body["source"], body.get("observations", []), body.get("workouts", []))
+            source = body["source"]
+            if source not in {APPLE_HEALTH, SPEEDIANCE}:
+                raise ValueError("unsupported producer")
+            result = repo.ingest(source, body.get("observations", []), body.get("workouts", []))
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **result}, headers={"Cache-Control": "no-store"})
 
     async def quality(request):
-        if not authorized(request):
+        if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "quality": repo.quality(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
 
     async def apple_export(request):
-        if not authorized(request):
+        if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         xml = await security.read_body_limited(request, max_bytes=64 * 1024 * 1024)
         if xml is None:
@@ -57,11 +64,11 @@ def build_health_os_app(config: Config) -> Starlette:
             parsed = parse_apple_health_export(xml)
             result = repo.ingest("APPLE_HEALTH", parsed.observations, parsed.workouts)
         except (TypeError, ValueError, UnicodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **result, "ignored_apple_types": list(parsed.ignored_types)}, headers={"Cache-Control": "no-store"})
 
     async def brief(request):
-        if not authorized(request):
+        if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         raw = await security.read_body_limited(request, max_bytes=8_000)
         try:
@@ -70,18 +77,18 @@ def build_health_os_app(config: Config) -> Starlette:
             if not isinstance(flags, list) or not all(isinstance(x, str) for x in flags):
                 raise ValueError("subjective_flags must be a string list")
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "brief": repo.brief(datetime.now(timezone.utc), tuple(flags))}, headers={"Cache-Control": "no-store"})
 
     async def transition(request):
-        if not authorized(request):
+        if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         try:
             body = json.loads((await security.read_body_limited(request, max_bytes=8_000)).decode("utf-8"))
             started_at = datetime.fromisoformat(body["started_at"])
             repo.set_apple_transition(started_at)
         except (KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-            return JSONResponse({"status": "INVALID_REQUEST", "error": str(exc)}, status_code=400)
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", "baseline_era": repo._load_health(started_at).baseline_era(started_at).value}, headers={"Cache-Control": "no-store"})
 
     async def healthz(request):

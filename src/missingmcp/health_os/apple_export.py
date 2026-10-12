@@ -40,7 +40,9 @@ _METRICS: dict[str, tuple[str, str]] = {
     "HKQuantityTypeIdentifierWalkingStepLength": ("step_length", "cm"),
     "HKQuantityTypeIdentifierStairAscentSpeed": ("stair_ascent_speed", "km/h"),
     "HKQuantityTypeIdentifierStairDescentSpeed": ("stair_descent_speed", "km/h"),
-    "HKQuantityTypeIdentifierSixMinuteWalkTestDistance": ("distance", "km"),
+    # This is a functional-test result, not daily locomotion.  Keeping it
+    # distinct prevents it from inflating walking/running distance.
+    "HKQuantityTypeIdentifierSixMinuteWalkTestDistance": ("six_minute_walk_distance", "km"),
     "HKQuantityTypeIdentifierEnvironmentalAudioExposure": ("environmental_noise", "dBA"),
     "HKQuantityTypeIdentifierHeadphoneAudioExposure": ("headphone_noise", "dBA"),
     "HKQuantityTypeIdentifierDietaryProtein": ("dietary_protein", "g"),
@@ -89,9 +91,13 @@ def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] 
     apple_type = attributes.get("type", "")
     spec = _METRICS.get(apple_type)
     if spec is not None:
-        metric, unit = spec
+        metric, canonical_unit = spec
         return {
-            "metric": metric, "value": _value(attributes["value"], apple_type), "unit": unit,
+            # Preserve the unit declared in the native export.  The core
+            # converts only explicit, known units; silently relabelling lb as
+            # kg (or kJ as kcal) would create false clinical-looking data.
+            "metric": metric, "value": _value(attributes["value"], apple_type),
+            "unit": attributes.get("unit", canonical_unit),
             "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
         }
     # HealthKit sleep analysis is a category interval rather than a numerical
