@@ -12,7 +12,7 @@ from missingmcp import store
 from missingmcp.app import build_app
 from missingmcp.health_os.service import build_health_os_app
 from missingmcp.health_os.apple_export import parse_apple_health_export
-from missingmcp.health_os.apple_import_client import _records, _export_entry
+from missingmcp.health_os.apple_import_client import _records, _export_entry, _stream_records
 from missingmcp.config import load_config
 from starlette.testclient import TestClient
 
@@ -214,6 +214,15 @@ def test_streaming_import_reader_accepts_renamed_apple_export(tmp_path):
     assert records[0][0] == "observation"
     assert records[0][1]["provenance_id"].startswith("apple-export:")
     assert records[1] == ("ignored", "HKQuantityTypeIdentifierNotSupported")
+
+
+def test_sax_reader_streams_records_without_a_document_tree():
+    received = []
+    _stream_records(io.BytesIO(b'''<HealthData>
+      <Record type="HKQuantityTypeIdentifierHeartRate" sourceName="Apple Watch" unit="count/min" value="55" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:00:00 -0600" creationDate="2026-10-01 08:00:01 -0600"/>
+      <Workout workoutActivityType="HKWorkoutActivityTypeRunning" startDate="2026-10-01 08:00:00 -0600" endDate="2026-10-01 08:30:00 -0600"/>
+    </HealthData>'''), lambda kind, item: received.append((kind, item)))
+    assert [kind for kind, _ in received] == ["observation", "workout"]
 
 
 def test_readiness_abstains_until_metric_specific_baselines_are_stable():

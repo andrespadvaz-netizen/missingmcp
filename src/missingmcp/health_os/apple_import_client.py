@@ -16,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 from xml.etree import ElementTree as ET
+from xml.sax import handler, make_parser
 
 import httpx
 
@@ -54,6 +55,48 @@ def _records(stream: BinaryIO) -> Iterator[tuple[str, dict[str, Any] | str]]:
                 "activity_type": attributes.get("workoutActivityType", "other"),
             }
             node.clear()
+
+
+class _StreamingAppleHealthHandler(handler.ContentHandler):
+    """SAX handler used for large exports; it never retains the XML tree."""
+
+    def __init__(self, receive) -> None:
+        super().__init__()
+        self._receive = receive
+
+    def startElement(self, name: str, attrs) -> None:  # noqa: N802 - SAX API name
+        attributes = dict(attrs.items())
+        if name == "Record":
+            apple_type = attributes.get("type", "")
+            spec = _METRICS.get(apple_type)
+            if spec is None:
+                self._receive("ignored", apple_type or "unknown")
+                return
+            metric, unit = spec
+            self._receive("observation", {
+                "metric": metric,
+                "value": _value(attributes["value"], apple_type),
+                "unit": unit,
+                "observed_at": attributes["endDate"],
+                "provenance_id": _provenance(attributes),
+                "semantic": "measured",
+            })
+        elif name == "Workout":
+            self._receive("workout", {
+                "workout_id": _provenance(attributes),
+                "start_time": attributes["startDate"],
+                "end_time": attributes["endDate"],
+                "activity_type": attributes.get("workoutActivityType", "other"),
+            })
+
+
+def _stream_records(stream: BinaryIO, receive) -> None:
+    """Parse an export in constant XML-memory space and invoke ``receive``."""
+    parser = make_parser()
+    parser.setFeature(handler.feature_external_ges, False)
+    parser.setFeature(handler.feature_external_pes, False)
+    parser.setContentHandler(_StreamingAppleHealthHandler(receive))
+    parser.parse(stream)
 
 
 def _export_entry(archive: zipfile.ZipFile) -> zipfile.ZipInfo:
@@ -101,10 +144,11 @@ def import_zip(zip_path: Path, endpoint: str, key: str) -> dict[str, Any]:
     with zipfile.ZipFile(zip_path) as archive, httpx.Client(timeout=90.0) as client:
         entry = _export_entry(archive)
         with archive.open(entry) as stream:
-            for kind, item in _records(stream):
+            def receive(kind: str, item: dict[str, Any] | str) -> None:
+                nonlocal observations, workouts
                 if kind == "ignored":
                     ignored[str(item)] += 1
-                    continue
+                    return
                 if kind == "observation":
                     observations.append(item)  # type: ignore[arg-type]
                     summary["observations_seen"] += 1
@@ -114,6 +158,7 @@ def import_zip(zip_path: Path, endpoint: str, key: str) -> dict[str, Any]:
                 estimated = len(json.dumps({"source": APPLE_HEALTH, "observations": observations, "workouts": workouts}, separators=(",", ":")))
                 if estimated >= _BATCH_BYTES:
                     flush(client)
+            _stream_records(stream, receive)
             flush(client)
     return {
         "status": "OK",
