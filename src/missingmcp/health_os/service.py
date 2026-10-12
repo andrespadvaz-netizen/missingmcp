@@ -88,6 +88,16 @@ def build_health_os_app(config: Config) -> Starlette:
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "trends": repo.trends(datetime.now(timezone.utc))}, headers={"Cache-Control": "no-store"})
 
+    async def history(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        return JSONResponse({"status": "OK", "history": repo.history()}, headers={"Cache-Control": "no-store"})
+
+    async def coverage(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        return JSONResponse({"status": "OK", "coverage": repo.coverage()}, headers={"Cache-Control": "no-store"})
+
     async def quarantine_report(request):
         if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
@@ -135,6 +145,7 @@ def build_health_os_app(config: Config) -> Starlette:
         Route("/health-os/quality", quality), Route("/health-os/brief", brief, methods=["POST"]),
         Route("/health-os/transition", transition, methods=["POST"]),
         Route("/health-os/trends", trends), Route("/health-os/quarantine", quarantine_report),
+        Route("/health-os/history", history), Route("/health-os/coverage", coverage),
         Route("/health-os/quarantine/apply", quarantine_apply, methods=["POST"]),
     ])
 

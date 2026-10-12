@@ -77,6 +77,24 @@ def _provenance(attributes: dict[str, str]) -> str:
     return "apple-export:" + sha256(identity.encode("utf-8")).hexdigest()
 
 
+def device_family(attributes: dict[str, str]) -> str:
+    """Coarse producer family of one Apple Health sample.
+
+    Only a category is kept (never the free-text source name): it lets the
+    core keep Apple Watch physiology apart from data that Garmin Connect or
+    iPhone apps wrote into Apple Health, whose algorithms are not comparable.
+    """
+    source = attributes.get("sourceName", "").lower()
+    device = attributes.get("device", "").lower()
+    if "garmin" in source or source.strip() == "connect" or "garmin" in device:
+        return "garmin"
+    if "watch" in source or "name:apple watch" in device or "model:watch" in device:
+        return "apple_watch"
+    if "iphone" in source or "model:iphone" in device or "name:iphone" in device:
+        return "iphone"
+    return "other_app"
+
+
 def _value(value: str, apple_type: str) -> float:
     parsed = float(value)
     # Apple encodes proportions for these types, while the Health OS canonical
@@ -99,6 +117,7 @@ def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] 
             "metric": metric, "value": _value(attributes["value"], apple_type),
             "unit": attributes.get("unit", canonical_unit),
             "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+            "device_source": device_family(attributes),
         }
     # HealthKit sleep analysis is a category interval rather than a numerical
     # quantity.  Only original periods marked asleep qualify; time-in-bed and
@@ -111,6 +130,7 @@ def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] 
             return {
                 "metric": "sleep_duration", "value": minutes, "unit": "min",
                 "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+            "device_source": device_family(attributes),
             }
     if apple_type == _MINDFUL_SESSION:
         start = datetime.fromisoformat(attributes["startDate"])
@@ -120,6 +140,7 @@ def observation_from_apple_record(attributes: dict[str, str]) -> dict[str, Any] 
             return {
                 "metric": "mindfulness_duration", "value": minutes, "unit": "min",
                 "observed_at": attributes["endDate"], "provenance_id": _provenance(attributes), "semantic": "measured",
+            "device_source": device_family(attributes),
             }
     return None
 

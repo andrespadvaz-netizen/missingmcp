@@ -114,9 +114,14 @@ class HealthOSRepository:
                 key = HealthOS._observation_key(MetricObservation(
                     item.metric, value, unit, item.observed_at, item.source, item.provenance_id, item.semantic))
                 encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
-                cur = self.conn.execute("INSERT OR IGNORE INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
-                accepted += bool(cur.rowcount)
-                duplicates += not bool(cur.rowcount)
+                if self.conn.execute("SELECT 1 FROM health_os_observations WHERE event_key = ?", (key,)).fetchone():
+                    # Same measurement re-sent (e.g. a full re-import): refresh the
+                    # stored payload so newer metadata such as device_source lands.
+                    self.conn.execute("UPDATE health_os_observations SET payload_enc = ? WHERE event_key = ?", (encrypted, key))
+                    duplicates += 1
+                else:
+                    self.conn.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
+                    accepted += 1
             except (TypeError, ValueError) as exc:
                 rejected.append(_safe_reason(exc))
         for raw in workouts:
@@ -271,6 +276,18 @@ class HealthOSRepository:
     def quality(self, now: datetime) -> dict[str, object]:
         health = self._load_health(now)
         return health.data_quality(now)
+
+    def history(self) -> dict[str, object]:
+        """Monthly aggregates per metric and producer family; no single readings."""
+        return {"months": self._load_health(datetime.now().astimezone()).monthly_history()}
+
+    def coverage(self) -> list[dict[str, object]]:
+        """First/last month and month count per metric and family; no values."""
+        summary: dict[tuple[str, str], list[str]] = {}
+        for row in self.history()["months"]:
+            summary.setdefault((row["metric"], row["device_source"]), []).append(row["month"])
+        return [{"metric": m, "device_source": f, "first_month": min(v), "last_month": max(v), "months": len(v)}
+                for (m, f), v in sorted(summary.items())]
 
     def trends(self, now: datetime) -> dict[str, object]:
         """Weekly descriptive aggregates for the app view; never single readings."""

@@ -11,6 +11,7 @@ Commands:
   quarantine-apply --expected N  ingest key POST /health-os/quarantine/apply
   transition --started-at ISO    ingest key POST /health-os/transition
   verify                         read key   POST /health-os/brief (state only)
+  coverage                       read key   GET  /health-os/coverage (months per metric/device, no values)
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ def run(argv: list[str] | None = None) -> dict[str, Any]:
     transition = sub.add_parser("transition")
     transition.add_argument("--started-at", required=True)
     sub.add_parser("verify")
+    sub.add_parser("coverage")
     args = parser.parse_args(argv)
 
     if args.command == "report":
@@ -66,6 +68,8 @@ def run(argv: list[str] | None = None) -> dict[str, Any]:
             raise SystemExit("--started-at must include an offset, e.g. 2026-10-04T00:00:00-06:00")
         return _call("POST", args.base_url, "/health-os/transition", _key("HEALTH_OS_INGEST_KEY"),
                      {"started_at": started.isoformat()})
+    if args.command == "coverage":
+        return _call("GET", args.base_url, "/health-os/coverage", _key("HEALTH_OS_READ_KEY"))
     # verify: return only non-health operational fields of the brief.
     result = _call("POST", args.base_url, "/health-os/brief", _key("HEALTH_OS_READ_KEY"), {})
     brief = result.get("brief") or {}

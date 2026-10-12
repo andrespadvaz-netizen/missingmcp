@@ -659,3 +659,68 @@ def test_admin_cli_runs_sanitation_and_transition_with_env_keys(tmp_path, monkey
     verify = admin_client.run(base + ["verify"])
     assert verify["persisted_invalid_records"] == 0 and verify["legend_present"] is True
     assert set(verify) == {"http", "status", "decision", "quality_pass", "stale", "persisted_invalid_records", "legend_present"}
+
+
+# --- Producer family (device) tagging and long-horizon history ---
+
+@pytest.mark.parametrize("attrs, family", [
+    ({"sourceName": "Apple Watch de Andrés"}, "apple_watch"),
+    ({"sourceName": "Connect"}, "garmin"),
+    ({"sourceName": "Garmin Connect"}, "garmin"),
+    ({"sourceName": "iPhone de Andrés"}, "iphone"),
+    ({"sourceName": "Salud", "device": "<<HKDevice>, name:iPhone, model:iPhone>"}, "iphone"),
+    ({"sourceName": "MyFitnessPal"}, "other_app"),
+])
+def test_device_family_is_a_category_never_free_text(attrs, family):
+    from missingmcp.health_os.apple_export import device_family
+    assert device_family(attrs) == family
+
+
+def test_apple_export_records_carry_the_producer_family():
+    xml = b'''<HealthData>
+      <Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="Connect" unit="count/min" value="52" startDate="2026-09-01 08:00:00 -0600" endDate="2026-09-01 08:00:00 -0600"/>
+      <Record type="HKQuantityTypeIdentifierRestingHeartRate" sourceName="Apple Watch" unit="count/min" value="56" startDate="2026-10-06 08:00:00 -0600" endDate="2026-10-06 08:00:00 -0600"/>
+    </HealthData>'''
+    families = [o["device_source"] for o in parse_apple_health_export(xml).observations]
+    assert families == ["garmin", "apple_watch"]
+
+
+def test_non_watch_families_never_feed_the_apple_era_baseline():
+    health = make_health()
+    health.set_apple_transition(when(1))
+    for day in range(1, 29):
+        health.ingest_observations([
+            MetricObservation("sleep_duration", 420, "min", when(day), APPLE_HEALTH, f"s:{day}", device_source="garmin"),
+            MetricObservation("resting_heart_rate", 55, "bpm", when(day), APPLE_HEALTH, f"r:{day}", device_source="iphone"),
+        ])
+    assert health.metric_baseline_days("sleep_duration", when(29)) == 0
+    assert health.assess_readiness(when(29)).state == DecisionState.REVISAR_TECNICO  # no Watch data => stale
+
+
+def test_reimport_refreshes_payload_with_device_source(tmp_path):
+    db = store.init_db(str(tmp_path / "h.db"))
+    repo = HealthOSRepository(db, "d" * 40)
+    base = {"metric": "resting_heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-06T08:00:00-06:00", "provenance_id": "a"}
+    assert repo.ingest("APPLE_HEALTH", [base], [])["accepted"] == 1
+    assert repo.ingest("APPLE_HEALTH", [{**base, "provenance_id": "b", "device_source": "apple_watch"}], [])["duplicates"] == 1
+    stored = json.loads(store.decrypt("d" * 40, db.execute("SELECT payload_enc FROM health_os_observations").fetchone()[0]))
+    assert stored["device_source"] == "apple_watch"
+    assert db.execute("SELECT COUNT(*) FROM health_os_observations").fetchone()[0] == 1
+
+
+def test_monthly_history_keeps_families_apart_and_coverage_has_no_values(tmp_path):
+    db = store.init_db(str(tmp_path / "h.db"))
+    repo = HealthOSRepository(db, "d" * 40)
+    rows = [{"metric": "weight", "value": 60, "unit": "kg", "observed_at": "2021-01-03T08:00:00-06:00", "provenance_id": "w", "device_source": "iphone"},
+            {"metric": "resting_heart_rate", "value": 52, "unit": "bpm", "observed_at": "2026-09-01T08:00:00-06:00", "provenance_id": "g", "device_source": "garmin"},
+            {"metric": "resting_heart_rate", "value": 56, "unit": "bpm", "observed_at": "2026-10-06T08:00:00-06:00", "provenance_id": "aw", "device_source": "apple_watch"}]
+    assert repo.ingest("APPLE_HEALTH", rows, [])["accepted"] == 3
+    months = repo.history()["months"]
+    assert {(r["metric"], r["device_source"], r["month"]) for r in months} == {
+        ("weight", "iphone", "2021-01"), ("resting_heart_rate", "garmin", "2026-09"), ("resting_heart_rate", "apple_watch", "2026-10")}
+    coverage = repo.coverage()
+    assert all(set(c) == {"metric", "device_source", "first_month", "last_month", "months"} for c in coverage)
+    client = _service(tmp_path)
+    read = {"Authorization": "Bearer " + "r" * 40}
+    assert client.get("/health-os/history", headers={"Authorization": "Bearer " + "i" * 40}).status_code == 401
+    assert client.get("/health-os/coverage", headers=read).json()["status"] == "OK"

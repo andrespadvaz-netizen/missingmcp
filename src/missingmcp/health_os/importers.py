@@ -40,6 +40,7 @@ def observations_from_export(source: str, records: Iterable[Mapping[str, Any]]) 
                 source=source, provenance_id=str(record["provenance_id"]),
                 semantic=str(record.get("semantic", "measured")),
                 confidence=(str(record["confidence"]) if record.get("confidence") is not None else None),
+                device_source=(str(record["device_source"]) if record.get("device_source") is not None else None),
             ))
         except KeyError as exc:
             raise ValueError(f"missing required observation field {exc.args[0]!r}") from exc

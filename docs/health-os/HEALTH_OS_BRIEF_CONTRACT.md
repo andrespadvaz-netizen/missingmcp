@@ -56,3 +56,18 @@ crudas.
   respiratory rate, SpO2, workouts and strength sessions) against a provisional 28-day baseline
   (needs 14 valid days). App view only; the e-mail Brief keeps state, coverage, quality and legend.
   Steps and energy are excluded: iPhone and Watch intervals overlap and would double count.
+
+## Producer families and long-horizon history (2026-10-12)
+
+- Every Apple Health sample now carries `device_source`: `apple_watch`, `garmin` (Garmin Connect
+  writing into Apple Health), `iphone` or `other_app`. Only the category is stored, never the
+  free-text source name.
+- Apple-era baselines, freshness and decisions use only `apple_watch` (and untagged legacy rows).
+  Garmin and iPhone series never blend into them (Política Operativa v0.5, 4.3).
+- `GET /health-os/history` (read key): monthly aggregates per metric and producer family since the
+  earliest stored sample, side by side and never blended. App view only.
+- `GET /health-os/coverage` (read key) and `health-os-admin coverage`: first and last month and
+  month count per metric and family; no values.
+- Re-importing the same export refreshes the stored payload of measurements already present, so a
+  full re-import tags the existing history. Quarantined rows are not re-admitted: current integrity
+  rules reject them before persistence.
