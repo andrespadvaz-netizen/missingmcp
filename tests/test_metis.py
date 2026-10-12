@@ -82,6 +82,78 @@ async def test_direct_audit_requires_andres_is_terminal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_direct_audit_openai_reserves_visible_output_and_reports_exhaustion(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'oa-secret',
+                       'METIS_ANTHROPIC_API_KEY': 'an-secret'})
+    direct = DirectAudit(cfg)
+    calls = []
+
+    async def exhausted(url, body, headers):
+        calls.append(body)
+        return ({'id': 'resp-exhausted', 'model': 'gpt-5-2025-08-07',
+                 'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
+                 'output': [{'type': 'reasoning'}],
+                 'usage': {'input_tokens': 12000, 'output_tokens': 8192,
+                           'output_tokens_details': {'reasoning_tokens': 8192}}}, 'request-1')
+
+    monkeypatch.setattr(direct, '_post', exhausted)
+    result = await direct.run('ANTHROPIC', 'Auditoría extensa', 'METIS')
+    assert len(calls) == 1
+    assert calls[0]['max_output_tokens'] == 8192
+    assert calls[0]['reasoning'] == {'effort': 'low'}
+    assert result['status'] == 'FAILED'
+    assert result['error_code'] == 'OUTPUT_TOKEN_LIMIT'
+    assert result['provider_request_id'] == 'resp-exhausted'
+    assert result['model'] == 'gpt-5-2025-08-07'
+    assert result['cost_known'] is True
+    assert result['cost_usd'] == .09692
+    assert result['writes_attempted'] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_audit_openai_completed_text_is_terminal(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'oa-secret',
+                       'METIS_ANTHROPIC_API_KEY': 'an-secret'})
+    direct = DirectAudit(cfg)
+
+    async def completed(url, body, headers):
+        assert url.endswith('/v1/responses')
+        assert body['max_output_tokens'] == 8192
+        assert body['reasoning'] == {'effort': 'low'}
+        return ({'id': 'resp-complete', 'status': 'completed', 'model': 'gpt-5-2025-08-07',
+                 'output': [{'type': 'message', 'content': [
+                     {'type': 'output_text', 'text': 'Dictamen completo'}]}],
+                 'usage': {'input_tokens': 100, 'output_tokens': 25}}, 'request-3')
+
+    monkeypatch.setattr(direct, '_post', completed)
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert result['status'] == 'COMPLETED'
+    assert result['final_answer'] == 'Dictamen completo'
+    assert result['model'] == 'gpt-5-2025-08-07'
+    assert result['writes_attempted'] == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_audit_does_not_claim_completion_for_partial_openai_text(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'oa-secret',
+                       'METIS_ANTHROPIC_API_KEY': 'an-secret'})
+    direct = DirectAudit(cfg)
+
+    async def partial(url, body, headers):
+        return ({'id': 'resp-partial', 'status': 'incomplete',
+                 'incomplete_details': {'reason': 'max_output_tokens'},
+                 'output': [{'type': 'message', 'content': [
+                     {'type': 'output_text', 'text': 'Análisis parcial'}]}],
+                 'usage': {'input_tokens': 100, 'output_tokens': 8192}}, 'request-2')
+
+    monkeypatch.setattr(direct, '_post', partial)
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert result['status'] == 'FAILED'
+    assert result['error_code'] == 'OUTPUT_TOKEN_LIMIT'
+    assert 'final_answer' not in result
+
+
+@pytest.mark.asyncio
 async def test_direct_audit_tool_does_not_create_queue_row(tmp_path, monkeypatch):
     cfg = load_config({'GATEWAY_SECRET': SECRET, 'DATA_DIR': str(tmp_path),
         'METIS_BRIDGE_URL':'https://script.google.com/macros/s/abc/exec',

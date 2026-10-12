@@ -22,11 +22,17 @@ PRICE_USD_PER_1K = {
 
 
 class DirectAuditError(RuntimeError):
-    def __init__(self, code: str, retryable: bool, provider_request_id: str | None = None):
+    def __init__(self, code: str, retryable: bool, provider_request_id: str | None = None,
+                 *, usage: dict | None = None, model: str | None = None,
+                 provider_status: str | None = None, incomplete_reason: str | None = None):
         super().__init__(code)
         self.code = code
         self.retryable = retryable
         self.provider_request_id = provider_request_id
+        self.usage = usage
+        self.model = model
+        self.provider_status = provider_status
+        self.incomplete_reason = incomplete_reason
 
 
 class DirectAudit:
@@ -49,10 +55,14 @@ class DirectAudit:
             else:
                 answer, usage, model, provider_id = await self._openai(request, context_project)
         except DirectAuditError as exc:
+            cost = self._cost(target, exc.usage)
             return {
                 "status": "FAILED", "stage": f"{target}_REQUEST", "error_code": exc.code,
                 "retryable": exc.retryable, "provider_request_id": exc.provider_request_id,
-                "cost_known": False, "cost_usd": None,
+                "usage": exc.usage, "model": exc.model,
+                "provider_status": exc.provider_status,
+                "incomplete_reason": exc.incomplete_reason,
+                "cost_known": cost is not None, "cost_usd": cost,
                 "elapsed_ms": round((time.monotonic() - started) * 1000),
                 "receipt_id": receipt_id, "context_project": context_project,
                 "target_model_provider": target, "transport": "DIRECT_API",
@@ -92,7 +102,10 @@ class DirectAudit:
             "model": self.config.metis_openai_model,
             "input": [{"role": "system", "content": SYSTEM},
                       {"role": "user", "content": f"Contexto: {context}\n\n{request}"}],
-            "max_output_tokens": 4096,
+            # This budget includes hidden reasoning tokens. A 4096-token cap
+            # exhausted on a substantive audit before any visible text appeared.
+            "max_output_tokens": 8192,
+            "reasoning": {"effort": "low"},
         }
         data, request_id = await self._post("https://api.openai.com/v1/responses", body, {
             "Authorization": f"Bearer {self.config.metis_openai_api_key}",
@@ -104,8 +117,17 @@ class DirectAudit:
                 for c in item.get("content", []) if isinstance(c, dict)
                 and c.get("type") in {"output_text", "text"}
             ).strip()
-        if not answer:
-            raise DirectAuditError("EMPTY_PROVIDER_RESPONSE", False, data.get("id") or request_id)
+        status = data.get("status")
+        reason = (data.get("incomplete_details") or {}).get("reason")
+        if not answer or status in {"incomplete", "failed"}:
+            raise DirectAuditError(
+                "OUTPUT_TOKEN_LIMIT" if reason == "max_output_tokens" else
+                "PROVIDER_INCOMPLETE" if status == "incomplete" else
+                "PROVIDER_FAILED" if status == "failed" else "EMPTY_PROVIDER_RESPONSE",
+                False, data.get("id") or request_id,
+                usage=data.get("usage") if isinstance(data.get("usage"), dict) else None,
+                model=data.get("model"), provider_status=status,
+                incomplete_reason=reason)
         return answer, data.get("usage", {}), data.get("model", body["model"]), data.get("id") or request_id
 
     async def _post(self, url, body, headers):
