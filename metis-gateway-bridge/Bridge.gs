@@ -1,4 +1,4 @@
-/** Transport only. Separate project; Engine library pinned to reviewed v9.
+/** Transport only. Separate project; Engine library pinned to motor 49 / release 12.
  * One monotonic receipt survives forever; only the latest result is cached.
  * Railway persists it before sending a higher sequence. Old sequences never run;
  * gaps are valid because a paused context may be skipped while another proceeds.
