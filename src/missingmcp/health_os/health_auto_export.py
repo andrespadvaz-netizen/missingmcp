@@ -42,6 +42,13 @@ _METRICS = {
     "blood_pressure_diastolic": "diastolic_blood_pressure",
 }
 _ASLEEP_STAGES = {"asleep", "core", "deep", "rem"}
+# Documented top-level JSON export categories that this adapter does not ingest.
+# Only these fixed names may appear in receipts; arbitrary payload keys are
+# grouped under "other" so a sensitive key cannot be reflected to the caller.
+_UNSUPPORTED_CATEGORIES = frozenset({
+    "stateOfMind", "medications", "symptoms", "cycleTracking",
+    "ecg", "heartRateNotifications",
+})
 
 
 def _date(value: Any) -> datetime:
@@ -76,6 +83,12 @@ def parse_health_auto_export(payload: Mapping[str, Any]) -> tuple[list[dict[str,
 
     def skip(reason: str, n: int = 1) -> None:
         skipped[reason] = skipped.get(reason, 0) + n
+
+    for category, rows in data.items():
+        if category in {"metrics", "workouts"} or not isinstance(rows, list) or not rows:
+            continue
+        label = category if category in _UNSUPPORTED_CATEGORIES else "other"
+        skip("ignored_category:" + label, len(rows))
 
     for metric in data.get("metrics") or []:
         name = str(metric.get("name", "")).strip().lower()

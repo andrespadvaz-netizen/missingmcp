@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from missingmcp.health_os.core import APPLE_HEALTH, GARMIN_LEGACY, SPEEDIANCE, DecisionState, HealthOS, MetricObservation, WorkoutSession
+from missingmcp.health_os.core import APPLE_HEALTH, GARMIN_LEGACY, SPEEDIANCE, DecisionState, HealthOS, MetricObservation, WorkoutSession, _canonical_unit
 from missingmcp.health_os.importers import observations_from_export, workout_from_export
 from missingmcp.health_os.persistence import HealthOSRepository
 from missingmcp import store
@@ -24,6 +24,28 @@ MX = timezone(timedelta(hours=-6))
 
 def make_health() -> HealthOS:
     return HealthOS(MX)
+
+
+def test_legacy_active_energy_cal_semantics_are_preserved():
+    assert _canonical_unit("active_energy", 1000, "cal") == (1000, "kcal")
+    assert _canonical_unit("active_energy", 1, "Cal") == (1, "kcal")
+    assert _canonical_unit("active_energy", 1, "kcal") == (1, "kcal")
+
+
+def test_stored_legacy_cal_observation_keeps_its_existing_interpretation():
+    repo = HealthOSRepository(store.init_db(":memory:"), "synthetic-data-key" * 3)
+    raw = {"metric": "active_energy", "value": 100, "unit": "cal",
+           "observed_at": "2000-01-01T12:00:00+00:00",
+           "provenance_id": "synthetic:legacy-cal"}
+    repo.conn.execute(
+        "INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?,?,?)",
+        ("synthetic-event", APPLE_HEALTH, store.encrypt(repo.data_key, json.dumps(raw))),
+    )
+    repo.conn.commit()
+    health = repo._load_health(datetime(2000, 1, 2, tzinfo=timezone.utc))
+    observed = list(health._observations.values())
+    assert len(observed) == 1
+    assert (observed[0].value, observed[0].unit) == (100, "kcal")
 
 
 def when(day: int, hour: int = 8) -> datetime:
@@ -731,15 +753,33 @@ def test_non_watch_families_never_feed_the_apple_era_baseline():
     assert health.assess_readiness(when(29)).state == DecisionState.REVISAR_TECNICO  # no Watch data => stale
 
 
-def test_reimport_refreshes_payload_with_device_source(tmp_path):
+def test_reimport_with_colliding_provenance_preserves_first_payload(tmp_path):
     db = store.init_db(str(tmp_path / "h.db"))
     repo = HealthOSRepository(db, "d" * 40)
     base = {"metric": "resting_heart_rate", "value": 55, "unit": "bpm", "observed_at": "2026-10-06T08:00:00-06:00", "provenance_id": "a"}
     assert repo.ingest("APPLE_HEALTH", [base], [])["accepted"] == 1
-    assert repo.ingest("APPLE_HEALTH", [{**base, "provenance_id": "b", "device_source": "apple_watch"}], [])["duplicates"] == 1
+    collision = repo.ingest("APPLE_HEALTH", [{**base, "provenance_id": "b", "device_source": "apple_watch"}], [])
+    assert collision == {"accepted": 0, "duplicates": 0, "rejected": ["core_key_collision"]}
     stored = json.loads(store.decrypt("d" * 40, db.execute("SELECT payload_enc FROM health_os_observations").fetchone()[0]))
-    assert stored["device_source"] == "apple_watch"
+    assert stored == base
+    assert repo.ingest("APPLE_HEALTH", [base], [])["duplicates"] == 1
     assert db.execute("SELECT COUNT(*) FROM health_os_observations").fetchone()[0] == 1
+
+
+def test_core_key_collision_preserves_first_in_reverse_order(tmp_path):
+    db = store.init_db(str(tmp_path / "reverse.db"))
+    repo = HealthOSRepository(db, "d" * 40)
+    first = {"metric": "heart_rate", "value": 60, "unit": "bpm",
+             "observed_at": "2000-01-01T00:00:00+00:00", "provenance_id": "second",
+             "device_source": "iphone"}
+    other = {**first, "provenance_id": "first", "device_source": "apple_watch"}
+    assert repo.ingest("APPLE_HEALTH", [first], [])["accepted"] == 1
+    assert repo.ingest("APPLE_HEALTH", [other], []) == {
+        "accepted": 0, "duplicates": 0, "rejected": ["core_key_collision"]}
+    stored = json.loads(store.decrypt("d" * 40, db.execute(
+        "SELECT payload_enc FROM health_os_observations").fetchone()[0]))
+    assert stored == first
+    assert repo.ingest("APPLE_HEALTH", [first], [])["duplicates"] == 1
 
 
 def test_monthly_history_keeps_families_apart_and_coverage_has_no_values(tmp_path):
@@ -852,7 +892,7 @@ def test_health_auto_export_refuses_aggregated_sleep():
     assert observations == [] and skipped == {"sleep_aggregated_not_supported": 1}
 
 
-def test_health_auto_export_route_ingests_and_deduplicates_against_the_native_export(tmp_path):
+def test_health_auto_export_route_holds_native_provenance_collision(tmp_path):
     client = _service(tmp_path)
     ingest = {"Authorization": "Bearer " + "i" * 40}
     assert client.post("/health-os/ingest/health-auto-export", headers={"Authorization": "Bearer " + "r" * 40}, json=_hae_payload()).status_code == 401
@@ -861,10 +901,12 @@ def test_health_auto_export_route_ingests_and_deduplicates_against_the_native_ex
               "provenance_id": "apple-export:x", "semantic": "measured", "device_source": "apple_watch"}
     assert client.post("/health-os/ingest", headers=ingest, json={"source": "APPLE_HEALTH", "observations": [native]}).json()["accepted"] == 1
     body = client.post("/health-os/ingest/health-auto-export", headers=ingest, json=_hae_payload()).json()
-    assert body["status"] == "OK" and body["rejected"] == 0
-    assert body["duplicates"] == 1  # the Core segment matched the native row
+    assert body["status"] == "OK" and body["rejected"] == 1
+    assert body["rejected_by_reason"] == {"core_key_collision": 1}
+    assert body["duplicates"] == 0  # different provenance cannot replace the native row
     assert body["accepted"] == 6     # 1 more sleep segment, RHR, HRV, SpO2, weight, workout
     assert "126" not in json.dumps(body) and "61" not in json.dumps(body)
     again = client.post("/health-os/ingest/health-auto-export", headers=ingest, json=_hae_payload()).json()
-    assert again["accepted"] == 0
+    assert again["accepted"] == 0 and again["duplicates"] == 6
+    assert again["rejected_by_reason"] == {"core_key_collision": 1}
     assert client.post("/health-os/ingest/health-auto-export", headers=ingest, content=b"{").status_code == 400

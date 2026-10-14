@@ -21,6 +21,7 @@ from .persistence import HealthOSRepository
 from .health_auto_export import parse_health_auto_export
 from .apple_export import parse_apple_health_export
 from .core import APPLE_HEALTH, SPEEDIANCE
+from .tuanhdo_staging import ingest_tuanhdo
 
 
 def build_health_os_app(config: Config) -> Starlette:
@@ -28,6 +29,22 @@ def build_health_os_app(config: Config) -> Starlette:
         raise ValueError("HEALTH_OS_INGEST_KEY, HEALTH_OS_READ_KEY and HEALTH_OS_DATA_KEY are required for the isolated Health OS service")
     repo = HealthOSRepository(store.init_db(config.db_path), config.health_os_data_key,
                               config.health_os_timezone, legacy_key=config.gateway_secret)
+    # Exact identifiers are operator configuration, never guessed from a
+    # friendly source name. Without this setting, submissions stay in staging.
+    watch_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", "[]"))
+    if not isinstance(watch_config, list) or any(
+        not isinstance(item, list) or len(item) != 4 or
+        any(not isinstance(field, str) or not field for field in item)
+        for item in watch_config
+    ):
+        raise ValueError("HEALTH_OS_TUANHDO_WATCH_PROVENANCE must contain exact four-field lists")
+    approved_watch = frozenset(tuple(item) for item in watch_config)
+    type_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_PROMOTE_TYPES", "[]"))
+    if not isinstance(type_config, list) or any(
+        not isinstance(item, str) or not item for item in type_config
+    ):
+        raise ValueError("HEALTH_OS_TUANHDO_PROMOTE_TYPES must be a list of export type names")
+    approved_types = frozenset(type_config)
 
     def authorized_ingest(request) -> bool:
         return hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
@@ -70,6 +87,19 @@ def build_health_os_app(config: Config) -> Starlette:
         return JSONResponse({"status": "OK", "accepted": result["accepted"], "duplicates": result["duplicates"],
                              "rejected": len(result["rejected"]), "rejected_by_reason": reasons, "skipped": skipped},
                             headers={"Cache-Control": "no-store"})
+
+    async def tuanhdo_export(request):
+        if not authorized_ingest(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=16 * 1024 * 1024)
+        if raw is None:
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        try:
+            receipt = ingest_tuanhdo(repo, json.loads(raw.decode("utf-8")), approved_watch,
+                                     approved_types=approved_types)
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
+        return JSONResponse({"status": "OK", **receipt}, headers={"Cache-Control": "no-store"})
 
     async def quality(request):
         if not authorized_read(request):
@@ -164,6 +194,7 @@ def build_health_os_app(config: Config) -> Starlette:
         Route("/healthz", healthz), Route("/health-os/ingest", ingest, methods=["POST"]),
         Route("/health-os/import/apple-export", apple_export, methods=["POST"]),
         Route("/health-os/ingest/health-auto-export", health_auto_export, methods=["POST"]),
+        Route("/health-os/ingest/tuanhdo", tuanhdo_export, methods=["POST"]),
         Route("/health-os/quality", quality), Route("/health-os/brief", brief, methods=["POST"]),
         Route("/health-os/transition", transition, methods=["POST"]),
         Route("/health-os/trends", trends), Route("/health-os/quarantine", quarantine_report),

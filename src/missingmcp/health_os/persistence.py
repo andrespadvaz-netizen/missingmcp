@@ -5,6 +5,7 @@ import json
 import sqlite3
 from datetime import datetime, tzinfo
 from hashlib import sha256
+from threading import RLock
 from typing import Any, Mapping
 
 from cryptography.exceptions import InvalidTag
@@ -54,6 +55,7 @@ class HealthOSRepository:
                  health_timezone: str | tzinfo = "America/Mexico_City", *,
                  legacy_key: str | None = None) -> None:
         self.conn, self.data_key, self.health_timezone = conn, data_key, health_timezone
+        self._write_lock = RLock()
         # Decrypting every stored row took ~35 s in production (Oct 2026).  The
         # service is single-process and every write goes through this object,
         # so the scan is cached in memory and dropped on each write.
@@ -102,7 +104,13 @@ class HealthOSRepository:
     def _key(source: str, value: str) -> str:
         return sha256(f"{source}|{value}".encode()).hexdigest()
 
-    def ingest(self, source: str, observations: list[Mapping[str, Any]], workouts: list[Mapping[str, Any]]) -> dict[str, Any]:
+    def ingest(self, source: str, observations: list[Mapping[str, Any]], workouts: list[Mapping[str, Any]],
+               *, commit: bool = True) -> dict[str, Any]:
+        with self._write_lock:
+            return self._ingest_locked(source, observations, workouts, commit=commit)
+
+    def _ingest_locked(self, source: str, observations: list[Mapping[str, Any]],
+                       workouts: list[Mapping[str, Any]], *, commit: bool) -> dict[str, Any]:
         self._invalidate()
         accepted = duplicates = 0
         rejected: list[str] = []
@@ -119,10 +127,19 @@ class HealthOSRepository:
                 key = HealthOS._observation_key(MetricObservation(
                     item.metric, value, unit, item.observed_at, item.source, item.provenance_id, item.semantic))
                 encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
-                if self.conn.execute("SELECT 1 FROM health_os_observations WHERE event_key = ?", (key,)).fetchone():
-                    # Same measurement re-sent (e.g. a full re-import): refresh the
-                    # stored payload so newer metadata such as device_source lands.
-                    self.conn.execute("UPDATE health_os_observations SET payload_enc = ? WHERE event_key = ?", (encrypted, key))
+                prior = self.conn.execute("SELECT payload_enc FROM health_os_observations WHERE event_key = ?", (key,)).fetchone()
+                if prior:
+                    # The historic core key omits provenance and producer. A
+                    # colliding submission must never replace the first fact.
+                    try:
+                        previous = json.loads(store.decrypt(self.data_key, prior["payload_enc"]))
+                    except _UNREADABLE as exc:
+                        raise ValueError("core_key_existing_unreadable") from exc
+                    if not isinstance(previous, Mapping):
+                        raise ValueError("core_key_existing_unreadable")
+                    if any(previous.get(field) != raw.get(field) for field in
+                           ("provenance_id", "device_source", "semantic")):
+                        raise ValueError("core_key_collision")
                     duplicates += 1
                 else:
                     self.conn.execute("INSERT INTO health_os_observations(event_key, source, payload_enc) VALUES (?, ?, ?)", (key, source, encrypted))
@@ -139,7 +156,8 @@ class HealthOSRepository:
                 duplicates += not bool(cur.rowcount)
             except (TypeError, ValueError) as exc:
                 rejected.append(_safe_reason(exc))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         self._invalidate()  # also drops a scan that raced with this write
         return {"accepted": accepted, "duplicates": duplicates, "rejected": rejected}
 
