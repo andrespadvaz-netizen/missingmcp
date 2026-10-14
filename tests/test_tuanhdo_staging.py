@@ -307,6 +307,68 @@ def test_explicit_device_conflicts_cannot_use_approved_source_pair():
         assert receipt["accepted"] == 1
 
 
+def test_generic_watch_label_recovers_only_exactly_approved_pulse_and_hrv():
+    repo = local_repo()
+    watch = (WATCH[0], WATCH[1], "Watch", WATCH[3])
+    approved = frozenset({watch})
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    heart_rate = row("heartRate", 60, point, unit="count/min")
+    hrv = row("heartRateVariabilitySDNN", 40, point, unit="ms")
+    iphone = row("heartRate", 61, point + timedelta(minutes=1), unit="count/min")
+    for sample in (heart_rate, hrv, iphone):
+        sample["deviceDetail"]["model"] = "Watch"
+    for sample in (heart_rate, hrv):
+        sample["device"] = "Apple Watch"
+    iphone["device"] = "iPhone"
+    assert _ingest_tuanhdo(repo, export([heart_rate, hrv, iphone]),
+                           frozenset())["held"] == 3
+    batch_key = only_batch_key(repo)
+    # These rows were labeled device_conflict by the previous release.
+    repo.conn.execute(
+        "UPDATE health_os_tuanhdo_records SET reason='device_conflict' "
+        "WHERE batch_key=?", (batch_key,),
+    )
+    repo.conn.commit()
+    reviewed = _review_held_tuanhdo(
+        repo, approved, approved_types=frozenset({"heartRate", "heartRateVariabilitySDNN"}),
+        batch_key=batch_key,
+    )
+    assert (reviewed["reviewed"], reviewed["promoted"], reviewed["still_held"]) == (3, 2, 1), [
+        tuple(row) for row in repo.conn.execute(
+            "SELECT metric,reason FROM health_os_tuanhdo_records ORDER BY record_index")
+    ]
+    assert core_count(repo) == 2
+    assert repo.conn.execute(
+        "SELECT count(*) FROM health_os_tuanhdo_promotion_links WHERE operation_id=?",
+        (reviewed["operation_id"],),
+    ).fetchone()[0] == 2
+    assert repo.conn.execute(
+        "SELECT reason FROM health_os_tuanhdo_records WHERE batch_key=? AND record_index=2",
+        (batch_key,),
+    ).fetchone()[0] == "device_conflict"
+
+    wrong_source = row("heartRate", 60, point, unit="count/min", source=False)
+    wrong_source["deviceDetail"]["model"] = "Watch"
+    wrong_source["device"] = "Apple Watch"
+    other_repo = local_repo()
+    result = _ingest_tuanhdo(
+        other_repo, export([wrong_source]), approved,
+        approved_types=frozenset({"heartRate"}),
+    )
+    assert result["accepted"] == 0 and core_count(other_repo) == 0
+
+    other_type = row("restingHeartRate", 60, point, unit="count/min")
+    other_type["deviceDetail"]["model"] = "Watch"
+    other_type["device"] = "Apple Watch"
+    another_repo = local_repo()
+    result = _ingest_tuanhdo(
+        another_repo, export([other_type]), approved,
+        approved_types=frozenset({"restingHeartRate"}),
+    )
+    assert result["reasons"] == {"device_conflict": 1}
+    assert core_count(another_repo) == 0
+
+
 def test_source_only_assurance_is_persisted_and_lowers_readiness_confidence():
     repo = local_repo()
     now = datetime.now(timezone.utc)

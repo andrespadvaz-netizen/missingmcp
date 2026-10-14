@@ -72,7 +72,12 @@ def _watch_match(sample: Sample, approved: WatchProvenance,
                   detail.get("model"), detail.get("softwareVersion"))
         if (all(isinstance(value, str) and value for value in fields)
                 and fields in approved
-                and sample.device in (None, fields[0], fields[2])):
+                and (sample.device in (None, fields[0], fields[2])
+                     or (sample.exported_type in {"heartRate", "heartRateVariabilitySDNN"}
+                         and fields[2] == "Watch" and sample.device == "Apple Watch"))):
+            # The export uses the generic Watch label for these two types.
+            # It is consistent only after the four exact fields are approved;
+            # arbitrary labels, including iPhone, remain conflicts.
             return "device"
         # A partial or conflicting device cannot fall back to source-only proof.
         return None
@@ -371,7 +376,8 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
             raise ValueError("unknown batch_key")
         query = ("SELECT batch_key, record_index FROM health_os_tuanhdo_records "
                  "WHERE disposition='held' AND reason IN "
-                 "('source_unverified','previous_held','metric_not_approved','provenance_incomplete')")
+                 "('source_unverified','previous_held','metric_not_approved',"
+                 "'provenance_incomplete','device_conflict')")
         candidates = conn.execute(query + " AND batch_key=? ORDER BY rowid",
                                   (batch_key,)).fetchall()
         operation_id = _start_promotion_op(conn, batch_key, "held_review", approved_types)
