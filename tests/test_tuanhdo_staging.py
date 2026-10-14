@@ -1,8 +1,9 @@
 """Synthetic-only checks of TuAnhDo receipt, staging, core and Brief."""
 from datetime import datetime, timedelta, timezone
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import json
 import sqlite3
+from threading import Event
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -10,12 +11,14 @@ from starlette.testclient import TestClient
 
 from missingmcp.config import load_config
 from missingmcp import store
+from missingmcp.health_os.core import APPLE_HEALTH
 from missingmcp.health_os.persistence import HealthOSRepository
 from missingmcp.health_os.service import build_health_os_app
 from missingmcp.health_os.tuanhdo_dry_run import _HELD_QUANTITIES, _QUANTITIES
 from missingmcp.health_os.tuanhdo_staging import (
     ingest_tuanhdo as _ingest_tuanhdo,
     review_held_tuanhdo as _review_held_tuanhdo,
+    reverse_tuanhdo_operation,
 )
 
 
@@ -30,11 +33,20 @@ def ingest_tuanhdo(repo, payload, approved):
     return _ingest_tuanhdo(repo, payload, approved, approved_types=TEST_TYPES)
 
 
-def review_held_tuanhdo(repo, approved):
-    return _review_held_tuanhdo(repo, approved, approved_types=TEST_TYPES)
+def only_batch_key(repo):
+    keys = [row[0] for row in repo.conn.execute(
+        "SELECT batch_key FROM health_os_tuanhdo_batches")]
+    assert len(keys) == 1
+    return keys[0]
 
 
-def client(tmp_path, monkeypatch, *, allow_watch=False, promote_types=None):
+def review_held_tuanhdo(repo, approved, batch_key):
+    return _review_held_tuanhdo(repo, approved, batch_key=batch_key,
+                                approved_types=TEST_TYPES)
+
+
+def client(tmp_path, monkeypatch, *, allow_watch=False, promote_types=None,
+           derived_sources=None):
     if allow_watch:
         monkeypatch.setenv("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", json.dumps([WATCH]))
         monkeypatch.setenv("HEALTH_OS_TUANHDO_PROMOTE_TYPES", json.dumps(promote_types if promote_types is not None else [
@@ -44,6 +56,10 @@ def client(tmp_path, monkeypatch, *, allow_watch=False, promote_types=None):
     else:
         monkeypatch.delenv("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", raising=False)
         monkeypatch.delenv("HEALTH_OS_TUANHDO_PROMOTE_TYPES", raising=False)
+    if derived_sources is None:
+        monkeypatch.delenv("HEALTH_OS_TUANHDO_DERIVED_WATCH_SOURCES", raising=False)
+    else:
+        monkeypatch.setenv("HEALTH_OS_TUANHDO_DERIVED_WATCH_SOURCES", json.dumps(derived_sources))
     keys = {"GATEWAY_SECRET": "g" * 40, "HEALTH_OS_INGEST_KEY": "i" * 40,
             "HEALTH_OS_READ_KEY": "r" * 40, "HEALTH_OS_DATA_KEY": "d" * 40,
             "DB_PATH": str(tmp_path / "h.db"), "DATA_DIR": str(tmp_path)}
@@ -171,7 +187,8 @@ def test_direct_ingest_and_review_require_explicit_metric_scope():
     receipt = _ingest_tuanhdo(repo, body, frozenset({tuple(WATCH)}))
     assert receipt["accepted"] == 0
     assert receipt["reasons"] == {"metric_not_approved": 1}
-    reviewed = _review_held_tuanhdo(repo, frozenset({tuple(WATCH)}))
+    reviewed = _review_held_tuanhdo(repo, frozenset({tuple(WATCH)}),
+                                    batch_key=only_batch_key(repo))
     assert reviewed["promoted"] == 0
     assert core_count(repo) == 0
 
@@ -203,6 +220,418 @@ def test_incomplete_provenance_and_overlapping_sleep_are_held(tmp_path, monkeypa
     assert receipt["accepted"] == 0 and receipt["held"] == 4
     assert receipt["reasons"] == {"provenance_incomplete": 1, "sleep_overlap": 2, "source_unverified": 1}
     assert counts(tmp_path / "h.db") == (1, 4, 0)
+
+
+def test_device_optional_exception_requires_separate_approval_and_retained_review():
+    repo = local_repo()
+    approved = frozenset({tuple(WATCH)})
+    types = frozenset({"restingHeartRate", "sleepAnalysis", "heartRate"})
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        row("restingHeartRate", 60, start, unit="count/min", detail=False),
+        row("sleepAnalysis", 3, start, start + timedelta(hours=1), detail=False),
+        row("sleepAnalysis", 2, start + timedelta(hours=1),
+            start + timedelta(hours=2), detail=False),
+        row("heartRate", 61, start + timedelta(hours=3),
+            unit="count/min", detail=False),
+        row("restingHeartRate", 62, start + timedelta(hours=4),
+            unit="count/min", source=False),
+        row("restingHeartRate", 63, start + timedelta(hours=5),
+            unit="count/min", detail=False),
+    ]
+    rows[-1]["deviceDetail"] = {"model": WATCH[2]}  # partial detail cannot fall back
+    initial = _ingest_tuanhdo(repo, export(rows), approved, approved_types=types)
+    assert initial["accepted"] == 0 and initial["held"] == len(rows)
+    assert core_count(repo) == 0
+    derived = frozenset({tuple(WATCH[:2])})
+    reviewed = _review_held_tuanhdo(repo, approved, batch_key=only_batch_key(repo),
+                                    approved_types=types,
+                                    derived_watch=derived)
+    assert reviewed["promoted"] == 2
+    assert core_count(repo) == 2
+    reasons = dict(repo.conn.execute(
+        "SELECT reason,count(*) FROM health_os_tuanhdo_records GROUP BY reason"))
+    assert reasons == {"approved_derived_source_match": 2,
+                       "awake_not_sleep": 1, "provenance_incomplete": 2,
+                       "source_unverified": 1}
+    assert _review_held_tuanhdo(repo, approved, batch_key=only_batch_key(repo),
+                                approved_types=types,
+                                derived_watch=derived)["promoted"] == 0
+
+
+def test_derived_source_requires_full_watch_anchor_and_metric_scope():
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    payload = export([row("restingHeartRate", 60, start,
+                          unit="count/min", detail=False)])
+    derived = frozenset({tuple(WATCH[:2])})
+    for watch, types in ((frozenset(), frozenset({"restingHeartRate"})),
+                         (frozenset({tuple(WATCH)}), frozenset())):
+        repo = local_repo()
+        receipt = _ingest_tuanhdo(repo, payload, watch, approved_types=types,
+                                  derived_watch=derived)
+        assert receipt["accepted"] == 0 and core_count(repo) == 0
+
+
+def test_explicit_device_conflicts_cannot_use_approved_source_pair():
+    approved = frozenset({tuple(WATCH)})
+    derived = frozenset({tuple(WATCH[:2])})
+    kinds = (("restingHeartRate", "count/min", False),
+             ("sleepAnalysis", None, False),
+             ("heartRate", "count/min", True))
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    for kind, unit, has_detail in kinds:
+        for conflicting_device in ("iPhone", "Garmin", "watch"):
+            repo = local_repo()
+            end = point + timedelta(hours=1) if kind == "sleepAnalysis" else point
+            sample = row(kind, 3 if kind == "sleepAnalysis" else 60,
+                         point, end, unit=unit, detail=has_detail)
+            sample["device"] = conflicting_device
+            receipt = _ingest_tuanhdo(repo, export([sample]), approved,
+                                      approved_types=frozenset({kind}),
+                                      derived_watch=derived)
+            assert receipt["reasons"] == {"device_conflict": 1}
+            assert core_count(repo) == 0
+            assert _review_held_tuanhdo(repo, approved,
+                                        batch_key=only_batch_key(repo),
+                                        approved_types=frozenset({kind}),
+                                        derived_watch=derived)["promoted"] == 0
+        # An exact Watch label is consistent metadata, not an extra proof.
+        repo = local_repo()
+        end = point + timedelta(hours=1) if kind == "sleepAnalysis" else point
+        sample = row(kind, 3 if kind == "sleepAnalysis" else 60,
+                     point, end, unit=unit, detail=has_detail)
+        sample["device"] = WATCH[0]
+        receipt = _ingest_tuanhdo(repo, export([sample]), approved,
+                                  approved_types=frozenset({kind}),
+                                  derived_watch=derived)
+        assert receipt["accepted"] == 1
+
+
+def test_source_only_assurance_is_persisted_and_lowers_readiness_confidence():
+    repo = local_repo()
+    now = datetime.now(timezone.utc)
+    repo.set_apple_transition(now - timedelta(days=40))
+    observations = []
+    for days_ago in range(1, 29):
+        at = now - timedelta(days=days_ago)
+        observations.extend((
+            {"metric": "sleep_duration", "value": 480, "unit": "min",
+             "observed_at": at.isoformat(), "provenance_id": f"sleep-{days_ago}",
+             "device_source": "apple_watch", "confidence": "watch_source_only"},
+            {"metric": "resting_heart_rate", "value": 60, "unit": "bpm",
+             "observed_at": at.isoformat(), "provenance_id": f"rhr-{days_ago}",
+             "device_source": "apple_watch", "confidence": "device_metadata"},
+        ))
+    assert repo.ingest("APPLE_HEALTH", observations, [])["accepted"] == 56
+    brief = repo.brief(now)
+    assert brief["decision"] == "INFORMATIVO"
+    assert brief["confidence"] == "low"
+    assert any("device metadata absent" in factor for factor in brief["factors"])
+
+
+def test_held_review_does_not_touch_unapproved_type():
+    repo = local_repo()
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    body = export([row("heartRate", 60, point, unit="count/min"),
+                   row("heartRateVariabilitySDNN", 40, point, unit="ms")])
+    initial = _ingest_tuanhdo(repo, body, frozenset(),
+                              approved_types=frozenset({"heartRate"}))
+    assert initial["reasons"] == {"source_unverified": 2}
+    reviewed = _review_held_tuanhdo(repo, frozenset({tuple(WATCH)}),
+                                    batch_key=only_batch_key(repo),
+                                    approved_types=frozenset({"heartRate"}))
+    assert len(reviewed.pop("operation_id")) == 32
+    assert reviewed == {"reviewed": 1, "promoted": 1,
+                        "duplicates_marked": 0, "still_held": 0}
+    reasons = dict(repo.conn.execute(
+        "SELECT metric,reason FROM health_os_tuanhdo_records"))
+    assert reasons == {"heart_rate": "approved_metadata_match",
+                       "hrv": "source_unverified"}
+
+
+def test_scoped_reversal_preserves_ciphertext_history_and_other_batches():
+    repo = local_repo()
+    approved = frozenset({tuple(WATCH)})
+    derived = frozenset({tuple(WATCH[:2])})
+    now = datetime.now(timezone.utc)
+    repo.set_apple_transition(now - timedelta(days=50))
+    readiness_rows = []
+    for days_ago in range(1, 29):
+        end = now - timedelta(days=days_ago)
+        readiness_rows.append(row("sleepAnalysis", 3, end - timedelta(hours=8),
+                                  end, detail=False))
+        readiness_rows.append(row("restingHeartRate", 60, end,
+                                  unit="count/min", detail=False))
+    payload = export(readiness_rows)
+    initial = _ingest_tuanhdo(repo, payload, frozenset())
+    assert initial["held"] == 56
+    batch_key = repo.conn.execute(
+        "SELECT batch_key FROM health_os_tuanhdo_batches").fetchone()[0]
+    other = _ingest_tuanhdo(repo, export([row("heartRate", 65, now,
+                                         unit="count/min")], date="other"),
+                            approved, approved_types=frozenset({"heartRate"}))
+    assert other["accepted"] == 1
+    unrelated = export([row("heartRate", 66, now - timedelta(hours=1),
+                            unit="count/min")], date="unrelated-held")
+    assert _ingest_tuanhdo(repo, unrelated, frozenset())["held"] == 1
+    types = frozenset({"sleepAnalysis", "restingHeartRate"})
+    reviewed = _review_held_tuanhdo(repo, approved, approved_types=types,
+                                    derived_watch=derived, batch_key=batch_key)
+    assert reviewed["promoted"] == 56 and reviewed["reviewed"] == 56
+    operation_id = reviewed["operation_id"]
+    assert repo.conn.execute("SELECT count(*) FROM health_os_tuanhdo_promotion_links "
+                             "WHERE operation_id=?", (operation_id,)).fetchone()[0] == 56
+    brief_before = repo.brief(now)
+    assert brief_before["decision"] == "INFORMATIVO"
+    assert brief_before["confidence"] == "low"
+    assert [entry["valid_days"] for entry in brief_before["coverage"]] == [28, 28]
+    linked = dict(repo.conn.execute(
+        "SELECT o.event_key,o.payload_enc FROM health_os_observations AS o "
+        "JOIN health_os_tuanhdo_promotion_links AS l ON l.core_event_key=o.event_key "
+        "WHERE l.operation_id=?", (operation_id,)))
+    assert len(linked) == 56
+    with pytest.raises(ValueError, match="expected count"):
+        reverse_tuanhdo_operation(repo, operation_id, batch_key=batch_key, expected=55)
+    with pytest.raises(ValueError, match="operation not found for batch"):
+        reverse_tuanhdo_operation(repo, operation_id, batch_key="other", expected=56)
+    result = reverse_tuanhdo_operation(repo, operation_id,
+                                      batch_key=batch_key, expected=56)
+    assert result == {"reversed": 56, "total_reversed": 56, "replayed": False}
+    assert core_count(repo) == 1
+    saved = dict(repo.conn.execute(
+        "SELECT event_key,payload_enc FROM health_os_quarantine "
+        "WHERE reason='operator_reversed_tuanhdo'"))
+    assert saved == linked and all(WATCH[0] not in blob for blob in saved.values())
+    assert repo.conn.execute("SELECT count(*) FROM health_os_tuanhdo_records "
+                             "WHERE batch_key=? AND disposition='reversed'",
+                             (batch_key,)).fetchone()[0] == 56
+    assert repo.conn.execute("SELECT status FROM health_os_tuanhdo_promotion_ops "
+                             "WHERE operation_id=?", (operation_id,)).fetchone()[0] == "reversed"
+    brief_after = repo.brief(now)
+    assert [entry["valid_days"] for entry in brief_after["coverage"]] == [0, 0]
+    assert brief_after["decision"] == "ABSTENERSE"
+    assert reverse_tuanhdo_operation(repo, operation_id,
+                                     batch_key=batch_key, expected=56)["replayed"] is True
+    replay = _ingest_tuanhdo(repo, payload, approved, approved_types=types,
+                             derived_watch=derived)
+    assert replay["replayed"] is True and replay["reversed"] == 56
+    reexport = _ingest_tuanhdo(repo, export(readiness_rows, date="new-header"),
+                               approved, approved_types=types, derived_watch=derived)
+    assert reexport["accepted"] == 0
+    assert reexport["reasons"] == {"previously_reversed": 56}
+    same_core_key = dict(readiness_rows[1])
+    same_core_key["device"] = WATCH[0]  # different fingerprint, identical core key
+    reserved = _ingest_tuanhdo(repo, export([same_core_key], date="changed-metadata"),
+                               approved, approved_types=types, derived_watch=derived)
+    assert reserved["reasons"] == {"core_key_previously_linked": 1}
+    native_retry = repo.ingest("APPLE_HEALTH", [{"metric": "resting_heart_rate",
+        "value": 60, "unit": "bpm", "observed_at": same_core_key["endDate"],
+        "provenance_id": "different-synthetic-path", "device_source": "apple_watch"}], [])
+    assert native_retry["accepted"] == 0
+    assert native_retry["rejected"] == ["operator_reversed_tuanhdo"]
+    latest_batch = repo.conn.execute(
+        "SELECT batch_key FROM health_os_tuanhdo_batches ORDER BY rowid DESC LIMIT 1").fetchone()[0]
+    assert _review_held_tuanhdo(repo, approved, batch_key=latest_batch,
+                                approved_types=types,
+                                derived_watch=derived)["promoted"] == 0
+    assert core_count(repo) == 1
+
+
+def test_reversal_mid_operation_failure_is_atomic_and_retryable():
+    repo = local_repo()
+    approved = frozenset({tuple(WATCH)})
+    now = datetime.now(timezone.utc)
+    rows = [row("heartRate", 60 + i, now - timedelta(minutes=i),
+                unit="count/min") for i in range(2)]
+    _ingest_tuanhdo(repo, export(rows), frozenset())
+    batch_key = repo.conn.execute("SELECT batch_key FROM health_os_tuanhdo_batches").fetchone()[0]
+    reviewed = _review_held_tuanhdo(repo, approved,
+                                    approved_types=frozenset({"heartRate"}),
+                                    batch_key=batch_key)
+    operation_id = reviewed["operation_id"]
+    assert core_count(repo) == 2
+    repo.conn.execute("CREATE TEMP TRIGGER fail_second_quarantine "
+                      "BEFORE INSERT ON health_os_quarantine "
+                      "WHEN (SELECT count(*) FROM health_os_quarantine)>=1 "
+                      "BEGIN SELECT RAISE(ABORT,'synthetic midway failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic midway failure"):
+        reverse_tuanhdo_operation(repo, operation_id,
+                                  batch_key=batch_key, expected=2)
+    assert core_count(repo) == 2
+    assert repo.conn.execute("SELECT count(*) FROM health_os_quarantine").fetchone()[0] == 0
+    assert repo.conn.execute("SELECT count(*) FROM health_os_tuanhdo_records "
+                             "WHERE disposition='accepted'").fetchone()[0] == 2
+    assert repo.conn.execute("SELECT status FROM health_os_tuanhdo_promotion_ops "
+                             "WHERE operation_id=?", (operation_id,)).fetchone()[0] == "committed"
+    repo.conn.execute("DROP TRIGGER fail_second_quarantine")
+    assert reverse_tuanhdo_operation(repo, operation_id,
+                                     batch_key=batch_key, expected=2)["reversed"] == 2
+    assert core_count(repo) == 0
+
+
+def test_reversal_quarantine_collision_aborts_without_touching_core():
+    repo = local_repo()
+    approved = frozenset({tuple(WATCH)})
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    _ingest_tuanhdo(repo, export([row("heartRate", 60, point,
+                                     unit="count/min")]), frozenset())
+    batch_key = repo.conn.execute("SELECT batch_key FROM health_os_tuanhdo_batches").fetchone()[0]
+    op = _review_held_tuanhdo(repo, approved, approved_types=frozenset({"heartRate"}),
+                              batch_key=batch_key)["operation_id"]
+    core = repo.conn.execute("SELECT event_key,source,payload_enc "
+                             "FROM health_os_observations").fetchone()
+    repo.conn.execute("INSERT INTO health_os_quarantine"
+                      "(source_table,event_key,source,reason,payload_enc) VALUES (?,?,?,?,?)",
+                      ("health_os_observations", core["event_key"], core["source"],
+                       "synthetic_collision", core["payload_enc"]))
+    repo.conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        reverse_tuanhdo_operation(repo, op, batch_key=batch_key, expected=1)
+    assert core_count(repo) == 1
+    assert repo.conn.execute("SELECT disposition FROM health_os_tuanhdo_records").fetchone()[0] == "accepted"
+    assert repo.conn.execute("SELECT status FROM health_os_tuanhdo_promotion_ops "
+                             "WHERE operation_id=?", (op,)).fetchone()[0] == "committed"
+
+
+def test_direct_ingest_promotion_has_reversible_operation_link():
+    repo = local_repo()
+    approved = frozenset({tuple(WATCH)})
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    result = _ingest_tuanhdo(repo, export([row("heartRate", 60, point,
+                                              unit="count/min")]), approved,
+                             approved_types=frozenset({"heartRate"}))
+    assert result["accepted"] == 1
+    operation = repo.conn.execute(
+        "SELECT operation_id,batch_key,kind,promoted_count FROM health_os_tuanhdo_promotion_ops"
+    ).fetchone()
+    assert (operation["kind"], operation["promoted_count"]) == ("ingest", 1)
+    assert reverse_tuanhdo_operation(repo, operation["operation_id"],
+        batch_key=operation["batch_key"], expected=1)["reversed"] == 1
+    assert core_count(repo) == 0
+
+
+def test_reversal_and_direct_ingest_serialize_across_connections(tmp_path, monkeypatch):
+    db_path = tmp_path / "reversal-race.db"
+    def open_repo():
+        conn = sqlite3.connect(db_path, timeout=3, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return HealthOSRepository(conn, "synthetic-data-key" * 3)
+
+    reverser = open_repo()
+    ingesting = open_repo()
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    receipt = _ingest_tuanhdo(
+        reverser, export([row("heartRate", 60, point, unit="count/min")]),
+        frozenset({tuple(WATCH)}), approved_types=frozenset({"heartRate"}),
+    )
+    assert receipt["accepted"] == 1
+    operation = reverser.conn.execute(
+        "SELECT operation_id,batch_key FROM health_os_tuanhdo_promotion_ops"
+    ).fetchone()
+    encrypted = reverser.conn.execute(
+        "SELECT payload_enc FROM health_os_observations"
+    ).fetchone()[0]
+    observation = json.loads(store.decrypt(reverser.data_key, encrypted))
+    checked_quarantine = Event()
+    resume_ingest = Event()
+    original_encrypt = store.encrypt
+
+    def pause_after_guard(key, value):
+        if value == json.dumps(observation, sort_keys=True):
+            checked_quarantine.set()
+            assert resume_ingest.wait(3)
+        return original_encrypt(key, value)
+
+    monkeypatch.setattr(store, "encrypt", pause_after_guard)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            ingest_future = pool.submit(ingesting.ingest, APPLE_HEALTH, [observation], [])
+            assert checked_quarantine.wait(3)
+            reverse_future = pool.submit(
+                reverse_tuanhdo_operation, reverser, operation["operation_id"],
+                batch_key=operation["batch_key"], expected=1,
+            )
+            with pytest.raises(FutureTimeout):
+                reverse_future.result(timeout=0.2)
+            resume_ingest.set()
+            assert ingest_future.result(timeout=3) == {
+                "accepted": 0, "duplicates": 1, "rejected": [],
+            }
+            assert reverse_future.result(timeout=3)["reversed"] == 1
+    finally:
+        resume_ingest.set()
+        ingesting.conn.close()
+        reverser.conn.close()
+
+    verifier = sqlite3.connect(db_path)
+    try:
+        assert verifier.execute("SELECT count(*) FROM health_os_observations").fetchone()[0] == 0
+        assert verifier.execute("SELECT count(*) FROM health_os_quarantine WHERE reason=?",
+                                ("operator_reversed_tuanhdo",)).fetchone()[0] == 1
+    finally:
+        verifier.close()
+
+
+def test_cached_reader_sees_external_reversal_but_not_rolled_back_attempt(tmp_path):
+    db_path = tmp_path / "external-reversal.db"
+    def open_repo():
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return HealthOSRepository(conn, "synthetic-data-key" * 3)
+
+    writer = open_repo()
+    reader = open_repo()
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    now = point + timedelta(hours=1)
+    try:
+        writer.set_apple_transition(point - timedelta(days=1))
+        assert _ingest_tuanhdo(
+            writer, export([row("heartRate", 60, point, unit="count/min")]),
+            frozenset({tuple(WATCH)}), approved_types=frozenset({"heartRate"}),
+        )["accepted"] == 1
+        operation = writer.conn.execute(
+            "SELECT operation_id,batch_key FROM health_os_tuanhdo_promotion_ops"
+        ).fetchone()
+        writer.conn.execute(
+            "CREATE TRIGGER abort_reversal BEFORE INSERT ON health_os_quarantine "
+            "BEGIN SELECT RAISE(ABORT,'synthetic rollback'); END"
+        )
+        writer.conn.commit()
+        assert reader.quality(now)["coverage_days"] == 1
+        cached = reader._scan_cache
+        with pytest.raises(sqlite3.IntegrityError, match="synthetic rollback"):
+            reverse_tuanhdo_operation(
+                writer, operation["operation_id"], batch_key=operation["batch_key"],
+                expected=1,
+            )
+        assert reader.quality(now)["coverage_days"] == 1
+        assert reader._scan_cache is cached
+        writer.conn.execute("DROP TRIGGER abort_reversal")
+        writer.conn.commit()
+        assert reverse_tuanhdo_operation(
+            writer, operation["operation_id"], batch_key=operation["batch_key"],
+            expected=1,
+        )["reversed"] == 1
+        assert reader.quality(now)["coverage_days"] == 0
+        assert reader._scan_cache is not cached
+    finally:
+        reader.conn.close()
+        writer.conn.close()
+
+
+def test_derived_source_service_config_is_closed_and_requires_watch_anchor(tmp_path, monkeypatch):
+    app = client(tmp_path, monkeypatch, allow_watch=True,
+                 promote_types=["restingHeartRate"],
+                 derived_sources=[WATCH[:2]])
+    point = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    body = export([row("restingHeartRate", 60, point,
+                       unit="count/min", detail=False)])
+    receipt = app.post("/health-os/ingest/tuanhdo", json=body, headers=INGEST).json()
+    assert receipt["reasons"] == {"approved_derived_source_match": 1}
+    assert counts(tmp_path / "h.db") == (1, 1, 1)
+    with pytest.raises(ValueError, match="derived source"):
+        client(tmp_path, monkeypatch, allow_watch=False,
+               derived_sources=[WATCH[:2]])
 
 
 def test_wrong_export_shape_and_oversize_body_never_enter_staging(tmp_path, monkeypatch):
@@ -261,12 +690,16 @@ def test_held_provenance_requires_explicit_review_then_is_idempotent():
     resent = ingest_tuanhdo(repo, export([sample], date="B"), approved)
     assert resent["duplicates"] == 0 and resent["reasons"] == {"previous_held": 1}
     assert core_count(repo) == 0
-    reviewed = review_held_tuanhdo(repo, approved)
-    assert reviewed == {"reviewed": 2, "promoted": 1, "duplicates_marked": 1, "still_held": 0}
+    batches = [record[0] for record in repo.conn.execute(
+        "SELECT batch_key FROM health_os_tuanhdo_batches ORDER BY rowid")]
+    first_review = review_held_tuanhdo(repo, approved, batches[0])
+    second_review = review_held_tuanhdo(repo, approved, batches[1])
+    assert (first_review["reviewed"], first_review["promoted"]) == (1, 1)
+    assert (second_review["reviewed"], second_review["duplicates_marked"]) == (1, 1)
     assert core_count(repo) == 1
     assert ingest_tuanhdo(repo, export([sample], date="A"), approved)["accepted"] == 1
     assert ingest_tuanhdo(repo, export([sample], date="B"), approved)["duplicates"] == 1
-    assert review_held_tuanhdo(repo, approved)["reviewed"] == 0
+    assert review_held_tuanhdo(repo, approved, batches[0])["reviewed"] == 0
 
 
 def test_concurrent_exact_retries_promote_once():
@@ -332,8 +765,11 @@ def test_additive_points_remain_encrypted_and_held_across_reexport_and_review(ki
     assert core_count(repo) == 0
     assert ingest_tuanhdo(repo, first, approved)["replayed"] is True
     assert ingest_tuanhdo(repo, second, approved)["replayed"] is True
-    assert review_held_tuanhdo(repo, approved) == {
-        "reviewed": 0, "promoted": 0, "duplicates_marked": 0, "still_held": 0}
+    for batch in repo.conn.execute("SELECT batch_key FROM health_os_tuanhdo_batches"):
+        reviewed = review_held_tuanhdo(repo, approved, batch[0])
+        assert len(reviewed.pop("operation_id")) == 32
+        assert reviewed == {
+            "reviewed": 0, "promoted": 0, "duplicates_marked": 0, "still_held": 0}
     assert core_count(repo) == 0
     assert repo.conn.execute("SELECT COUNT(*) FROM health_os_tuanhdo_batches").fetchone()[0] == 2
     assert repo.conn.execute("SELECT COUNT(*) FROM health_os_tuanhdo_records").fetchone()[0] == 2

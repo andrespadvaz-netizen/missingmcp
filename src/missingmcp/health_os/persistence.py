@@ -56,10 +56,11 @@ class HealthOSRepository:
                  legacy_key: str | None = None) -> None:
         self.conn, self.data_key, self.health_timezone = conn, data_key, health_timezone
         self._write_lock = RLock()
-        # Decrypting every stored row took ~35 s in production (Oct 2026).  The
-        # service is single-process and every write goes through this object,
-        # so the scan is cached in memory and dropped on each write.
+        # Decrypting every stored row took ~35 s in production (Oct 2026).
+        # Local writes invalidate the scan; SQLite data_version detects commits
+        # made through another connection, including a separate operator process.
         self._scan_cache: tuple[HealthOS, list[dict[str, str]]] | None = None
+        self._scan_cache_version: int | None = None
         conn.executescript(_SCHEMA)
         conn.commit()
         # Existing deployments encrypted the three private Health OS tables
@@ -107,7 +108,18 @@ class HealthOSRepository:
     def ingest(self, source: str, observations: list[Mapping[str, Any]], workouts: list[Mapping[str, Any]],
                *, commit: bool = True) -> dict[str, Any]:
         with self._write_lock:
-            return self._ingest_locked(source, observations, workouts, commit=commit)
+            # The quarantine guard in _ingest_locked must share a SQLite write
+            # transaction with the eventual insert.  A process-local lock does
+            # not serialize another connection performing a reversal.
+            owns_transaction = not self.conn.in_transaction
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                return self._ingest_locked(source, observations, workouts, commit=commit)
+            except Exception:
+                if owns_transaction:
+                    self.conn.rollback()
+                raise
 
     def _ingest_locked(self, source: str, observations: list[Mapping[str, Any]],
                        workouts: list[Mapping[str, Any]], *, commit: bool) -> dict[str, Any]:
@@ -126,6 +138,11 @@ class HealthOSRepository:
                 value, unit = _canonical_unit(item.metric, item.value, item.unit)
                 key = HealthOS._observation_key(MetricObservation(
                     item.metric, value, unit, item.observed_at, item.source, item.provenance_id, item.semantic))
+                if self.conn.execute(
+                    "SELECT 1 FROM health_os_quarantine WHERE source_table='health_os_observations' "
+                    "AND event_key=? AND reason='operator_reversed_tuanhdo'", (key,),
+                ).fetchone() is not None:
+                    raise ValueError("operator_reversed_tuanhdo")
                 encrypted = store.encrypt(self.data_key, json.dumps(dict(raw), sort_keys=True))
                 prior = self.conn.execute("SELECT payload_enc FROM health_os_observations WHERE event_key = ?", (key,)).fetchone()
                 if prior:
@@ -166,11 +183,21 @@ class HealthOSRepository:
 
     def _invalidate(self) -> None:
         self._scan_cache = None
+        self._scan_cache_version = None
 
     def _scan(self) -> tuple[HealthOS, list[dict[str, str]]]:
-        if self._scan_cache is None:
-            self._scan_cache = self._scan_uncached()
-        return self._scan_cache
+        with self._write_lock:
+            while True:
+                version = self.conn.execute("PRAGMA data_version").fetchone()[0]
+                if self._scan_cache is not None and version == self._scan_cache_version:
+                    return self._scan_cache
+                scan = self._scan_uncached()
+                # If an external writer committed during the multi-query scan,
+                # try again rather than cache a mixed or obsolete view.
+                if version == self.conn.execute("PRAGMA data_version").fetchone()[0]:
+                    self._scan_cache = scan
+                    self._scan_cache_version = version
+                    return scan
 
     def _scan_uncached(self) -> tuple[HealthOS, list[dict[str, str]]]:
         """Load valid evidence and list every stored row that cannot count.

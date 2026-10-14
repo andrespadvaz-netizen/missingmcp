@@ -39,6 +39,16 @@ def build_health_os_app(config: Config) -> Starlette:
     ):
         raise ValueError("HEALTH_OS_TUANHDO_WATCH_PROVENANCE must contain exact four-field lists")
     approved_watch = frozenset(tuple(item) for item in watch_config)
+    derived_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_DERIVED_WATCH_SOURCES", "[]"))
+    if not isinstance(derived_config, list) or any(
+        not isinstance(item, list) or len(item) != 2 or
+        any(not isinstance(field, str) or not field for field in item)
+        for item in derived_config
+    ):
+        raise ValueError("HEALTH_OS_TUANHDO_DERIVED_WATCH_SOURCES must contain exact two-field lists")
+    derived_watch = frozenset(tuple(item) for item in derived_config)
+    if any(not any(watch[:2] == pair for watch in approved_watch) for pair in derived_watch):
+        raise ValueError("each derived source must match an approved four-field Watch tuple")
     type_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_PROMOTE_TYPES", "[]"))
     if not isinstance(type_config, list) or any(
         not isinstance(item, str) or not item for item in type_config
@@ -96,7 +106,8 @@ def build_health_os_app(config: Config) -> Starlette:
             return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
         try:
             receipt = ingest_tuanhdo(repo, json.loads(raw.decode("utf-8")), approved_watch,
-                                     approved_types=approved_types)
+                                     approved_types=approved_types,
+                                     derived_watch=derived_watch)
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **receipt}, headers={"Cache-Control": "no-store"})

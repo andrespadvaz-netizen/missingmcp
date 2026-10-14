@@ -36,7 +36,8 @@ EMERGENCY_LEGEND = ("Health OS apoya la decisión; no diagnostica ni sustituye e
                     "alteración del habla, falta de aire intensa o pérdida de respuesta, llama al 911 "
                     "sin esperar al sistema.")
 NON_EVIDENCE_SEMANTICS = frozenset({"model_interpreted", "chatgpt_health_transcription"})
-# Producer families written into Apple Health.  Política Operativa v0.5, 4.3:
+# Producer families written into Apple Health, not hardware attestations.
+# Política Operativa v0.5, 4.3:
 # a device change restarts the baseline, so only Apple Watch (or legacy rows
 # without a family) may feed Apple-era baselines and decisions.
 DEVICE_FAMILIES = frozenset({"apple_watch", "garmin", "iphone", "other_app"})
@@ -430,6 +431,15 @@ class HealthOS:
         missing = tuple(metric for metric in required if not self.metric_has_stable_baseline(metric, now))
         if missing:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
+        if any(x.metric in required and x.confidence == "watch_source_only"
+               and self._apple_era_evidence(x)
+               and x.observed_at >= self._apple_baseline_started
+               and self.local_day(x.observed_at) >=
+               (now.astimezone(self.timezone).date() - timedelta(days=_BASELINE_WINDOW_DAYS)).isoformat()
+               for x in self._observations.values()):
+            return DecisionAssessment(DecisionState.INFORMATIVO, "low",
+                                      ("Apple Watch source matched; device metadata absent for a readiness metric",),
+                                      (), False)
         # A stable baseline allows only an informational presentation.  It is
         # not a medical clearance, diagnosis, prescription or training order.
         return DecisionAssessment(DecisionState.INFORMATIVO, "medium", ("Apple Health coverage and metric-specific baselines are stable",), (), False)
