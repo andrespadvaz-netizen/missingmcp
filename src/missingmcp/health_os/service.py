@@ -28,7 +28,8 @@ def build_health_os_app(config: Config) -> Starlette:
     if not config.health_os_ingest_key or not config.health_os_read_key or not config.health_os_data_key:
         raise ValueError("HEALTH_OS_INGEST_KEY, HEALTH_OS_READ_KEY and HEALTH_OS_DATA_KEY are required for the isolated Health OS service")
     repo = HealthOSRepository(store.init_db(config.db_path), config.health_os_data_key,
-                              config.health_os_timezone, legacy_key=config.gateway_secret)
+                              config.health_os_timezone, legacy_key=config.gateway_secret,
+                              sleep_series_mode=config.health_os_sleep_series_mode)
     # Exact identifiers are operator configuration, never guessed from a
     # friendly source name. Without this setting, submissions stay in staging.
     watch_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", "[]"))

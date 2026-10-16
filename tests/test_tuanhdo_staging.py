@@ -46,7 +46,7 @@ def review_held_tuanhdo(repo, approved, batch_key):
 
 
 def client(tmp_path, monkeypatch, *, allow_watch=False, promote_types=None,
-           derived_sources=None):
+           derived_sources=None, sleep_mode="off"):
     if allow_watch:
         monkeypatch.setenv("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", json.dumps([WATCH]))
         monkeypatch.setenv("HEALTH_OS_TUANHDO_PROMOTE_TYPES", json.dumps(promote_types if promote_types is not None else [
@@ -62,8 +62,21 @@ def client(tmp_path, monkeypatch, *, allow_watch=False, promote_types=None,
         monkeypatch.setenv("HEALTH_OS_TUANHDO_DERIVED_WATCH_SOURCES", json.dumps(derived_sources))
     keys = {"GATEWAY_SECRET": "g" * 40, "HEALTH_OS_INGEST_KEY": "i" * 40,
             "HEALTH_OS_READ_KEY": "r" * 40, "HEALTH_OS_DATA_KEY": "d" * 40,
-            "DB_PATH": str(tmp_path / "h.db"), "DATA_DIR": str(tmp_path)}
+            "DB_PATH": str(tmp_path / "h.db"), "DATA_DIR": str(tmp_path),
+            "HEALTH_OS_SLEEP_SERIES_MODE": sleep_mode}
     return TestClient(build_health_os_app(load_config(keys)), raise_server_exceptions=False)
+
+
+def test_http_service_activates_approved_sleep_cutover(tmp_path, monkeypatch):
+    app = client(tmp_path, monkeypatch, allow_watch=True, sleep_mode="active")
+    cut = datetime.fromisoformat("2026-10-16T00:00:00-06:00")
+    body = export([row("sleepAnalysis", 3, cut + timedelta(hours=1),
+                       cut + timedelta(hours=2))])
+    receipt = app.post("/health-os/ingest/tuanhdo", json=body, headers=INGEST).json()
+    assert receipt["accepted"] == 1
+    assert receipt["reasons"] == {"approved_sleep_series_metadata_match": 1}
+    months = app.get("/health-os/history", headers=READ).json()["history"]["months"]
+    assert any(x.get("series") == "validated_2026_10_16" for x in months)
 
 
 def row(kind, value, start, end=None, *, unit=None, source=True, detail=True):

@@ -154,9 +154,15 @@ def _interval_conflict(repo: HealthOSRepository, sample: Sample) -> bool:
         try:
             interval = json.loads(store.decrypt(repo.data_key, row["interval_enc"]))
             start, end = datetime.fromisoformat(interval["start"]), datetime.fromisoformat(interval["end"])
-        except (IndexError, TypeError, ValueError, KeyError, UnicodeError, InvalidTag):
+            if start.tzinfo is None or end.tzinfo is None or start >= end:
+                return True
+        except (IndexError, TypeError, ValueError, KeyError, UnicodeError, AttributeError, InvalidTag):
             # A damaged interval cannot justify another additive observation.
             return True
+        if (sample.metric == "sleep_duration" and repo.sleep_series_start is not None
+                and start < repo.sleep_series_start):
+            # Legacy intervals do not enter the separate current sleep series.
+            continue
         if max(sample.start_at, start) < min(sample.end_at, end):
             return True
     return False
@@ -185,6 +191,13 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
         return "held", "provenance_incomplete" if incomplete else "source_unverified", None
     if sample.exported_type not in approved_types:
         return "held", "metric_not_approved", None
+    new_sleep = sample.metric == "sleep_duration" and repo.sleep_series_start is not None
+    if new_sleep:
+        if sample.start_at < repo.sleep_series_start:
+            return "held", ("sleep_crosses_series_cut" if sample.end_at > repo.sleep_series_start
+                            else "sleep_before_series_cut"), None
+        if repo.sleep_series_mode == "paused":
+            return "held", "sleep_series_paused", None
     prior = repo.conn.execute(
         "SELECT disposition FROM health_os_tuanhdo_records WHERE fingerprint=?",
         (_fingerprint_token(repo, sample),),
@@ -199,7 +212,7 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
         return "held", "previous_held", None
     try:
         observation, core_key = _normalized(sample, match)
-        if sample.metric in unknown_intervals:
+        if sample.metric in unknown_intervals and not new_sleep:
             return "held", "legacy_interval_unknown", None
         if _interval_conflict(repo, sample):
             return "held", "interval_overlap_existing", None
@@ -214,6 +227,9 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
             return "held", "core_key_previously_linked", None
         result = repo.ingest(APPLE_HEALTH, [observation], [], commit=False)
         if result["accepted"] == 1:
+            if new_sleep:
+                return "accepted", ("approved_sleep_series_metadata_match" if match == "device"
+                                    else "approved_sleep_series_derived_source_match"), core_key
             return "accepted", ("approved_metadata_match" if match == "device"
                                 else "approved_derived_source_match"), core_key
     except (TypeError, ValueError):
@@ -285,6 +301,7 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
     conn.executescript(_SCHEMA)
     try:
         conn.execute("BEGIN IMMEDIATE")
+        repo._assert_sleep_series_mode_current()
         previous = conn.execute(
             "SELECT receipt_json FROM health_os_tuanhdo_batches WHERE batch_key=?",
             (batch_key,),
@@ -370,6 +387,7 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
     outcome: Counter[str] = Counter()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        repo._assert_sleep_series_mode_current()
         if conn.execute(
                 "SELECT 1 FROM health_os_tuanhdo_batches WHERE batch_key=?",
                 (batch_key,)).fetchone() is None:
@@ -377,7 +395,8 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
         query = ("SELECT batch_key, record_index FROM health_os_tuanhdo_records "
                  "WHERE disposition='held' AND reason IN "
                  "('source_unverified','previous_held','metric_not_approved',"
-                 "'provenance_incomplete','device_conflict')")
+                 "'provenance_incomplete','device_conflict','legacy_interval_unknown',"
+                 "'sleep_series_paused')")
         candidates = conn.execute(query + " AND batch_key=? ORDER BY rowid",
                                   (batch_key,)).fetchall()
         operation_id = _start_promotion_op(conn, batch_key, "held_review", approved_types)
@@ -452,6 +471,7 @@ def reverse_tuanhdo_operation(repo: HealthOSRepository, operation_id: str, *,
         conn.executescript(_SCHEMA)
         try:
             conn.execute("BEGIN IMMEDIATE")
+            repo._assert_sleep_series_mode_current()
             operation = conn.execute(
                 "SELECT batch_key,promoted_count,status FROM health_os_tuanhdo_promotion_ops "
                 "WHERE operation_id=?", (operation_id,),

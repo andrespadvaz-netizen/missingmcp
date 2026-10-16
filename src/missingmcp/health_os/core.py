@@ -242,11 +242,14 @@ class HealthOS:
     this class owns semantics, idempotence, provenance, and safety checks.
     """
 
-    def __init__(self, timezone: str | tzinfo = "America/Mexico_City") -> None:
+    def __init__(self, timezone: str | tzinfo = "America/Mexico_City", *,
+                 sleep_series_start: datetime | None = None) -> None:
         # Deployments use the IANA name; accepting a tzinfo keeps tests and
         # offline import tools deterministic even on hosts without a zoneinfo DB.
         self.timezone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
         self._observations: dict[str, MetricObservation] = {}
+        self._sleep_series_start = sleep_series_start
+        self._sleep_series_keys: set[str] = set()
         self._workouts: dict[str, WorkoutSession] = {}
         self._workout_links: dict[str, set[str]] = {}
         self._apple_baseline_started: datetime | None = None
@@ -259,6 +262,18 @@ class HealthOS:
     def _apple_era_evidence(item: "MetricObservation") -> bool:
         return (item.source == APPLE_HEALTH and item.semantic not in NON_EVIDENCE_SEMANTICS
                 and item.device_source not in _NON_WATCH_FAMILIES)
+
+    def set_sleep_series_keys(self, keys: set[str]) -> None:
+        """Activate only verified, linked post-cutover sleep for current use."""
+        self._sleep_series_keys = set(keys)
+
+    def _current_evidence(self, item: MetricObservation) -> bool:
+        if not self._apple_era_evidence(item):
+            return False
+        if item.metric != "sleep_duration" or self._sleep_series_start is None:
+            return True
+        return (item.observed_at >= self._sleep_series_start
+                and self._observation_key(item) in self._sleep_series_keys)
 
     def record_persisted_invalid(self) -> None:
         self._persisted_invalid_records += 1
@@ -369,7 +384,7 @@ class HealthOS:
         if self._apple_baseline_started is None or at < self._apple_baseline_started:
             return BaselineEra.GARMIN
         coverage = {o.observed_at.astimezone(self.timezone).date() for o in self._observations.values()
-                    if self._apple_era_evidence(o) and o.observed_at >= self._apple_baseline_started}
+                    if self._current_evidence(o) and o.observed_at >= self._apple_baseline_started}
         if len(coverage) < 14:
             return BaselineEra.APPLE_TRANSITION
         return BaselineEra.APPLE_BASELINE
@@ -392,7 +407,7 @@ class HealthOS:
             return 0
         lower_day = (at.astimezone(self.timezone).date() - timedelta(days=window_days)).isoformat()
         return len({self.local_day(x.observed_at) for x in self._observations.values()
-                    if self._apple_era_evidence(x) and x.metric == metric
+                    if self._current_evidence(x) and x.metric == metric
                     and x.observed_at >= self._apple_baseline_started
                     and self.local_day(x.observed_at) >= lower_day})
 
@@ -432,7 +447,7 @@ class HealthOS:
         if missing:
             return DecisionAssessment(DecisionState.ABSTENERSE, "low", ("Apple baseline is still metric-specific and incomplete",), missing, False)
         if any(x.metric in required and x.confidence == "watch_source_only"
-               and self._apple_era_evidence(x)
+               and self._current_evidence(x)
                and x.observed_at >= self._apple_baseline_started
                and self.local_day(x.observed_at) >=
                (now.astimezone(self.timezone).date() - timedelta(days=_BASELINE_WINDOW_DAYS)).isoformat()
@@ -462,7 +477,7 @@ class HealthOS:
         start = self._apple_baseline_started
         buckets: dict[str, list[float]] = {}
         for item in self._observations.values():
-            if (not self._apple_era_evidence(item) or item.metric != metric
+            if (not self._current_evidence(item) or item.metric != metric
                     or start is None or item.observed_at < start):
                 continue
             buckets.setdefault(self.local_day(item.observed_at), []).append(item.value)
@@ -554,25 +569,33 @@ class HealthOS:
     }
 
     def monthly_history(self) -> list[dict[str, object]]:
-        daily: dict[tuple[str, str, str], list[float]] = {}
+        daily: dict[tuple[str, str, str, str], list[float]] = {}
         for item in self._observations.values():
             if (item.source != APPLE_HEALTH or item.semantic in NON_EVIDENCE_SEMANTICS
                     or item.metric not in self._HISTORY_METRICS):
                 continue
-            key = (item.metric, item.device_source or "untagged", self.local_day(item.observed_at))
+            series = ""
+            if item.metric == "sleep_duration" and self._sleep_series_start is not None:
+                series = ("validated_2026_10_16" if self._current_evidence(item)
+                          else "legacy_unverified_interval")
+            key = (item.metric, item.device_source or "untagged", series,
+                   self.local_day(item.observed_at))
             daily.setdefault(key, []).append(item.value)
-        monthly: dict[tuple[str, str, str], list[float]] = {}
-        for (metric, family, day), values in daily.items():
+        monthly: dict[tuple[str, str, str, str], list[float]] = {}
+        for (metric, family, series, day), values in daily.items():
             value = sum(values) if self._HISTORY_METRICS[metric] == "sum" else sum(values) / len(values)
-            monthly.setdefault((metric, family, day[:7]), []).append(value)
+            monthly.setdefault((metric, family, series, day[:7]), []).append(value)
         rows = []
-        for (metric, family, month), values in sorted(monthly.items()):
-            rows.append({
+        for (metric, family, series, month), values in sorted(monthly.items()):
+            row = {
                 "metric": metric, "device_source": family, "month": month,
                 "aggregate": "mean_of_daily_totals" if self._HISTORY_METRICS[metric] == "sum" else "mean_of_daily_means",
                 "value": round(sum(values) / len(values), 1), "valid_days": len(values),
                 "rule": "tendencia-descriptiva v0.1",
-            })
+            }
+            if series:
+                row["series"] = series
+            rows.append(row)
         return rows
 
     def local_day(self, at: datetime) -> str:
@@ -583,7 +606,7 @@ class HealthOS:
             raise ValueError("now must be timezone-aware")
         # Freshness and coverage follow Apple Watch (or untagged legacy) evidence:
         # iPhone or Garmin rows arriving cannot hide that the Watch stopped syncing.
-        apple = [x for x in self._observations.values() if self._apple_era_evidence(x)]
+        apple = [x for x in self._observations.values() if self._current_evidence(x)]
         days = {self.local_day(x.observed_at) for x in apple}
         stale = not apple or max(x.observed_at for x in apple) < now - timedelta(days=2)
         mixed = [x.metric for x in self._observations.values() if x.source == GARMIN_LEGACY and self.baseline_era(x.observed_at) != BaselineEra.GARMIN]
