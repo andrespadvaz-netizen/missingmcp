@@ -6,12 +6,14 @@ hint; it is never represented as an original HealthKit UUID.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import hmac
 import json
 from typing import Any, Mapping
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidTag
 
@@ -57,7 +59,12 @@ CREATE INDEX IF NOT EXISTS health_os_tuanhdo_links_operation
 # deviceDetail.softwareVersion) tuples approved as Apple Watch evidence.
 WatchProvenance = frozenset[tuple[str, str, str, str]]
 DerivedWatchProvenance = frozenset[tuple[str, str]]
+AdditiveWatchSelection = Mapping[str, tuple[str, str, str, str]]
 _DEVICE_OPTIONAL_TYPES = frozenset({"restingHeartRate", "sleepAnalysis"})
+_GENERIC_WATCH_TYPES = frozenset({
+    "heartRate", "heartRateVariabilitySDNN", "stepCount", "distanceWalkingRunning",
+    "activeEnergyBurned", "appleExerciseTime", "flightsClimbed", "respiratoryRate",
+})
 _ADDITIVE = frozenset({
     "sleep_duration", "steps", "distance", "active_energy",
     "exercise_time", "stand_time", "flights_climbed",
@@ -73,9 +80,9 @@ def _watch_match(sample: Sample, approved: WatchProvenance,
         if (all(isinstance(value, str) and value for value in fields)
                 and fields in approved
                 and (sample.device in (None, fields[0], fields[2])
-                     or (sample.exported_type in {"heartRate", "heartRateVariabilitySDNN"}
+                     or (sample.exported_type in _GENERIC_WATCH_TYPES
                          and fields[2] == "Watch" and sample.device == "Apple Watch"))):
-            # The export uses the generic Watch label for these two types.
+            # The generic label is only an alias after exact technical proof.
             # It is consistent only after the four exact fields are approved;
             # arbitrary labels, including iPhone, remain conflicts.
             return "device"
@@ -92,8 +99,246 @@ def _watch_match(sample: Sample, approved: WatchProvenance,
     return None
 
 
-def _normalized(sample: Sample, match: str) -> tuple[dict[str, Any], str]:
-    assurance = "device_metadata" if match == "device" else "watch_source_only"
+def _select_additive_watch(samples: tuple[Sample, ...],
+                           selection: AdditiveWatchSelection) -> tuple[Sample, ...]:
+    """Opt-in single-source series for activity; preserve all other holds.
+
+    This does not reconcile pre-existing core rows with unknown intervals.
+    Those remain blocked independently by _promote.
+    """
+    result = list(samples)
+    for index, sample in enumerate(samples):
+        if sample.metric in {"steps", "distance"} and sample.metric not in selection:
+            if sample.hold_reason in {"source_unverified", "quantity_overlap", "core_key_collision"}:
+                result[index] = replace(sample, hold_reason="source_not_selected")
+    for metric, identity in selection.items():
+        chosen = []
+        for index, sample in enumerate(samples):
+            if sample.metric != metric:
+                continue
+            if _watch_match(sample, frozenset({identity}), frozenset()) == "device":
+                chosen.append(index)
+            elif sample.hold_reason in {"source_unverified", "quantity_overlap", "core_key_collision"}:
+                result[index] = replace(sample, hold_reason="source_not_selected")
+        # Re-evaluate overlaps within the selected source. Cross-source
+        # collisions never release a selected row if its own intervals clash.
+        chosen.sort(key=lambda i: (samples[i].start_at, samples[i].end_at))
+        conflicts: set[int] = set()
+        key_groups: dict[tuple[float, str, datetime], list[int]] = {}
+        for index in chosen:
+            sample = samples[index]
+            key = (sample.value, sample.unit, sample.end_at.astimezone(timezone.utc))
+            key_groups.setdefault(key, []).append(index)
+        collisions = {index for indexes in key_groups.values() if len(indexes) > 1
+                      for index in indexes}
+        longest = None
+        for index in chosen:
+            if longest is not None and samples[index].start_at < samples[longest].end_at:
+                conflicts.update((longest, index))
+            if longest is None or samples[index].end_at > samples[longest].end_at:
+                longest = index
+        for index in chosen:
+            if samples[index].hold_reason in {"source_unverified", "quantity_overlap", "core_key_collision"}:
+                result[index] = replace(samples[index], hold_reason=(
+                    "core_key_collision" if index in collisions else
+                    "quantity_overlap" if index in conflicts else "source_unverified"))
+    return tuple(result)
+
+
+def activity_cross_day_exclusions(repo: HealthOSRepository, now: datetime,
+                                  window_days: int = 7) -> dict[tuple[str, str], int]:
+    """Count distinct retained samples on each affected local day, without values."""
+    if repo.activity_series_start is None:
+        return {}
+    if repo.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND "
+                         "name='health_os_tuanhdo_records'").fetchone() is None:
+        return {}
+    zone = ZoneInfo(repo.health_timezone) if isinstance(repo.health_timezone, str) else repo.health_timezone
+    today = now.astimezone(zone).date()
+    counts: dict[tuple[str, str], int] = {}
+    seen: set[tuple[str, str, str]] = set()
+    rows = repo.conn.execute(
+        "SELECT fingerprint,metric,interval_enc FROM health_os_tuanhdo_records "
+        "WHERE disposition='held' AND reason='activity_crosses_local_day'")
+    for row in rows:
+        interval = json.loads(store.decrypt(repo.data_key, row["interval_enc"]))
+        start = datetime.fromisoformat(interval["start"]).astimezone(zone).date()
+        end = (datetime.fromisoformat(interval["end"]) - timedelta(microseconds=1)).astimezone(zone).date()
+        for offset in range(window_days):
+            day = today - timedelta(days=offset)
+            if start <= day <= end:
+                key = (row["metric"], day.isoformat())
+                unique = (row["fingerprint"], *key)
+                if unique not in seen:
+                    seen.add(unique)
+                    counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Sample]:
+    """Only accepted post-cut stages whose staging identity still matches core."""
+    if repo.sleep_series_start is None:
+        return []
+    health = repo._load_health(now)
+    if not health._sleep_series_keys:
+        return []
+    if repo.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                         "AND name='health_os_tuanhdo_records'").fetchone() is None:
+        return []
+    rows = repo.conn.execute(
+        "SELECT r.batch_key,r.record_index,r.fingerprint,l.core_event_key,b.payload_enc "
+        "FROM health_os_tuanhdo_records r "
+        "JOIN health_os_tuanhdo_promotion_links l "
+        "ON l.batch_key=r.batch_key AND l.record_index=r.record_index "
+        "JOIN health_os_tuanhdo_batches b ON b.batch_key=r.batch_key "
+        "WHERE r.disposition='accepted' AND r.metric='sleep_duration'").fetchall()
+    parsed: dict[str, dict[int, Sample]] = {}
+    segments: list[Sample] = []
+    for row in rows:
+        if row["core_event_key"] not in health._sleep_series_keys:
+            continue
+        batch_key = row["batch_key"]
+        if batch_key not in parsed:
+            payload = json.loads(store.decrypt(repo.data_key, row["payload_enc"]))
+            parsed[batch_key] = {sample.record_index: sample
+                                 for sample in parse_health_export(payload).samples}
+        sample = parsed[batch_key].get(row["record_index"])
+        if (sample is None or sample.sleep_stage not in {"core", "deep", "rem"}
+                or sample.start_at < repo.sleep_series_start
+                or _fingerprint_token(repo, sample) != row["fingerprint"]
+                or _normalized(sample, "device")[1] != row["core_event_key"]):
+            continue
+        segments.append(sample)
+    return segments
+
+
+def accepted_sleep_episodes(repo: HealthOSRepository, now: datetime) -> list[dict[str, Any]]:
+    """Observed phase episodes, stitched by time and source, never by date."""
+    health = repo._load_health(now)
+    # Two hours is only a stitching allowance for gaps in exported phases;
+    # it is never evidence that an episode is a complete night's sleep.
+    link_gap = timedelta(hours=2)
+    grouped: dict[tuple[Any, ...], list[Sample]] = {}
+    for sample in _linked_sleep_segments(repo, now):
+        detail = sample.device_detail if isinstance(sample.device_detail, Mapping) else {}
+        identity = (sample.source, sample.source_bundle_id,
+                    detail.get("model"), detail.get("softwareVersion"))
+        grouped.setdefault(identity, []).append(sample)
+    episodes = []
+    for samples in grouped.values():
+        samples.sort(key=lambda sample: (sample.start_at, sample.end_at))
+        current: dict[str, Any] | None = None
+        for sample in samples:
+            if current is None or sample.start_at > current["end"] + link_gap:
+                current = {"start": sample.start_at, "end": sample.end_at,
+                           "observed_phase_minutes": 0.0, "segment_count": 0,
+                           "unobserved_gap_minutes": 0.0}
+                episodes.append(current)
+            else:
+                current["unobserved_gap_minutes"] += max(
+                    0.0, (sample.start_at - current["end"]).total_seconds() / 60)
+                current["end"] = max(current["end"], sample.end_at)
+            current["observed_phase_minutes"] += (sample.end_at - sample.start_at).total_seconds() / 60
+            current["segment_count"] += 1
+    return [{"first_start": item["start"].isoformat(),
+             "last_end": item["end"].isoformat(),
+             "local_day": health.local_day(item["end"]),
+             "observed_phase_minutes": round(item["observed_phase_minutes"], 1),
+             "unobserved_gap_minutes": round(item["unobserved_gap_minutes"], 1),
+             "segment_count": item["segment_count"],
+             "coverage": "observed_stages_only"}
+            for item in sorted(episodes, key=lambda item: item["start"])]
+
+
+def accepted_sleep_nights(repo: HealthOSRepository, now: datetime) -> list[dict[str, Any]]:
+    """Compatibility alias: returns observed episodes, never complete nights."""
+    return accepted_sleep_episodes(repo, now)
+
+
+def accepted_watch_identity_by_key(
+        repo: HealthOSRepository, now: datetime,
+        approved_watch: WatchProvenance = frozenset(),
+        derived_watch: DerivedWatchProvenance = frozenset(),
+) -> dict[str, tuple[str, ...] | None]:
+    """Resolve approved Watch proof for linked, accepted core keys.
+
+    Exact device proof is a four-field identity. Device-optional resting heart
+    rate and sleep stages may use an approved two-field derived source pair.
+    Neither proof is included in the private response.
+    """
+    if repo.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                         "AND name='health_os_tuanhdo_records'").fetchone() is None:
+        return {}
+    health = repo._load_health(now)
+    metrics = ("heart_rate", "resting_heart_rate", "hrv", "sleep_duration", "steps", "distance",
+               "active_energy", "exercise_time", "respiratory_rate")
+    placeholders = ",".join("?" for _ in metrics)
+    rows = repo.conn.execute(
+        "SELECT r.batch_key,r.record_index,r.fingerprint,r.metric,l.core_event_key,b.payload_enc "
+        "FROM health_os_tuanhdo_records r "
+        "JOIN health_os_tuanhdo_promotion_links l ON l.batch_key=r.batch_key "
+        "AND l.record_index=r.record_index "
+        "JOIN health_os_tuanhdo_batches b ON b.batch_key=r.batch_key "
+        f"WHERE r.disposition='accepted' AND r.metric IN ({placeholders})", metrics)
+    parsed: dict[str, dict[int, Sample]] = {}
+    identities: dict[str, tuple[str, ...] | None] = {}
+    for row in rows:
+        key = row["core_event_key"]
+        item = health._observations.get(key)
+        if item is None or not health._current_evidence(item) or item.metric != row["metric"]:
+            continue
+        batch_key = row["batch_key"]
+        if batch_key not in parsed:
+            payload = json.loads(store.decrypt(repo.data_key, row["payload_enc"]))
+            parsed[batch_key] = {sample.record_index: sample
+                                 for sample in parse_health_export(payload).samples}
+        sample = parsed[batch_key].get(row["record_index"])
+        match = (_watch_match(sample, approved_watch, derived_watch)
+                 if sample is not None else None)
+        if (sample is None or sample.metric != row["metric"] or match is None
+                or _fingerprint_token(repo, sample) != row["fingerprint"]
+                or _normalized(sample, match, activity_series=(
+                    item.metric in health.ACTIVITY_SERIES_METRICS
+                    and item.confidence == health.ACTIVITY_SERIES_CONFIDENCE))[1] != key):
+            continue
+        detail = sample.device_detail if isinstance(sample.device_detail, Mapping) else {}
+        fields = (sample.source, sample.source_bundle_id,
+                  detail.get("model"), detail.get("softwareVersion"))
+        if match == "device":
+            identity = (fields if all(isinstance(value, str) and value for value in fields)
+                        else None)
+        else:
+            pair = fields[:2]
+            matching_watches = [watch for watch in approved_watch
+                                if watch[:2] == pair and watch[2] == "Watch"]
+            identity = (pair if item.metric in {"resting_heart_rate", "sleep_duration"}
+                        and item.confidence == "watch_source_only"
+                        and len(matching_watches) == 1 else None)
+        if key in identities and identities[key] != identity:
+            identities[key] = None
+        else:
+            identities[key] = identity
+    return identities
+
+
+def accepted_sleep_phases(repo: HealthOSRepository, now: datetime) -> dict[str, Any] | None:
+    """Last validated local sleep day, aggregated from linked accepted stages."""
+    health = repo._load_health(now)
+    totals: dict[str, dict[str, float]] = {}
+    for sample in _linked_sleep_segments(repo, now):
+        day = health.local_day(sample.end_at)
+        bucket = totals.setdefault(day, {"core": 0.0, "deep": 0.0, "rem": 0.0})
+        bucket[sample.sleep_stage] += (sample.end_at - sample.start_at).total_seconds() / 60
+    if not totals:
+        return None
+    day = max(totals)
+    return {"local_day": day, "phase_minutes": {name: round(value, 1)
+            for name, value in totals[day].items()}, "source": "linked_validated_sleep_series"}
+
+
+def _normalized(sample: Sample, match: str, *, activity_series: bool = False) -> tuple[dict[str, Any], str]:
+    assurance = (HealthOS.ACTIVITY_SERIES_CONFIDENCE if activity_series else
+                 "device_metadata" if match == "device" else "watch_source_only")
     observation = {
         "metric": sample.metric, "value": sample.value, "unit": sample.unit,
         "observed_at": sample.end_at.isoformat(), "semantic": "measured",
@@ -144,24 +389,73 @@ def _interval_blob(repo: HealthOSRepository, sample: Sample) -> str:
     }))
 
 
-def _interval_conflict(repo: HealthOSRepository, sample: Sample) -> bool:
+def _stored_interval(start_text: Any, end_text: Any) -> tuple[datetime, datetime] | None:
+    """Use the same validity rule for stored rows and newly accepted rows."""
+    start, end = datetime.fromisoformat(start_text), datetime.fromisoformat(end_text)
+    if start.tzinfo is None or end.tzinfo is None or start >= end:
+        return None
+    return start, end
+
+
+class _AcceptedIntervals:
+    """Accepted intervals, decrypted once per metric within an ingest transaction."""
+
+    def __init__(self, repo: HealthOSRepository) -> None:
+        self._repo = repo
+        self._by_metric: dict[str, list[tuple[datetime, datetime]] | None] = {}
+
+    def get(self, metric: str) -> list[tuple[datetime, datetime]] | None:
+        """A damaged stored interval blocks the whole metric, as in the full scan."""
+        if metric not in self._by_metric:
+            intervals: list[tuple[datetime, datetime]] | None = []
+            for row in self._repo.conn.execute(
+                "SELECT interval_enc FROM health_os_tuanhdo_records "
+                "WHERE metric=? AND disposition='accepted'", (metric,),
+            ):
+                try:
+                    interval = json.loads(store.decrypt(self._repo.data_key, row["interval_enc"]))
+                    parsed = _stored_interval(interval["start"], interval["end"])
+                    if parsed is None:
+                        intervals = None
+                        break
+                except (IndexError, TypeError, ValueError, KeyError, UnicodeError,
+                        AttributeError, InvalidTag):
+                    intervals = None
+                    break
+                intervals.append(parsed)
+            self._by_metric[metric] = intervals
+        return self._by_metric[metric]
+
+    def add(self, sample: Sample) -> None:
+        # A metric not yet loaded will read this newly inserted row on first get().
+        if sample.metric not in self._by_metric or self._by_metric[sample.metric] is None:
+            return
+        try:
+            # Match the exact serialization round trip used by _interval_blob().
+            parsed = _stored_interval(sample.start_at.isoformat(), sample.end_at.isoformat())
+        except (TypeError, ValueError, AttributeError):
+            parsed = None
+        if parsed is None:
+            self._by_metric[sample.metric] = None
+        else:
+            self._by_metric[sample.metric].append(parsed)
+
+
+def _interval_conflict(repo: HealthOSRepository, sample: Sample,
+                       accepted: _AcceptedIntervals | None = None) -> bool:
     if sample.metric not in _ADDITIVE or sample.start_at == sample.end_at:
         return False
-    for row in repo.conn.execute(
-        "SELECT interval_enc FROM health_os_tuanhdo_records "
-        "WHERE metric=? AND disposition='accepted'", (sample.metric,),
-    ):
-        try:
-            interval = json.loads(store.decrypt(repo.data_key, row["interval_enc"]))
-            start, end = datetime.fromisoformat(interval["start"]), datetime.fromisoformat(interval["end"])
-            if start.tzinfo is None or end.tzinfo is None or start >= end:
-                return True
-        except (IndexError, TypeError, ValueError, KeyError, UnicodeError, AttributeError, InvalidTag):
-            # A damaged interval cannot justify another additive observation.
-            return True
+    intervals = (accepted if accepted is not None else _AcceptedIntervals(repo)).get(sample.metric)
+    if intervals is None:
+        return True
+    for start, end in intervals:
         if (sample.metric == "sleep_duration" and repo.sleep_series_start is not None
                 and start < repo.sleep_series_start):
             # Legacy intervals do not enter the separate current sleep series.
+            continue
+        if (sample.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                and repo.activity_series_start is not None
+                and start < repo.activity_series_start):
             continue
         if max(sample.start_at, start) < min(sample.end_at, end):
             return True
@@ -171,7 +465,21 @@ def _interval_conflict(repo: HealthOSRepository, sample: Sample) -> bool:
 def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProvenance,
              unknown_intervals: frozenset[str], *, review: bool = False,
              approved_types: frozenset[str] = frozenset(),
-             derived_watch: DerivedWatchProvenance = frozenset()) -> tuple[str, str, str | None]:
+             derived_watch: DerivedWatchProvenance = frozenset(),
+             accepted_intervals: _AcceptedIntervals | None = None) -> tuple[str, str, str | None]:
+    # Preserve this exclusion reason even if the parser also found an overlap:
+    # no cross-midnight quantity may enter a complete-looking daily sum.
+    new_activity = (sample.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                    and repo.activity_series_start is not None)
+    zone = ZoneInfo(repo.health_timezone) if isinstance(repo.health_timezone, str) else repo.health_timezone
+    crosses_local_day = (sample.start_at.astimezone(zone).date() !=
+                         (sample.end_at - timedelta(microseconds=1)).astimezone(zone).date())
+    if (new_activity and repo.activity_series_mode == "active"
+            and sample.exported_type in approved_types
+            and sample.start_at >= repo.activity_series_start
+            and _watch_match(sample, frozenset({repo.activity_watch_identity}), frozenset()) == "device"
+            and crosses_local_day):
+        return "held", "activity_crosses_local_day", None
     if sample.hold_reason != "source_unverified":
         return "held", sample.hold_reason, None
     if sample.exported_type == "bodyMass":
@@ -191,6 +499,14 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
         return "held", "provenance_incomplete" if incomplete else "source_unverified", None
     if sample.exported_type not in approved_types:
         return "held", "metric_not_approved", None
+    if new_activity:
+        if repo.activity_series_mode == "paused":
+            return "held", "activity_series_paused", None
+        if _watch_match(sample, frozenset({repo.activity_watch_identity}), frozenset()) != "device":
+            return "held", "activity_source_not_selected", None
+        if sample.start_at < repo.activity_series_start:
+            return "held", ("activity_crosses_series_cut" if sample.end_at > repo.activity_series_start
+                            else "activity_before_series_cut"), None
     new_sleep = sample.metric == "sleep_duration" and repo.sleep_series_start is not None
     if new_sleep:
         if sample.start_at < repo.sleep_series_start:
@@ -211,10 +527,10 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
         # evidence. A reexport is not approval of the older held record.
         return "held", "previous_held", None
     try:
-        observation, core_key = _normalized(sample, match)
-        if sample.metric in unknown_intervals and not new_sleep:
+        observation, core_key = _normalized(sample, match, activity_series=new_activity)
+        if sample.metric in unknown_intervals and not (new_sleep or new_activity):
             return "held", "legacy_interval_unknown", None
-        if _interval_conflict(repo, sample):
+        if _interval_conflict(repo, sample, accepted_intervals):
             return "held", "interval_overlap_existing", None
         if repo.conn.execute(
             "SELECT 1 FROM health_os_observations WHERE event_key=?", (core_key,),
@@ -225,8 +541,11 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
             (core_key,),
         ).fetchone() is not None:
             return "held", "core_key_previously_linked", None
-        result = repo.ingest(APPLE_HEALTH, [observation], [], commit=False)
+        result = repo.ingest(APPLE_HEALTH, [observation], [], commit=False,
+                             activity_series=new_activity)
         if result["accepted"] == 1:
+            if new_activity:
+                return "accepted", "approved_activity_series_metadata_match", core_key
             if new_sleep:
                 return "accepted", ("approved_sleep_series_metadata_match" if match == "device"
                                     else "approved_sleep_series_derived_source_match"), core_key
@@ -274,21 +593,31 @@ def _link_promotion(conn, batch_key: str, record_index: int,
 def ingest_tuanhdo(repo: HealthOSRepository, payload: Mapping[str, Any],
                    approved_watch: WatchProvenance = frozenset(), *,
                    approved_types: frozenset[str] = frozenset(),
-                   derived_watch: DerivedWatchProvenance = frozenset()) -> dict[str, Any]:
+                   derived_watch: DerivedWatchProvenance = frozenset(),
+                   additive_watch_selection: AdditiveWatchSelection = {}) -> dict[str, Any]:
     """Stage every row and promote only unambiguous, verified observations.
 
     The response contains fixed reason names and counts only. Workouts remain
     in the encrypted batch until a validated workout mapping exists.
     """
+    _validate_additive_selection(additive_watch_selection, approved_watch)
     with repo._write_lock:
         return _ingest_tuanhdo_locked(repo, payload, approved_watch, approved_types,
-                                      derived_watch)
+                                      derived_watch, additive_watch_selection)
+
+
+def _validate_additive_selection(selection: AdditiveWatchSelection,
+                                 approved_watch: WatchProvenance) -> None:
+    if any(metric not in HealthOS.ACTIVITY_SERIES_METRICS or identity not in approved_watch
+           for metric, identity in selection.items()):
+        raise ValueError("additive selection needs an approved exact Watch identity")
 
 
 def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
                            approved_watch: WatchProvenance,
                            approved_types: frozenset[str],
-                           derived_watch: DerivedWatchProvenance) -> dict[str, Any]:
+                           derived_watch: DerivedWatchProvenance,
+                           additive_watch_selection: AdditiveWatchSelection) -> dict[str, Any]:
     if not isinstance(payload, Mapping) or not isinstance(payload.get("records"), list):
         raise ValueError("records_required")
     parsed = parse_health_export(payload)
@@ -302,6 +631,7 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
     try:
         conn.execute("BEGIN IMMEDIATE")
         repo._assert_sleep_series_mode_current()
+        repo._assert_activity_series_mode_current()
         previous = conn.execute(
             "SELECT receipt_json FROM health_os_tuanhdo_batches WHERE batch_key=?",
             (batch_key,),
@@ -310,8 +640,10 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
             receipt = _current_receipt(conn, batch_key, json.loads(previous["receipt_json"]))
             conn.commit()
             return {**receipt, "replayed": True}
-        samples = {sample.record_index: sample for sample in parsed.samples}
+        samples = {sample.record_index: sample for sample in
+                   _select_additive_watch(parsed.samples, additive_watch_selection)}
         unknown_intervals = _unknown_interval_metrics(repo)
+        accepted_intervals = _AcceptedIntervals(repo)
         conn.execute(
             "INSERT INTO health_os_tuanhdo_batches(batch_key,payload_enc,receipt_json) VALUES (?,?,?)",
             (batch_key, store.encrypt(repo.data_key, canonical), "{}"),
@@ -327,7 +659,8 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
             else:
                 disposition, reason, core_event_key = _promote(
                     repo, sample, approved_watch, unknown_intervals,
-                    approved_types=approved_types, derived_watch=derived_watch)
+                    approved_types=approved_types, derived_watch=derived_watch,
+                    accepted_intervals=accepted_intervals)
             conn.execute(
                 "INSERT INTO health_os_tuanhdo_records"
                 "(batch_key,record_index,fingerprint,metric,interval_enc,disposition,reason) "
@@ -336,6 +669,8 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
                  sample.metric if sample else None,
                  _interval_blob(repo, sample) if sample else None, disposition, reason),
             )
+            if disposition == "accepted":
+                accepted_intervals.add(sample)
             if core_event_key is not None:
                 _link_promotion(conn, batch_key, index, operation_id, core_event_key)
                 promoted += 1
@@ -363,7 +698,8 @@ def review_held_tuanhdo(repo: HealthOSRepository,
                         approved_watch: WatchProvenance, *,
                         batch_key: str,
                         approved_types: frozenset[str] = frozenset(),
-                        derived_watch: DerivedWatchProvenance = frozenset()) -> dict[str, int | str]:
+                        derived_watch: DerivedWatchProvenance = frozenset(),
+                        additive_watch_selection: AdditiveWatchSelection = {}) -> dict[str, int | str]:
     """Explicit local review after an operator approves exact metadata tuples.
 
     There is deliberately no HTTP route for this action. The first retained
@@ -371,16 +707,18 @@ def review_held_tuanhdo(repo: HealthOSRepository,
     """
     if not isinstance(batch_key, str) or not batch_key:
         raise ValueError("exact batch_key is required for held review")
+    _validate_additive_selection(additive_watch_selection, approved_watch)
     with repo._write_lock:
         return _review_held_tuanhdo_locked(repo, approved_watch, approved_types,
-                                           derived_watch, batch_key)
+                                           derived_watch, batch_key, additive_watch_selection)
 
 
 def _review_held_tuanhdo_locked(repo: HealthOSRepository,
                                 approved_watch: WatchProvenance,
                                 approved_types: frozenset[str],
                                 derived_watch: DerivedWatchProvenance,
-                                batch_key: str) -> dict[str, int | str]:
+                                batch_key: str,
+                                additive_watch_selection: AdditiveWatchSelection) -> dict[str, int | str]:
     conn = repo.conn
     conn.executescript(_SCHEMA)
     parsed_batches: dict[str, dict[int, Sample]] = {}
@@ -388,6 +726,7 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
     try:
         conn.execute("BEGIN IMMEDIATE")
         repo._assert_sleep_series_mode_current()
+        repo._assert_activity_series_mode_current()
         if conn.execute(
                 "SELECT 1 FROM health_os_tuanhdo_batches WHERE batch_key=?",
                 (batch_key,)).fetchone() is None:
@@ -396,7 +735,8 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
                  "WHERE disposition='held' AND reason IN "
                  "('source_unverified','previous_held','metric_not_approved',"
                  "'provenance_incomplete','device_conflict','legacy_interval_unknown',"
-                 "'sleep_series_paused')")
+                 "'sleep_series_paused','quantity_overlap','source_not_selected',"
+                 "'activity_series_off','activity_series_paused')")
         candidates = conn.execute(query + " AND batch_key=? ORDER BY rowid",
                                   (batch_key,)).fetchall()
         operation_id = _start_promotion_op(conn, batch_key, "held_review", approved_types)
@@ -410,7 +750,8 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
                 ).fetchone()
                 payload = json.loads(store.decrypt(repo.data_key, batch["payload_enc"]))
                 parsed_batches[batch_key] = {
-                    sample.record_index: sample for sample in parse_health_export(payload).samples
+                    sample.record_index: sample for sample in _select_additive_watch(
+                        parse_health_export(payload).samples, additive_watch_selection)
                 }
             sample = parsed_batches[batch_key].get(row["record_index"])
             if sample is None:
@@ -472,6 +813,7 @@ def reverse_tuanhdo_operation(repo: HealthOSRepository, operation_id: str, *,
         try:
             conn.execute("BEGIN IMMEDIATE")
             repo._assert_sleep_series_mode_current()
+            repo._assert_activity_series_mode_current()
             operation = conn.execute(
                 "SELECT batch_key,promoted_count,status FROM health_os_tuanhdo_promotion_ops "
                 "WHERE operation_id=?", (operation_id,),

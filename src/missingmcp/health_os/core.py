@@ -7,7 +7,7 @@ from hashlib import sha256
 import re
 import unicodedata
 from math import isfinite
-from typing import Iterable
+from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 
@@ -243,13 +243,17 @@ class HealthOS:
     """
 
     def __init__(self, timezone: str | tzinfo = "America/Mexico_City", *,
-                 sleep_series_start: datetime | None = None) -> None:
+                 sleep_series_start: datetime | None = None,
+                 activity_series_start: datetime | None = None) -> None:
         # Deployments use the IANA name; accepting a tzinfo keeps tests and
         # offline import tools deterministic even on hosts without a zoneinfo DB.
         self.timezone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
         self._observations: dict[str, MetricObservation] = {}
         self._sleep_series_start = sleep_series_start
         self._sleep_series_keys: set[str] = set()
+        self._activity_series_start = activity_series_start
+        self._activity_series_keys: set[str] = set()
+        self._activity_series_intervals: dict[str, tuple[datetime, datetime]] = {}
         self._workouts: dict[str, WorkoutSession] = {}
         self._workout_links: dict[str, set[str]] = {}
         self._apple_baseline_started: datetime | None = None
@@ -267,9 +271,22 @@ class HealthOS:
         """Activate only verified, linked post-cutover sleep for current use."""
         self._sleep_series_keys = set(keys)
 
+    ACTIVITY_SERIES_METRICS = frozenset({"steps", "distance", "active_energy", "exercise_time"})
+    ACTIVITY_SERIES_CONFIDENCE = "activity_series_device_metadata"
+
+    def set_activity_series_keys(self, keys: set[str], *,
+                                 intervals: Mapping[str, tuple[datetime, datetime]] | None = None) -> None:
+        self._activity_series_keys = set(keys)
+        self._activity_series_intervals = {key: pair for key, pair in (intervals or {}).items()
+                                           if key in keys}
+
     def _current_evidence(self, item: MetricObservation) -> bool:
         if not self._apple_era_evidence(item):
             return False
+        if item.metric in self.ACTIVITY_SERIES_METRICS and self._activity_series_start is not None:
+            return (item.observed_at >= self._activity_series_start
+                    and item.confidence == self.ACTIVITY_SERIES_CONFIDENCE
+                    and self._observation_key(item) in self._activity_series_keys)
         if item.metric != "sleep_duration" or self._sleep_series_start is None:
             return True
         return (item.observed_at >= self._sleep_series_start
@@ -286,6 +303,9 @@ class HealthOS:
         # collapsing independently produced Speediance evidence.
         raw = "|".join((item.source, item.metric, str(item.value), item.unit,
                         item.observed_at.astimezone(timezone.utc).isoformat()))
+        if (item.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                and item.confidence == HealthOS.ACTIVITY_SERIES_CONFIDENCE):
+            raw += "|activity_series_2026_10_16"
         return sha256(raw.encode()).hexdigest()
 
     def ingest_observations(self, observations: Iterable[MetricObservation]) -> IngestResult:
@@ -420,6 +440,56 @@ class HealthOS:
         """Valid days against required days per readiness metric: counts only, no values."""
         return [{"metric": metric, "valid_days": min(self.metric_baseline_days(metric, at), _BASELINE_DAYS),
                  "required_days": _BASELINE_DAYS} for metric in self.READINESS_METRICS]
+
+    def metric_freshness(self, now: datetime, window_days: int = 28) -> list[dict[str, object]]:
+        """Value-free coverage by metric and device family; never merge producers."""
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        today = now.astimezone(self.timezone).date()
+        groups: dict[tuple[str, str], list[MetricObservation]] = {}
+        for item in self._observations.values():
+            if self._current_evidence(item) and item.observed_at <= now:
+                groups.setdefault((item.metric, item.device_source or "unspecified"), []).append(item)
+        result = []
+        for (metric, family), items in sorted(groups.items()):
+            latest = max(item.observed_at for item in items)
+            days = {self.local_day(item.observed_at) for item in items
+                    if 0 <= (today - item.observed_at.astimezone(self.timezone).date()).days < window_days}
+            result.append({"metric": metric, "device_source": family,
+                           "valid_days_28": len(days), "latest_local_day": self.local_day(latest),
+                           "age_hours": round((now - latest).total_seconds() / 3600, 1)})
+        return result
+
+    def activity_daily_totals(self, now: datetime, window_days: int = 7, *,
+                              cross_day_exclusions: Mapping[tuple[str, str], int] | None = None) -> list[dict[str, object]]:
+        """Sum accepted single-day intervals; disclose retained cross-day gaps."""
+        if self._activity_series_start is None:
+            return []
+        today = now.astimezone(self.timezone).date()
+        totals: dict[tuple[str, str], float] = {}
+        units = {"steps": "count", "distance": "km", "active_energy": "kcal",
+                 "exercise_time": "min"}
+        for item in self._observations.values():
+            if item.metric not in self.ACTIVITY_SERIES_METRICS or not self._current_evidence(item):
+                continue
+            interval = self._activity_series_intervals.get(self._observation_key(item))
+            if interval is None:
+                continue
+            start, end = interval
+            day = start.astimezone(self.timezone).date()
+            if day != (end - timedelta(microseconds=1)).astimezone(self.timezone).date():
+                continue
+            if 0 <= (today - day).days < window_days and item.observed_at <= now:
+                key = (item.metric, day.isoformat())
+                totals[key] = totals.get(key, 0.0) + item.value
+        exclusions = cross_day_exclusions or {}
+        return [{"metric": metric, "local_day": day,
+                 "observed_sum": round(totals[key], 1) if key in totals else None,
+                 "unit": units[metric], "series": "validated_activity_2026_10_16",
+                 "coverage": "partial" if exclusions.get(key, 0) else "accepted_intervals_only",
+                 "excluded_cross_midnight": exclusions.get(key, 0)}
+                for key in sorted(totals.keys() | exclusions.keys())
+                for metric, day in [key]]
 
     def assess_readiness(self, now: datetime, subjective_flags: Iterable[str] = ()) -> DecisionAssessment:
         """Return a conservative, explainable state; never changes a plan itself.
@@ -566,6 +636,7 @@ class HealthOS:
         "weight": "mean", "body_fat_percentage": "mean", "resting_heart_rate": "mean",
         "heart_rate": "mean", "hrv": "mean", "oxygen_saturation": "mean", "respiratory_rate": "mean",
         "sleep_duration": "sum", "steps": "sum", "active_energy": "sum", "distance": "sum",
+        "exercise_time": "sum",
     }
 
     def monthly_history(self) -> list[dict[str, object]]:
@@ -578,8 +649,20 @@ class HealthOS:
             if item.metric == "sleep_duration" and self._sleep_series_start is not None:
                 series = ("validated_2026_10_16" if self._current_evidence(item)
                           else "legacy_unverified_interval")
+            if item.metric in self.ACTIVITY_SERIES_METRICS and self._activity_series_start is not None:
+                series = ("validated_activity_2026_10_16" if self._current_evidence(item)
+                          else "legacy_unverified_interval")
+                if series == "validated_activity_2026_10_16":
+                    interval = self._activity_series_intervals.get(self._observation_key(item))
+                    if interval is None:
+                        continue
+                    day = interval[0].astimezone(self.timezone).date().isoformat()
+                else:
+                    day = self.local_day(item.observed_at)
+            else:
+                day = self.local_day(item.observed_at)
             key = (item.metric, item.device_source or "untagged", series,
-                   self.local_day(item.observed_at))
+                   day)
             daily.setdefault(key, []).append(item.value)
         monthly: dict[tuple[str, str, str, str], list[float]] = {}
         for (metric, family, series, day), values in daily.items():

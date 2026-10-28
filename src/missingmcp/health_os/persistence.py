@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import hmac
 import sqlite3
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from hashlib import sha256
 from threading import RLock
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidTag
 
@@ -25,6 +26,9 @@ _SLEEP_SERIES_REASONS = (
     "approved_sleep_series_metadata_match", "approved_sleep_series_derived_source_match",
 )
 _SLEEP_SERIES_ACTIVATION_KEY = "sleep_series_activation_2026_10_16"
+ACTIVITY_SERIES_START = SLEEP_SERIES_START
+_ACTIVITY_SERIES_ACTIVATION_KEY = "activity_series_activation_2026_10_16"
+_ACTIVITY_SERIES_REASON = "approved_activity_series_metadata_match"
 
 
 def _safe_reason(exc: Exception) -> str:
@@ -53,6 +57,11 @@ CREATE TABLE IF NOT EXISTS health_os_sleep_series_audit (
  singleton INTEGER PRIMARY KEY CHECK (singleton=1),
  cutover TEXT NOT NULL, activated_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS health_os_activity_series_audit (
+ singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+ cutover TEXT NOT NULL, policy_hash TEXT NOT NULL,
+ activated_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS health_os_quarantine (
  source_table TEXT NOT NULL, event_key TEXT NOT NULL, source TEXT NOT NULL DEFAULT '',
  reason TEXT NOT NULL, payload_enc TEXT NOT NULL,
@@ -65,12 +74,26 @@ CREATE TABLE IF NOT EXISTS health_os_quarantine (
 class HealthOSRepository:
     def __init__(self, conn: sqlite3.Connection, data_key: str,
                  health_timezone: str | tzinfo = "America/Mexico_City", *,
-                 legacy_key: str | None = None, sleep_series_mode: str = "off") -> None:
+                 legacy_key: str | None = None, sleep_series_mode: str = "off",
+                 activity_series_mode: str = "off",
+                 activity_watch_identity: tuple[str, str, str, str] | None = None) -> None:
         if sleep_series_mode not in {"off", "active", "paused"}:
             raise ValueError("invalid sleep series mode")
+        if activity_series_mode not in {"off", "active", "paused"}:
+            raise ValueError("invalid activity series mode")
+        if activity_series_mode != "off" and (activity_watch_identity is None or
+                len(activity_watch_identity) != 4 or
+                any(not isinstance(value, str) or not value for value in activity_watch_identity)):
+            raise ValueError("active activity series needs one exact Watch identity")
         self.conn, self.data_key, self.health_timezone = conn, data_key, health_timezone
         self.sleep_series_mode = sleep_series_mode
         self.sleep_series_start = SLEEP_SERIES_START if sleep_series_mode != "off" else None
+        self.activity_series_mode = activity_series_mode
+        self.activity_series_start = ACTIVITY_SERIES_START if activity_series_mode != "off" else None
+        self.activity_watch_identity = activity_watch_identity
+        self._activity_policy_hash = (sha256(json.dumps(activity_watch_identity,
+            ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+            if activity_watch_identity is not None else None)
         self._write_lock = RLock()
         # Decrypting every stored row took ~35 s in production (Oct 2026).
         # Local writes invalidate the scan; SQLite data_version detects commits
@@ -84,6 +107,7 @@ class HealthOSRepository:
         # with the dedicated data key; new deployments have nothing to move.
         self._migrate_legacy_encryption(legacy_key)
         self._ensure_sleep_series_activation()
+        self._ensure_activity_series_activation()
 
     def _ensure_sleep_series_activation(self) -> None:
         """Atomically record two independent traces before accepting sleep."""
@@ -152,6 +176,67 @@ class HealthOSRepository:
             _SLEEP_SERIES_REASONS,
         ).fetchone() is not None
 
+    def _ensure_activity_series_activation(self) -> None:
+        """Persist cutover and source policy before admitting activity rows."""
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+            row, audit = self._activity_series_activation_rows()
+            if row is None and audit is None:
+                if self._has_new_activity_series_records():
+                    raise ValueError("activity series activation trace missing")
+                if self.activity_series_mode == "paused":
+                    raise ValueError("activity series cannot pause before activation")
+                if self.activity_series_mode == "active":
+                    payload = {"cutover": ACTIVITY_SERIES_START.isoformat(),
+                               "policy_hash": self._activity_policy_hash}
+                    self.conn.execute(
+                        "INSERT INTO health_os_state(state_key,payload_enc) VALUES (?,?)",
+                        (_ACTIVITY_SERIES_ACTIVATION_KEY,
+                         store.encrypt(self.data_key, json.dumps(payload, sort_keys=True))))
+                    self.conn.execute(
+                        "INSERT INTO health_os_activity_series_audit(singleton,cutover,policy_hash) "
+                        "VALUES (1,?,?)", (ACTIVITY_SERIES_START.isoformat(), self._activity_policy_hash))
+            self._assert_activity_series_mode_current()
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _activity_series_activation_rows(self):
+        return (
+            self.conn.execute("SELECT payload_enc FROM health_os_state WHERE state_key=?",
+                              (_ACTIVITY_SERIES_ACTIVATION_KEY,)).fetchone(),
+            self.conn.execute("SELECT cutover,policy_hash FROM health_os_activity_series_audit "
+                              "WHERE singleton=1").fetchone(),
+        )
+
+    def _assert_activity_series_mode_current(self) -> None:
+        row, audit = self._activity_series_activation_rows()
+        if row is None and audit is None:
+            if self._has_new_activity_series_records() or self.activity_series_mode != "off":
+                raise ValueError("activity series activation trace missing")
+            return
+        if row is None or audit is None or self.activity_series_mode == "off":
+            raise ValueError("activity series activated; matching active/paused policy required")
+        try:
+            payload = json.loads(store.decrypt(self.data_key, row["payload_enc"]))
+        except (*_UNREADABLE, AttributeError) as exc:
+            raise ValueError("activity series marker invalid") from exc
+        if (payload != {"cutover": ACTIVITY_SERIES_START.isoformat(),
+                        "policy_hash": self._activity_policy_hash}
+                or audit["cutover"] != payload["cutover"]
+                or audit["policy_hash"] != payload["policy_hash"]):
+            raise ValueError("activity series policy differs from activated policy")
+
+    def _has_new_activity_series_records(self) -> bool:
+        if self.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                             "AND name='health_os_tuanhdo_records'").fetchone() is None:
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM health_os_tuanhdo_records WHERE disposition='accepted' "
+            "AND reason=? LIMIT 1", (_ACTIVITY_SERIES_REASON,),
+        ).fetchone() is not None
+
     def _migrate_legacy_encryption(self, legacy_key: str | None) -> None:
         if not legacy_key or legacy_key == self.data_key:
             return
@@ -190,7 +275,7 @@ class HealthOSRepository:
         return sha256(f"{source}|{value}".encode()).hexdigest()
 
     def ingest(self, source: str, observations: list[Mapping[str, Any]], workouts: list[Mapping[str, Any]],
-               *, commit: bool = True) -> dict[str, Any]:
+               *, commit: bool = True, activity_series: bool = False) -> dict[str, Any]:
         with self._write_lock:
             # The quarantine guard in _ingest_locked must share a SQLite write
             # transaction with the eventual insert.  A process-local lock does
@@ -200,19 +285,25 @@ class HealthOSRepository:
                 self.conn.execute("BEGIN IMMEDIATE")
             try:
                 self._assert_sleep_series_mode_current()
-                return self._ingest_locked(source, observations, workouts, commit=commit)
+                self._assert_activity_series_mode_current()
+                return self._ingest_locked(source, observations, workouts, commit=commit,
+                                           activity_series=activity_series)
             except Exception:
                 if owns_transaction:
                     self.conn.rollback()
                 raise
 
     def _ingest_locked(self, source: str, observations: list[Mapping[str, Any]],
-                       workouts: list[Mapping[str, Any]], *, commit: bool) -> dict[str, Any]:
+                       workouts: list[Mapping[str, Any]], *, commit: bool,
+                       activity_series: bool) -> dict[str, Any]:
         self._invalidate()
         accepted = duplicates = 0
         rejected: list[str] = []
         for raw in observations:
             try:
+                if (raw.get("confidence") == HealthOS.ACTIVITY_SERIES_CONFIDENCE
+                        and not activity_series):
+                    raise ValueError("activity series marker requires verified staging")
                 item = observations_from_export(source, [raw])[0]
                 if item.semantic in NON_EVIDENCE_SEMANTICS:
                     raise ValueError("model-interpreted or transcribed values are not evidence")
@@ -222,7 +313,8 @@ class HealthOSRepository:
                     raise ValueError(check.rejected[0])
                 value, unit = _canonical_unit(item.metric, item.value, item.unit)
                 key = HealthOS._observation_key(MetricObservation(
-                    item.metric, value, unit, item.observed_at, item.source, item.provenance_id, item.semantic))
+                    item.metric, value, unit, item.observed_at, item.source, item.provenance_id,
+                    item.semantic, confidence=item.confidence))
                 if self.conn.execute(
                     "SELECT 1 FROM health_os_quarantine WHERE source_table='health_os_observations' "
                     "AND event_key=? AND reason='operator_reversed_tuanhdo'", (key,),
@@ -274,15 +366,18 @@ class HealthOSRepository:
         with self._write_lock:
             while True:
                 self._assert_sleep_series_mode_current()
+                self._assert_activity_series_mode_current()
                 version = self.conn.execute("PRAGMA data_version").fetchone()[0]
                 if self._scan_cache is not None and version == self._scan_cache_version:
                     self._assert_sleep_series_mode_current()
+                    self._assert_activity_series_mode_current()
                     return self._scan_cache
                 scan = self._scan_uncached()
                 # If an external writer committed during the multi-query scan,
                 # try again rather than cache a mixed or obsolete view.
                 if version == self.conn.execute("PRAGMA data_version").fetchone()[0]:
                     self._assert_sleep_series_mode_current()
+                    self._assert_activity_series_mode_current()
                     self._scan_cache = scan
                     self._scan_cache_version = version
                     return scan
@@ -293,7 +388,8 @@ class HealthOSRepository:
         Each invalid row is described only by table, key and a fixed reason
         category; no submitted value ever leaves this method.
         """
-        health = HealthOS(self.health_timezone, sleep_series_start=self.sleep_series_start)
+        health = HealthOS(self.health_timezone, sleep_series_start=self.sleep_series_start,
+                          activity_series_start=self.activity_series_start)
         invalid: list[dict[str, str]] = []
 
         def quarantine(table: str, key: str, reason: str) -> None:
@@ -351,6 +447,49 @@ class HealthOSRepository:
                     quarantine("health_os_tuanhdo_records", key or "missing_link",
                                "invalid_sleep_series_link")
             health.set_sleep_series_keys(keys)
+        if self.activity_series_start is not None and self._has_new_activity_series_records():
+            activity_keys: set[str] = set()
+            activity_intervals: dict[str, tuple[datetime, datetime]] = {}
+            local_zone = (ZoneInfo(self.health_timezone) if isinstance(self.health_timezone, str)
+                          else self.health_timezone)
+            for row in self.conn.execute(
+                "SELECT l.core_event_key,r.metric,r.interval_enc,r.fingerprint,o.status "
+                "FROM health_os_tuanhdo_records r "
+                "LEFT JOIN health_os_tuanhdo_promotion_links l "
+                "ON l.batch_key=r.batch_key AND l.record_index=r.record_index "
+                "LEFT JOIN health_os_tuanhdo_promotion_ops o ON o.operation_id=l.operation_id "
+                "WHERE r.disposition='accepted' AND r.reason=?", (_ACTIVITY_SERIES_REASON,),
+            ):
+                key = row["core_event_key"]
+                item = health._observations.get(key)
+                try:
+                    interval = json.loads(store.decrypt(self.data_key, row["interval_enc"]))
+                    start = datetime.fromisoformat(interval["start"])
+                    end = datetime.fromisoformat(interval["end"])
+                    fingerprint = (hmac.new(self.data_key.encode("utf-8"),
+                                            item.provenance_id.encode("ascii"), "sha256").hexdigest()
+                                   if item is not None else None)
+                    valid = (row["status"] == "committed"
+                             and item is not None and item.metric == row["metric"]
+                             and item.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                             and row["fingerprint"] == fingerprint
+                             and item.source == APPLE_HEALTH
+                             and item.device_source == "apple_watch"
+                             and item.confidence == HealthOS.ACTIVITY_SERIES_CONFIDENCE
+                             and start.tzinfo is not None and end.tzinfo is not None
+                             and self.activity_series_start <= start < end
+                             and item.observed_at == end
+                             and start.astimezone(local_zone).date() ==
+                             (end - timedelta(microseconds=1)).astimezone(local_zone).date())
+                except (*_UNREADABLE, AttributeError):
+                    valid = False
+                if valid:
+                    activity_keys.add(key)
+                    activity_intervals[key] = (start, end)
+                else:
+                    quarantine("health_os_tuanhdo_records", key or "missing_link",
+                               "invalid_activity_series_link")
+            health.set_activity_series_keys(activity_keys, intervals=activity_intervals)
         for row in self.conn.execute("SELECT event_key, source, payload_enc FROM health_os_workouts"):
             if row["source"] not in {APPLE_HEALTH, SPEEDIANCE}:
                 quarantine("health_os_workouts", row["event_key"], f"unsupported_source:{row['source']}")
@@ -434,6 +573,7 @@ class HealthOSRepository:
         try:
             self.conn.execute("BEGIN IMMEDIATE")
             self._assert_sleep_series_mode_current()
+            self._assert_activity_series_mode_current()
             for item in invalid:
                 column = key_columns[item["table"]]
                 row = self.conn.execute(
@@ -461,6 +601,7 @@ class HealthOSRepository:
             try:
                 self.conn.execute("BEGIN IMMEDIATE")
                 self._assert_sleep_series_mode_current()
+                self._assert_activity_series_mode_current()
                 payload = store.encrypt(self.data_key, started_at.isoformat())
                 self.conn.execute(
                     "INSERT INTO health_os_state(state_key, payload_enc, updated_at) VALUES (?, ?, datetime('now')) "

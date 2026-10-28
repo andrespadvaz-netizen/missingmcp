@@ -63,6 +63,7 @@ class Config:
     # Explicit operator-approved sleep cutover; paused keeps the new series
     # isolated while refusing additional sleep promotions.
     health_os_sleep_series_mode: str = "off"
+    health_os_activity_series_mode: str = "off"
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -88,6 +89,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     health_os_sleep_series_mode = env.get("HEALTH_OS_SLEEP_SERIES_MODE", "off")
     if health_os_sleep_series_mode not in {"off", "active", "paused"}:
         raise ValueError("HEALTH_OS_SLEEP_SERIES_MODE must be off, active or paused")
+    health_os_activity_series_mode = env.get("HEALTH_OS_ACTIVITY_SERIES_MODE", "off")
+    if health_os_activity_series_mode not in {"off", "active", "paused"}:
+        raise ValueError("HEALTH_OS_ACTIVITY_SERIES_MODE must be off, active or paused")
     try:
         ZoneInfo(health_os_timezone)
     except Exception as exc:
@@ -129,6 +133,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         health_os_data_key=health_os_data_key,
         health_os_timezone=health_os_timezone,
         health_os_sleep_series_mode=health_os_sleep_series_mode,
+        health_os_activity_series_mode=health_os_activity_series_mode,
         worker_port_start=int(env.get("WORKER_PORT_START", "9000")),
         worker_port_end=int(env.get("WORKER_PORT_END", "9099")),
         worker_idle_ttl=int(env.get("WORKER_IDLE_TTL", "900")),

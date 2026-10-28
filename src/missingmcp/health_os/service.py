@@ -21,15 +21,15 @@ from .persistence import HealthOSRepository
 from .health_auto_export import parse_health_auto_export
 from .apple_export import parse_apple_health_export
 from .core import APPLE_HEALTH, SPEEDIANCE
-from .tuanhdo_staging import ingest_tuanhdo
+from .private_report import build_private_report
+from .tuanhdo_staging import (accepted_sleep_episodes, accepted_sleep_phases,
+                              accepted_watch_identity_by_key, activity_cross_day_exclusions,
+                              ingest_tuanhdo)
 
 
 def build_health_os_app(config: Config) -> Starlette:
     if not config.health_os_ingest_key or not config.health_os_read_key or not config.health_os_data_key:
         raise ValueError("HEALTH_OS_INGEST_KEY, HEALTH_OS_READ_KEY and HEALTH_OS_DATA_KEY are required for the isolated Health OS service")
-    repo = HealthOSRepository(store.init_db(config.db_path), config.health_os_data_key,
-                              config.health_os_timezone, legacy_key=config.gateway_secret,
-                              sleep_series_mode=config.health_os_sleep_series_mode)
     # Exact identifiers are operator configuration, never guessed from a
     # friendly source name. Without this setting, submissions stay in staging.
     watch_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_WATCH_PROVENANCE", "[]"))
@@ -56,6 +56,26 @@ def build_health_os_app(config: Config) -> Starlette:
     ):
         raise ValueError("HEALTH_OS_TUANHDO_PROMOTE_TYPES must be a list of export type names")
     approved_types = frozenset(type_config)
+    selection_config = json.loads(os.environ.get("HEALTH_OS_TUANHDO_ADDITIVE_WATCH_SELECTION", "{}"))
+    if (not isinstance(selection_config, dict) or
+            any(metric not in {"steps", "distance", "active_energy", "exercise_time"}
+                or not isinstance(fields, list)
+                or len(fields) != 4 or any(not isinstance(value, str) or not value for value in fields)
+                or tuple(fields) not in approved_watch
+                for metric, fields in selection_config.items())):
+        raise ValueError("additive Watch selection needs exact approved Watch identity")
+    additive_watch_selection = {metric: tuple(fields) for metric, fields in selection_config.items()}
+    activity_identity = None
+    if config.health_os_activity_series_mode != "off":
+        if (set(additive_watch_selection) != {"steps", "distance", "active_energy", "exercise_time"}
+                or len(set(additive_watch_selection.values())) != 1):
+            raise ValueError("active activity series needs one Watch identity for all four metrics")
+        activity_identity = next(iter(additive_watch_selection.values()))
+    repo = HealthOSRepository(store.init_db(config.db_path), config.health_os_data_key,
+                              config.health_os_timezone, legacy_key=config.gateway_secret,
+                              sleep_series_mode=config.health_os_sleep_series_mode,
+                              activity_series_mode=config.health_os_activity_series_mode,
+                              activity_watch_identity=activity_identity)
 
     def authorized_ingest(request) -> bool:
         return hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
@@ -108,7 +128,8 @@ def build_health_os_app(config: Config) -> Starlette:
         try:
             receipt = ingest_tuanhdo(repo, json.loads(raw.decode("utf-8")), approved_watch,
                                      approved_types=approved_types,
-                                     derived_watch=derived_watch)
+                                     derived_watch=derived_watch,
+                                     additive_watch_selection=additive_watch_selection)
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
         return JSONResponse({"status": "OK", **receipt}, headers={"Cache-Control": "no-store"})
@@ -161,6 +182,30 @@ def build_health_os_app(config: Config) -> Starlette:
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         return JSONResponse({"status": "OK", "coverage": repo.coverage()}, headers={"Cache-Control": "no-store"})
 
+    async def metric_report(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        now = datetime.now(timezone.utc)
+        health = repo._load_health(now)
+        return JSONResponse({"status": "OK", "metrics": health.metric_freshness(now),
+                             "trends": repo.trends(now),
+                             "activity_daily": health.activity_daily_totals(
+                                 now, cross_day_exclusions=activity_cross_day_exclusions(repo, now)),
+                             "sleep_phases": accepted_sleep_phases(repo, now)},
+                            headers={"Cache-Control": "no-store"})
+
+    async def private_report(request):
+        if not authorized_read(request):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        now = datetime.now(timezone.utc)
+        return JSONResponse({"status": "OK", "report": build_private_report(
+            repo._load_health(now), now,
+            sleep_episodes=accepted_sleep_episodes(repo, now),
+            watch_identity_by_key=accepted_watch_identity_by_key(
+                repo, now, approved_watch, derived_watch),
+            cross_day_exclusions=activity_cross_day_exclusions(repo, now, window_days=15))},
+            headers={"Cache-Control": "no-store"})
+
     async def quarantine_report(request):
         if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
@@ -211,6 +256,8 @@ def build_health_os_app(config: Config) -> Starlette:
         Route("/health-os/transition", transition, methods=["POST"]),
         Route("/health-os/trends", trends), Route("/health-os/quarantine", quarantine_report),
         Route("/health-os/history", history), Route("/health-os/coverage", coverage),
+        Route("/health-os/metrics-report", metric_report),
+        Route("/health-os/private-report", private_report),
         Route("/health-os/quarantine/apply", quarantine_apply, methods=["POST"]),
     ])
 
