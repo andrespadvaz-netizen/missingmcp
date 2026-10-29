@@ -5,12 +5,14 @@ hint; it is never represented as an original HealthKit UUID.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import hmac
 import json
+from time import perf_counter
 from typing import Any, Mapping
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -53,6 +55,14 @@ CREATE TABLE IF NOT EXISTS health_os_tuanhdo_promotion_links (
 );
 CREATE INDEX IF NOT EXISTS health_os_tuanhdo_links_operation
  ON health_os_tuanhdo_promotion_links(operation_id);
+CREATE TABLE IF NOT EXISTS health_os_tuanhdo_ingest_attempts (
+ attempt_id TEXT PRIMARY KEY, batch_key TEXT, operation_id TEXT,
+ status TEXT NOT NULL CHECK(status IN ('started','committed','replayed','invalid','failed','interrupted')),
+ started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+ committed_at TEXT, finished_at TEXT, phase_ms_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS health_os_tuanhdo_attempt_batch
+ ON health_os_tuanhdo_ingest_attempts(batch_key);
 """
 
 # Exact (source, sourceBundleId, deviceDetail.model,
@@ -400,14 +410,26 @@ def _stored_interval(start_text: Any, end_text: Any) -> tuple[datetime, datetime
 class _AcceptedIntervals:
     """Accepted intervals, decrypted once per metric within an ingest transaction."""
 
-    def __init__(self, repo: HealthOSRepository) -> None:
+    def __init__(self, repo: HealthOSRepository,
+                 phases: dict[str, float] | None = None) -> None:
         self._repo = repo
-        self._by_metric: dict[str, list[tuple[datetime, datetime]] | None] = {}
+        self._by_metric: dict[str, _IntervalIndex | None] = {}
+        self._phases = phases
 
-    def get(self, metric: str) -> list[tuple[datetime, datetime]] | None:
+    def _in_current_series(self, metric: str, start: datetime) -> bool:
+        if metric == "sleep_duration" and self._repo.sleep_series_start is not None:
+            return start >= self._repo.sleep_series_start
+        if (metric in HealthOS.ACTIVITY_SERIES_METRICS
+                and self._repo.activity_series_start is not None):
+            return start >= self._repo.activity_series_start
+        return True
+
+    def get(self, metric: str) -> _IntervalIndex | None:
         """A damaged stored interval blocks the whole metric, as in the full scan."""
         if metric not in self._by_metric:
-            intervals: list[tuple[datetime, datetime]] | None = []
+            load_start = perf_counter()
+            intervals: list[tuple[datetime, datetime]] = []
+            damaged = False
             for row in self._repo.conn.execute(
                 "SELECT interval_enc FROM health_os_tuanhdo_records "
                 "WHERE metric=? AND disposition='accepted'", (metric,),
@@ -416,14 +438,19 @@ class _AcceptedIntervals:
                     interval = json.loads(store.decrypt(self._repo.data_key, row["interval_enc"]))
                     parsed = _stored_interval(interval["start"], interval["end"])
                     if parsed is None:
-                        intervals = None
+                        damaged = True
                         break
                 except (IndexError, TypeError, ValueError, KeyError, UnicodeError,
                         AttributeError, InvalidTag):
-                    intervals = None
+                    damaged = True
                     break
-                intervals.append(parsed)
-            self._by_metric[metric] = intervals
+                if self._in_current_series(metric, parsed[0]):
+                    intervals.append(parsed)
+            self._by_metric[metric] = None if damaged else _IntervalIndex(intervals)
+            if self._phases is not None:
+                self._phases["interval_load_ms"] = round(
+                    self._phases.get("interval_load_ms", 0)
+                    + (perf_counter() - load_start) * 1000, 3)
         return self._by_metric[metric]
 
     def add(self, sample: Sample) -> None:
@@ -437,8 +464,47 @@ class _AcceptedIntervals:
             parsed = None
         if parsed is None:
             self._by_metric[sample.metric] = None
-        else:
-            self._by_metric[sample.metric].append(parsed)
+        elif self._in_current_series(sample.metric, parsed[0]):
+            self._by_metric[sample.metric].add(*parsed)
+
+
+class _IntervalIndex:
+    """Exact overlap queries over accepted intervals, including nested ones."""
+
+    _FLUSH_SIZE = 256
+
+    def __init__(self, intervals: list[tuple[datetime, datetime]]) -> None:
+        ordered = sorted(intervals, key=lambda pair: pair[0])
+        self.starts = [start for start, _ in ordered]
+        self.ends = [end for _, end in ordered]
+        self.pending: list[tuple[datetime, datetime]] = []
+        self.max_ends: list[datetime] = []
+        for end in self.ends:
+            self.max_ends.append(max(self.max_ends[-1], end) if self.max_ends else end)
+
+    def add(self, start: datetime, end: datetime) -> None:
+        self.pending.append((start, end))
+        if len(self.pending) >= self._FLUSH_SIZE:
+            # Merge in bounded blocks: reverse-ordered batches remain fast.
+            from heapq import merge
+            ordered = merge(zip(self.starts, self.ends),
+                            sorted(self.pending, key=lambda pair: pair[0]))
+            self.starts = []
+            self.ends = []
+            self.max_ends = []
+            for item_start, item_end in ordered:
+                self.starts.append(item_start)
+                self.ends.append(item_end)
+                prior = self.max_ends[-1] if self.max_ends else None
+                self.max_ends.append(max(prior, item_end) if prior else item_end)
+            self.pending.clear()
+
+    def overlaps(self, start: datetime, end: datetime) -> bool:
+        # Strict inequalities retain the existing contiguous-interval rule.
+        last = bisect_left(self.starts, end) - 1
+        return ((last >= 0 and self.max_ends[last] > start)
+                or any(item_start < end and item_end > start
+                       for item_start, item_end in self.pending))
 
 
 def _interval_conflict(repo: HealthOSRepository, sample: Sample,
@@ -446,20 +512,7 @@ def _interval_conflict(repo: HealthOSRepository, sample: Sample,
     if sample.metric not in _ADDITIVE or sample.start_at == sample.end_at:
         return False
     intervals = (accepted if accepted is not None else _AcceptedIntervals(repo)).get(sample.metric)
-    if intervals is None:
-        return True
-    for start, end in intervals:
-        if (sample.metric == "sleep_duration" and repo.sleep_series_start is not None
-                and start < repo.sleep_series_start):
-            # Legacy intervals do not enter the separate current sleep series.
-            continue
-        if (sample.metric in HealthOS.ACTIVITY_SERIES_METRICS
-                and repo.activity_series_start is not None
-                and start < repo.activity_series_start):
-            continue
-        if max(sample.start_at, start) < min(sample.end_at, end):
-            return True
-    return False
+    return intervals is None or intervals.overlaps(sample.start_at, sample.end_at)
 
 
 def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProvenance,
@@ -590,20 +643,77 @@ def _link_promotion(conn, batch_key: str, record_index: int,
     )
 
 
+_DISPOSITION_INDEX = ("CREATE INDEX IF NOT EXISTS health_os_tuanhdo_disposition_reason "
+                      "ON health_os_tuanhdo_records(disposition, reason)")
+
+
+def migrate_tuanhdo_disposition_index(repo: HealthOSRepository) -> float:
+    """Explicit, idempotent migration; run before traffic on a reviewed copy."""
+    with repo._write_lock:
+        repo.conn.executescript(_SCHEMA)
+        started = perf_counter()
+        repo.conn.execute(_DISPOSITION_INDEX)
+        repo.conn.commit()
+        return round((perf_counter() - started) * 1000, 3)
+
+
+def start_tuanhdo_attempt(repo: HealthOSRepository, attempt_id: str) -> None:
+    """Persist receipt of an authenticated request before reading its body."""
+    with repo._write_lock:
+        repo.conn.executescript(_SCHEMA)
+        has_index = repo.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND "
+            "name='health_os_tuanhdo_disposition_reason'").fetchone()
+        if has_index is None:
+            if repo.conn.execute(
+                "SELECT 1 FROM health_os_tuanhdo_records LIMIT 1").fetchone() is not None:
+                raise RuntimeError("health_os_tuanhdo_disposition_reason migration required")
+            # Fresh empty databases need no data scan.
+            repo.conn.execute(_DISPOSITION_INDEX)
+        repo.conn.execute(
+            "INSERT INTO health_os_tuanhdo_ingest_attempts(attempt_id,status) VALUES (?,'started')",
+            (attempt_id,),
+        )
+        repo.conn.commit()
+
+
+def finish_tuanhdo_attempt(repo: HealthOSRepository, attempt_id: str,
+                           status: str, phases: Mapping[str, float]) -> None:
+    if status not in {"invalid", "failed", "interrupted"}:
+        raise ValueError("invalid attempt terminal state")
+    with repo._write_lock:
+        repo.conn.execute(
+            "UPDATE health_os_tuanhdo_ingest_attempts SET status=?, "
+            "finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), phase_ms_json=? "
+            "WHERE attempt_id=? AND status='started'",
+            (status, json.dumps(phases, sort_keys=True), attempt_id),
+        )
+        repo.conn.commit()
+
+
 def ingest_tuanhdo(repo: HealthOSRepository, payload: Mapping[str, Any],
                    approved_watch: WatchProvenance = frozenset(), *,
                    approved_types: frozenset[str] = frozenset(),
                    derived_watch: DerivedWatchProvenance = frozenset(),
-                   additive_watch_selection: AdditiveWatchSelection = {}) -> dict[str, Any]:
+                   additive_watch_selection: AdditiveWatchSelection = {},
+                   attempt_id: str | None = None,
+                   phases: dict[str, float] | None = None) -> dict[str, Any]:
     """Stage every row and promote only unambiguous, verified observations.
 
     The response contains fixed reason names and counts only. Workouts remain
     in the encrypted batch until a validated workout mapping exists.
     """
     _validate_additive_selection(additive_watch_selection, approved_watch)
+    if attempt_id is None:
+        attempt_id = uuid4().hex
+        start_tuanhdo_attempt(repo, attempt_id)
+    wait_start = perf_counter()
     with repo._write_lock:
+        measured = phases if phases is not None else {}
+        measured["lock_wait_ms"] = round((perf_counter() - wait_start) * 1000, 3)
         return _ingest_tuanhdo_locked(repo, payload, approved_watch, approved_types,
-                                      derived_watch, additive_watch_selection)
+                                      derived_watch, additive_watch_selection,
+                                      attempt_id, measured)
 
 
 def _validate_additive_selection(selection: AdditiveWatchSelection,
@@ -617,17 +727,22 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
                            approved_watch: WatchProvenance,
                            approved_types: frozenset[str],
                            derived_watch: DerivedWatchProvenance,
-                           additive_watch_selection: AdditiveWatchSelection) -> dict[str, Any]:
+                           additive_watch_selection: AdditiveWatchSelection,
+                           attempt_id: str, phases: dict[str, float]) -> dict[str, Any]:
+    stage_start = perf_counter()
     if not isinstance(payload, Mapping) or not isinstance(payload.get("records"), list):
         raise ValueError("records_required")
     parsed = parse_health_export(payload)
+    phases["parse_ms"] = round((perf_counter() - stage_start) * 1000, 3)
     if parsed.aggregation != "raw":
         raise ValueError("aggregation_not_raw")
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False,
                            separators=(",", ":"), allow_nan=False)
     batch_key = sha256(canonical.encode("utf-8")).hexdigest()
+    phases["canonical_ms"] = round((perf_counter() - stage_start) * 1000 - phases["parse_ms"], 3)
     conn = repo.conn
     conn.executescript(_SCHEMA)
+    commit_attempted = False
     try:
         conn.execute("BEGIN IMMEDIATE")
         repo._assert_sleep_series_mode_current()
@@ -637,13 +752,33 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
             (batch_key,),
         ).fetchone()
         if previous is not None:
+            receipt_start = perf_counter()
             receipt = _current_receipt(conn, batch_key, json.loads(previous["receipt_json"]))
+            phases["receipt_ms"] = round((perf_counter() - receipt_start) * 1000, 3)
+            prior_op = conn.execute(
+                "SELECT operation_id FROM health_os_tuanhdo_promotion_ops "
+                "WHERE batch_key=? AND kind='ingest' ORDER BY rowid LIMIT 1", (batch_key,),
+            ).fetchone()
+            phases["stage_ms"] = round((perf_counter() - stage_start) * 1000, 3)
+            conn.execute(
+                "UPDATE health_os_tuanhdo_ingest_attempts SET batch_key=?,operation_id=?,"
+                "status='replayed',committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+                "phase_ms_json=? WHERE attempt_id=? AND status='started'",
+                (batch_key, prior_op["operation_id"] if prior_op else None,
+                 json.dumps(phases, sort_keys=True), attempt_id),
+            )
+            commit_attempted = True
+            commit_start = perf_counter()
             conn.commit()
+            phases["commit_ms"] = round((perf_counter() - commit_start) * 1000, 3)
             return {**receipt, "replayed": True}
         samples = {sample.record_index: sample for sample in
                    _select_additive_watch(parsed.samples, additive_watch_selection)}
+        unknown_start = perf_counter()
         unknown_intervals = _unknown_interval_metrics(repo)
-        accepted_intervals = _AcceptedIntervals(repo)
+        phases["unknown_scan_ms"] = round((perf_counter() - unknown_start) * 1000, 3)
+        accepted_intervals = _AcceptedIntervals(repo, phases)
+        loop_start = perf_counter()
         conn.execute(
             "INSERT INTO health_os_tuanhdo_batches(batch_key,payload_enc,receipt_json) VALUES (?,?,?)",
             (batch_key, store.encrypt(repo.data_key, canonical), "{}"),
@@ -685,13 +820,33 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
         }
         conn.execute("UPDATE health_os_tuanhdo_batches SET receipt_json=? WHERE batch_key=?",
                      (json.dumps(receipt, sort_keys=True), batch_key))
+        phases["promote_ms"] = round((perf_counter() - loop_start) * 1000, 3)
+        phases["stage_ms"] = round((perf_counter() - stage_start) * 1000, 3)
+        conn.execute(
+            "UPDATE health_os_tuanhdo_ingest_attempts SET batch_key=?,operation_id=?,"
+            "status='committed',committed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),"
+            "phase_ms_json=? WHERE attempt_id=? AND status='started'",
+            (batch_key, operation_id, json.dumps(phases, sort_keys=True), attempt_id),
+        )
+        commit_attempted = True
+        commit_start = perf_counter()
         conn.commit()
+        phases["commit_ms"] = round((perf_counter() - commit_start) * 1000, 3)
         repo._invalidate()
-    except Exception:
+    except Exception as exc:
         conn.rollback()
         repo._invalidate()
+        # A failed COMMIT can have an uncertain outcome. Preserve 'started'
+        # for reconciliation rather than claiming the batch did not persist.
+        if not commit_attempted:
+            finish_tuanhdo_attempt(repo, attempt_id,
+                                   "invalid" if isinstance(exc, (TypeError, ValueError))
+                                   else "failed", phases)
         raise
-    return {**_current_receipt(conn, batch_key, receipt), "replayed": False}
+    receipt_start = perf_counter()
+    current = _current_receipt(conn, batch_key, receipt)
+    phases["receipt_ms"] = round((perf_counter() - receipt_start) * 1000, 3)
+    return {**current, "replayed": False}
 
 
 def review_held_tuanhdo(repo: HealthOSRepository,

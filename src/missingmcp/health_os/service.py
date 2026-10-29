@@ -6,8 +6,11 @@ may be deployed as a separate Railway service with its own database/secret.
 from __future__ import annotations
 
 import hmac
+import asyncio
 import json
 import os
+from time import perf_counter
+from uuid import uuid4
 from datetime import datetime, timezone
 
 from starlette.applications import Starlette
@@ -16,7 +19,7 @@ from starlette.routing import Route
 
 from .. import security, store
 from ..config import Config, load_config
-from ..log import resolve_log_level, setup_logging
+from ..log import log, resolve_log_level, setup_logging
 from .persistence import HealthOSRepository
 from .health_auto_export import parse_health_auto_export
 from .apple_export import parse_apple_health_export
@@ -24,7 +27,8 @@ from .core import APPLE_HEALTH, SPEEDIANCE
 from .private_report import build_private_report
 from .tuanhdo_staging import (accepted_sleep_episodes, accepted_sleep_phases,
                               accepted_watch_identity_by_key, activity_cross_day_exclusions,
-                              ingest_tuanhdo)
+                              finish_tuanhdo_attempt, ingest_tuanhdo,
+                              start_tuanhdo_attempt)
 
 
 def build_health_os_app(config: Config) -> Starlette:
@@ -122,17 +126,56 @@ def build_health_os_app(config: Config) -> Starlette:
     async def tuanhdo_export(request):
         if not authorized_ingest(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
-        raw = await security.read_body_limited(request, max_bytes=16 * 1024 * 1024)
-        if raw is None:
-            return JSONResponse({"status": "TOO_LARGE"}, status_code=413)
+        attempt_id = uuid4().hex
+        started = perf_counter()
+        start_tuanhdo_attempt(repo, attempt_id)
+        phases: dict[str, float] = {"start_ms": round((perf_counter() - started) * 1000, 3)}
+        headers = {"Cache-Control": "no-store", "X-Health-OS-Attempt-Id": attempt_id}
+        body_start = perf_counter()
         try:
-            receipt = ingest_tuanhdo(repo, json.loads(raw.decode("utf-8")), approved_watch,
-                                     approved_types=approved_types,
-                                     derived_watch=derived_watch,
-                                     additive_watch_selection=additive_watch_selection)
+            raw = await security.read_body_limited(request, max_bytes=16 * 1024 * 1024)
+        except asyncio.CancelledError:
+            phases["body_ms"] = round((perf_counter() - body_start) * 1000, 3)
+            finish_tuanhdo_attempt(repo, attempt_id, "interrupted", phases)
+            raise
+        except Exception:
+            phases["body_ms"] = round((perf_counter() - body_start) * 1000, 3)
+            finish_tuanhdo_attempt(repo, attempt_id, "interrupted", phases)
+            raise
+        phases["body_ms"] = round((perf_counter() - body_start) * 1000, 3)
+        if raw is None:
+            finish_tuanhdo_attempt(repo, attempt_id, "invalid", phases)
+            log("health-os-tuanhdo-ingest", attempt_id=attempt_id, outcome="too_large",
+                body_ms=phases["body_ms"])
+            return JSONResponse({"status": "TOO_LARGE"}, status_code=413, headers=headers)
+        try:
+            json_start = perf_counter()
+            decoded = json.loads(raw.decode("utf-8"))
+            phases["json_ms"] = round((perf_counter() - json_start) * 1000, 3)
+            receipt = ingest_tuanhdo(
+                repo, decoded, approved_watch,
+                approved_types=approved_types, derived_watch=derived_watch,
+                additive_watch_selection=additive_watch_selection,
+                attempt_id=attempt_id, phases=phases)
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError):
-            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400)
-        return JSONResponse({"status": "OK", **receipt}, headers={"Cache-Control": "no-store"})
+            finish_tuanhdo_attempt(repo, attempt_id, "invalid", phases)
+            log("health-os-tuanhdo-ingest", attempt_id=attempt_id, outcome="invalid",
+                body_ms=phases["body_ms"])
+            return JSONResponse({"status": "INVALID_REQUEST"}, status_code=400, headers=headers)
+        log("health-os-tuanhdo-ingest", attempt_id=attempt_id,
+            outcome="replayed" if receipt["replayed"] else "committed",
+            start_ms=phases["start_ms"], body_ms=phases["body_ms"],
+            json_ms=phases["json_ms"],
+            parse_ms=phases.get("parse_ms", 0),
+            preflight_ms=phases.get("unknown_scan_ms", 0),
+            interval_load_ms=phases.get("interval_load_ms", 0),
+            lock_wait_ms=phases.get("lock_wait_ms", 0),
+            commit_ms=phases.get("commit_ms", 0),
+            receipt_ms=phases.get("receipt_ms", 0),
+            promote_ms=phases.get("promote_ms", 0),
+            stage_ms=phases.get("stage_ms", 0),
+            total_ms=round((perf_counter() - started) * 1000, 3))
+        return JSONResponse({"status": "OK", **receipt}, headers=headers)
 
     async def quality(request):
         if not authorized_read(request):
