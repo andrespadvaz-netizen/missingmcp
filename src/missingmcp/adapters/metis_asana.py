@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from datetime import datetime, timezone
 
 from .base import LoginError, LoginOk, SessionExpired
 from ..log import log
@@ -13,12 +14,12 @@ from ..store import encrypt, decrypt
 
 ACCOUNT = "asana-andres-1211117380475084"
 CONTEXTS = frozenset({"SHOKKO", "FINAL_FINAL", "VENTURE_QUEST"})
-# Two separately authorized, bounded probes. Reservations are never refunded
-# after a provider dispatch, including failed or uncertain outcomes. Units are
-# micro-USD at GPT-5's published rate.
-PROBE_BUDGET_MICRO_USD = 100_000
-PROBE_MAX_CALLS = 2
-PROBE_TOTAL_BUDGET_MICRO_USD = PROBE_BUDGET_MICRO_USD * PROBE_MAX_CALLS
+# Reservations are never refunded after dispatch, including failed or
+# uncertain outcomes. The 20-call monthly ceiling reserves at most USD 1.10.
+# Units are micro-USD at GPT-5's published rate.
+PROBE_BUDGET_MICRO_USD = 55_000
+PROBE_MAX_CALLS = 20
+PROBE_TOTAL_BUDGET_MICRO_USD = 1_100_000
 PROBE_MAX_REQUEST_BYTES = 8_192
 PROBE_MAX_OUTPUT_TOKENS = 4_096
 PROBE_INPUT_OVERHEAD_TOKENS = 1_024
@@ -74,7 +75,41 @@ class MetisAsanaAdapter:
         self.queue.db.execute("""CREATE TABLE IF NOT EXISTS metis_asana_probe_budget (
             owner TEXT PRIMARY KEY, reserved_micro_usd INTEGER NOT NULL,
             call_count INTEGER NOT NULL)""")
+        self.queue.db.execute("""CREATE TABLE IF NOT EXISTS metis_asana_monthly_budget (
+            owner TEXT NOT NULL, cycle TEXT NOT NULL,
+            reserved_micro_usd INTEGER NOT NULL, call_count INTEGER NOT NULL,
+            PRIMARY KEY(owner, cycle))""")
+        self.queue.db.execute("""CREATE TABLE IF NOT EXISTS metis_asana_budget_migrations (
+            name TEXT PRIMARY KEY)""")
+        self._migrate_legacy_budget()
         self.direct_audit = DirectAudit(config)
+
+    def _migrate_legacy_budget(self):
+        """Conservatively charge old lifetime reservations to their last audit month."""
+        db = self.queue.db
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            migrated = db.execute("SELECT 1 FROM metis_asana_budget_migrations "
+                                  "WHERE name='monthly_v1'").fetchone()
+            if migrated is None:
+                for row in db.execute(
+                    "SELECT owner,reserved_micro_usd,call_count FROM metis_asana_probe_budget"
+                ).fetchall():
+                    latest = db.execute(
+                        "SELECT substr(max(created_at),1,7) FROM metis_asana_audits WHERE owner=?",
+                        (row["owner"],)).fetchone()[0]
+                    cycle = latest or datetime.now(timezone.utc).strftime("%Y-%m")
+                    db.execute("INSERT INTO metis_asana_monthly_budget "
+                               "(owner,cycle,reserved_micro_usd,call_count) VALUES (?,?,?,?) "
+                               "ON CONFLICT(owner,cycle) DO UPDATE SET "
+                               "reserved_micro_usd=reserved_micro_usd+excluded.reserved_micro_usd, "
+                               "call_count=call_count+excluded.call_count",
+                               (row["owner"], cycle, row["reserved_micro_usd"], row["call_count"]))
+                db.execute("INSERT INTO metis_asana_budget_migrations(name) VALUES ('monthly_v1')")
+            db.execute("COMMIT")
+        except BaseException:
+            db.execute("ROLLBACK")
+            raise
 
     def login_hint(self, form):
         return "asana-individual"
@@ -149,21 +184,18 @@ class MetisAsanaAdapter:
             reservation = probe_reservation_micro_usd(text, context)
             if reservation > PROBE_BUDGET_MICRO_USD:
                 raise RequestError("probe_budget_exceeded")
+            cycle = datetime.now(timezone.utc).strftime("%Y-%m")
             db.execute("BEGIN IMMEDIATE")
             try:
                 row = db.execute("SELECT fingerprint,state,response_enc FROM metis_asana_audits "
                                  "WHERE owner=? AND idem=?", (account_key, idem)).fetchone()
                 if row is None:
-                    # Count pre-existing dispatches too, including failed or
-                    # uncertain calls made before this budget table existed.
-                    total = db.execute("SELECT count(*) FROM metis_asana_audits "
-                                       "WHERE owner=?", (account_key,)).fetchone()[0]
                     budget = db.execute("SELECT reserved_micro_usd,call_count "
-                                        "FROM metis_asana_probe_budget WHERE owner=?",
-                                        (account_key,)).fetchone()
+                                        "FROM metis_asana_monthly_budget WHERE owner=? AND cycle=?",
+                                        (account_key, cycle)).fetchone()
                     reserved = budget["reserved_micro_usd"] if budget else 0
                     calls = budget["call_count"] if budget else 0
-                    if total >= PROBE_MAX_CALLS or calls >= PROBE_MAX_CALLS or \
+                    if calls >= PROBE_MAX_CALLS or \
                             reserved + reservation > PROBE_TOTAL_BUDGET_MICRO_USD:
                         raise RequestError("probe_budget_exhausted")
                     recent = db.execute("SELECT count(*) FROM metis_asana_audits "
@@ -171,10 +203,10 @@ class MetisAsanaAdapter:
                                         (account_key,)).fetchone()[0]
                     if recent >= 20:
                         raise RequestError("hourly_audit_limit")
-                    db.execute("INSERT INTO metis_asana_probe_budget(owner,reserved_micro_usd,call_count) "
-                               "VALUES (?,?,1) ON CONFLICT(owner) DO UPDATE SET "
+                    db.execute("INSERT INTO metis_asana_monthly_budget(owner,cycle,reserved_micro_usd,call_count) "
+                               "VALUES (?,?,?,1) ON CONFLICT(owner,cycle) DO UPDATE SET "
                                "reserved_micro_usd=reserved_micro_usd+excluded.reserved_micro_usd, "
-                               "call_count=call_count+1", (account_key, reservation))
+                               "call_count=call_count+1", (account_key, cycle, reservation))
                     db.execute("INSERT INTO metis_asana_audits(owner,idem,fingerprint,state) "
                                "VALUES (?,?,?,'DISPATCHED')", (account_key, idem, fingerprint))
                 elif row["fingerprint"] != fingerprint:

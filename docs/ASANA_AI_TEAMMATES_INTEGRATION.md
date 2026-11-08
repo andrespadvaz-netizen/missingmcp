@@ -12,27 +12,50 @@ task create/update, as documented by Asana.
 
 Configure the operator process with `ASANA_ACCESS_TOKEN`,
 `ASANA_WORKSPACE_GID`, `ASANA_DISPATCH_LEDGER` (a path on a durable volume),
+and `ASANA_HANDOFF_LEDGER` when using cross-project handoffs,
 and `ASANA_AGENT_PROJECTS_JSON`, a JSON object mapping
-allowed project GIDs to exact Metis context IDs. Keep the token in a secret
-manager, not this repository or shell history. Example configuration using
-placeholders:
+allowed project GIDs to exact Metis context IDs. Writes additionally require
+`ASANA_AGENT_GIDS_JSON` (project GID to one or more permitted AI Teammate GIDs)
+and `ASANA_DISPATCH_OWNER_GIDS_JSON` (project GID to its verified human owner).
+An optional `ASANA_CROSS_CONTEXT_AGENT_GIDS_JSON` explicitly lists any agent
+authorized in more than one context; the default is no such agents. Keep the token
+in a secret manager, not this repository or shell history. Example
+configuration using placeholders:
 
 ```json
 {"<shokko-project-gid>": "SHOKKO", "<final-final-project-gid>": "FINAL_FINAL"}
 ```
 
+The dispatch project must be private, owned by its configured owner, and
+mapped to explicitly permitted agents. The client verifies these facts and the agent's
+workspace and subtype immediately before writing. A task being assigned must
+belong only to that dispatch project; multi-homed tasks are rejected. The
+client does not grant project membership to the agent. Agent collaboration,
+project membership and writable destinations require a separately reviewed
+business workflow and access plan.
+
 Invoke `uv run python scripts/asana_agents.py discover`; use `agent --agent-gid
 <gid>`, `task --task-gid <gid>`, `stories --task-gid <gid>`, or `assign
 --task-gid <dedicated-task-gid> --agent-gid <gid> --project-gid <gid>`.
-To create a dedicated task, use `create --source-task-gid <gid>
---project-gid <gid> --agent-gid <gid> --title <title> --request <brief>
---idempotency-key <stable-key>`. The CLI cannot create without a durable ledger.
+To create a dedicated task, use `create --project-gid <gid> --agent-gid <gid>
+--title <title> --request <brief> --idempotency-key <stable-key>`. An optional
+`--source-task-gid` is accepted only when the source task belongs exclusively
+to that same private dispatch project. The CLI cannot create without a durable ledger.
 Keep the same key for an identical request. If creation is uncertain, reconcile
 it manually before choosing a new key; retries never create a second task.
-Assignment requires an unassigned task in an allowed project. It never moves
+Assignment requires an unassigned task in the private dispatch project. It never moves
 or overwrites a human-owned original. After assignment it verifies the task.
 If transport fails during the write, it reads the task and only reports success
 if the requested assignee appears; it does not repeat the PUT blindly.
+
+`handoff --source-task-gid <source> --project-gid <target> --agent-gid <agent>
+--title <title> --request <audience-safe-brief> --idempotency-key <key>`
+correlates a source task and a new agent task in the same exact Metis context,
+including when they are in different allowlisted projects. The source GID is
+retained in the private handoff ledger; it is not copied into the new task's
+notes. The request must be self-contained and safe for the destination task's
+audience. A missing or uncertain created task must be reconciled before any
+new key is used. Seeing a response story is evidence, not human acceptance.
 
 Stories include stable GIDs and timestamps for de-duplication. A story or task
 completion is evidence of Asana activity, not proof that the agent's answer is
@@ -57,17 +80,16 @@ an individual Gateway identity for Andrés. It exposes only
 not expose the operator key, private Dot conversations, or Metis writes.
 Every audit needs an idempotency key. The Gateway reserves that key before the
 provider call; uncertain calls are not automatically repeated. Receipts are
-encrypted. The production check permits two calls total for Andrés, counting
-the failed 401 attempt and at most one new call, for the lifetime of the durable
-database. It accepts at most 8,192 UTF-8 bytes of
+encrypted. The monthly control permits at most 20 calls for Andrés per UTC
+calendar month, including failed or uncertain calls. The two original probe
+reservations migrate into their last audit month and the migration runs once.
+It accepts at most 8,192 UTF-8 bytes of
 forwarded request text and caps GPT-5 output, including reasoning, at 4,096
 tokens. A conservative reservation is made in the same transaction as the
-idempotency record before dispatch. Its maximum is below USD 0.10 at the
-published GPT-5 token rates. The cumulative ceiling is USD 0.20 and the
-per-call ceiling remains USD 0.10. Failed or uncertain calls do not release
-their reservation; after the second call, a distinct idempotency key cannot
-trigger another call. This guard must be deliberately redesigned and approved before routine
-audits are enabled. Asana request usage is separate from Gateway model cost.
+idempotency record before dispatch. Its maximum is below USD 0.055 at the
+published GPT-5 token rates. The monthly reservation ceiling is USD 1.10.
+Failed or uncertain calls do not release their reservation. Asana request
+usage is separate from Gateway model cost.
 
 Asana's live OAuth request included PKCE S256. The Asana resource and all
 existing Gateway clients require S256 for new authorization codes and token

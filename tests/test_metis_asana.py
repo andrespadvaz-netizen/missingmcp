@@ -11,7 +11,7 @@ from missingmcp.app import build_app
 from missingmcp.config import load_config
 from missingmcp.adapters.metis_asana import (
     MetisAsanaAdapter, ACCOUNT, PROBE_BUDGET_MICRO_USD,
-    PROBE_MAX_OUTPUT_TOKENS, PROBE_TOTAL_BUDGET_MICRO_USD,
+    PROBE_MAX_CALLS, PROBE_MAX_OUTPUT_TOKENS, PROBE_TOTAL_BUDGET_MICRO_USD,
     probe_reservation_micro_usd,
 )
 from missingmcp.adapters.base import LoginError
@@ -87,6 +87,26 @@ def test_asana_credential_is_independent(tmp_path):
     assert adapter.start_login({"metis_key": "a" * 40}).account_key == ACCOUNT
 
 
+def test_legacy_reservations_migrate_once_into_monthly_ceiling(tmp_path):
+    cfg = config(tmp_path)
+    original = MetisAsanaAdapter(cfg)
+    original.queue.db.execute(
+        "INSERT INTO metis_asana_audits(owner,idem,fingerprint,state,created_at) "
+        "VALUES (?,?,?,'DISPATCHED','2026-11-08 12:00:00')",
+        (ACCOUNT, "legacy-key-000001", "f" * 64))
+    original.queue.db.execute(
+        "INSERT INTO metis_asana_probe_budget(owner,reserved_micro_usd,call_count) "
+        "VALUES (?,?,?)", (ACCOUNT, 53_400, 1))
+    original.queue.db.execute("DELETE FROM metis_asana_budget_migrations")
+    reopened = MetisAsanaAdapter(cfg)
+    restarted = MetisAsanaAdapter(cfg)
+    for adapter in (reopened, restarted):
+        row = adapter.queue.db.execute(
+            "SELECT reserved_micro_usd,call_count FROM metis_asana_monthly_budget "
+            "WHERE owner=? AND cycle='2026-11'", (ACCOUNT,)).fetchone()
+        assert tuple(row) == (53_400, 1)
+
+
 def test_static_client_rotation_revokes_only_asana_tokens(tmp_path):
     db = store.init_db(str(tmp_path / "gateway.db"))
     callback = "https://app.asana.com/-/integrations/oauth/callback"
@@ -137,18 +157,20 @@ async def test_context_boundary_and_idempotent_receipt(tmp_path, monkeypatch):
     assert (await call("FINAL_FINAL"))["isError"] is True
     another = await call("FINAL_FINAL", "stable-asana-key-0002")
     assert another["isError"] is False
-    assert (await call("VENTURE_QUEST", "stable-asana-key-0003"))["isError"] is True
+    assert (await call("VENTURE_QUEST", "stable-asana-key-0003"))["isError"] is False
     assert probe_reservation_micro_usd("Review evidence", "SHOKKO") < PROBE_BUDGET_MICRO_USD
     budget = adapter.queue.db.execute(
-        "SELECT reserved_micro_usd,call_count FROM metis_asana_probe_budget "
+        "SELECT reserved_micro_usd,call_count FROM metis_asana_monthly_budget "
         "WHERE owner=?", (ACCOUNT,)).fetchone()
-    assert budget["call_count"] == 2
+    assert budget["call_count"] == 3
     forwarded = ("Contexto: SHOKKO\nProcedencia del contexto declarada por el cliente: "
                  "current_request\n\nReview evidence")
     second_forwarded = forwarded.replace("SHOKKO", "FINAL_FINAL", 1)
+    third_forwarded = forwarded.replace("SHOKKO", "VENTURE_QUEST", 1)
     assert budget["reserved_micro_usd"] == (probe_reservation_micro_usd(
         forwarded, "SHOKKO") + probe_reservation_micro_usd(
-        second_forwarded, "FINAL_FINAL"))
+        second_forwarded, "FINAL_FINAL") + probe_reservation_micro_usd(
+        third_forwarded, "VENTURE_QUEST"))
     assert budget["reserved_micro_usd"] < PROBE_TOTAL_BUDGET_MICRO_USD
 
 
@@ -178,14 +200,15 @@ async def test_probe_budget_survives_restart_and_uncertain_result(tmp_path, monk
     restarted = MetisAsanaAdapter(cfg)
     monkeypatch.setattr(restarted.direct_audit, "run", uncertain_run)
     assert (await call(restarted, "stable-probe-key-0001"))["isError"] is True
-    with pytest.raises(RuntimeError, match="unknown"):
-        await call(restarted, "stable-probe-key-0002")
-    assert (await call(restarted, "stable-probe-key-0003"))["isError"] is True
-    assert calls == [1, 1]
+    for number in range(2, PROBE_MAX_CALLS + 1):
+        with pytest.raises(RuntimeError, match="unknown"):
+            await call(restarted, f"stable-probe-key-{number:04d}")
+    assert (await call(restarted, "stable-probe-key-0021"))["isError"] is True
+    assert calls == [1] * PROBE_MAX_CALLS
     row = restarted.queue.db.execute(
-        "SELECT call_count,reserved_micro_usd FROM metis_asana_probe_budget "
+        "SELECT call_count,reserved_micro_usd FROM metis_asana_monthly_budget "
         "WHERE owner=?", (ACCOUNT,)).fetchone()
-    assert row["call_count"] == 2
+    assert row["call_count"] == PROBE_MAX_CALLS
     assert 0 < row["reserved_micro_usd"] < PROBE_TOTAL_BUDGET_MICRO_USD
 
 
