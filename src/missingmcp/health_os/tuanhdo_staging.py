@@ -369,8 +369,16 @@ def _fingerprint_token(repo: HealthOSRepository, sample: Sample) -> str:
                     "sha256").hexdigest()
 
 
-def _unknown_interval_metrics(repo: HealthOSRepository) -> frozenset[str]:
-    """Legacy core rows have no start time; do not infer safe non-overlap."""
+def _unknown_interval_metrics(repo: HealthOSRepository, *,
+                              required_metrics: frozenset[str] = _ADDITIVE) -> frozenset[str]:
+    """Find legacy blockers; callers may need only a subset of additive metrics.
+
+    This is a promotion guard, not a global integrity audit. Stop only when
+    every requested metric is already blocked; unreadable rows encountered
+    before that point still block all additive metrics, exactly as before.
+    """
+    if not required_metrics:
+        return frozenset()
     unknown: set[str] = set()
     for row in repo.conn.execute(
         "SELECT payload_enc FROM health_os_observations WHERE source=?", (APPLE_HEALTH,),
@@ -388,6 +396,8 @@ def _unknown_interval_metrics(repo: HealthOSRepository) -> frozenset[str]:
             ).fetchone()
             if known is None:
                 unknown.add(metric)
+                if required_metrics.issubset(unknown):
+                    return frozenset(unknown)
         except (IndexError, TypeError, ValueError, KeyError, UnicodeError, InvalidTag, AttributeError):
             return _ADDITIVE
     return frozenset(unknown)
@@ -775,7 +785,19 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
         samples = {sample.record_index: sample for sample in
                    _select_additive_watch(parsed.samples, additive_watch_selection)}
         unknown_start = perf_counter()
-        unknown_intervals = _unknown_interval_metrics(repo)
+        # Match the guards before legacy_interval_unknown in _promote. Current
+        # series already ignore legacy intervals, while unapproved/held rows
+        # cannot reach that check. Do not scan unrelated historical payloads.
+        required_legacy_metrics = frozenset(
+            sample.metric for sample in samples.values()
+            if sample.hold_reason == "source_unverified"
+            and sample.exported_type in approved_types
+            and sample.metric in _ADDITIVE
+            and not (sample.metric == "sleep_duration" and repo.sleep_series_start is not None)
+            and not (sample.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                     and repo.activity_series_start is not None)
+        )
+        unknown_intervals = _unknown_interval_metrics(repo, required_metrics=required_legacy_metrics)
         phases["unknown_scan_ms"] = round((perf_counter() - unknown_start) * 1000, 3)
         accepted_intervals = _AcceptedIntervals(repo, phases)
         loop_start = perf_counter()
