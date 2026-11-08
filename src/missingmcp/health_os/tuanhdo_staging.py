@@ -488,6 +488,11 @@ class _IntervalIndex:
         self.starts = [start for start, _ in ordered]
         self.ends = [end for _, end in ordered]
         self.pending: list[tuple[datetime, datetime]] = []
+        # Keep history immutable. Re-merging every historical interval for
+        # each 256 new samples makes a batch cost grow with history * batch.
+        self._added_starts: list[datetime] = []
+        self._added_ends: list[datetime] = []
+        self._added_max_ends: list[datetime] = []
         self.max_ends: list[datetime] = []
         for end in self.ends:
             self.max_ends.append(max(self.max_ends[-1], end) if self.max_ends else end)
@@ -497,22 +502,24 @@ class _IntervalIndex:
         if len(self.pending) >= self._FLUSH_SIZE:
             # Merge in bounded blocks: reverse-ordered batches remain fast.
             from heapq import merge
-            ordered = merge(zip(self.starts, self.ends),
+            ordered = merge(zip(self._added_starts, self._added_ends),
                             sorted(self.pending, key=lambda pair: pair[0]))
-            self.starts = []
-            self.ends = []
-            self.max_ends = []
+            self._added_starts = []
+            self._added_ends = []
+            self._added_max_ends = []
             for item_start, item_end in ordered:
-                self.starts.append(item_start)
-                self.ends.append(item_end)
-                prior = self.max_ends[-1] if self.max_ends else None
-                self.max_ends.append(max(prior, item_end) if prior else item_end)
+                self._added_starts.append(item_start)
+                self._added_ends.append(item_end)
+                prior = self._added_max_ends[-1] if self._added_max_ends else None
+                self._added_max_ends.append(max(prior, item_end) if prior else item_end)
             self.pending.clear()
 
     def overlaps(self, start: datetime, end: datetime) -> bool:
         # Strict inequalities retain the existing contiguous-interval rule.
         last = bisect_left(self.starts, end) - 1
+        added_last = bisect_left(self._added_starts, end) - 1
         return ((last >= 0 and self.max_ends[last] > start)
+                or (added_last >= 0 and self._added_max_ends[added_last] > start)
                 or any(item_start < end and item_end > start
                        for item_start, item_end in self.pending))
 
