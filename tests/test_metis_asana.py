@@ -11,7 +11,8 @@ from missingmcp.app import build_app
 from missingmcp.config import load_config
 from missingmcp.adapters.metis_asana import (
     MetisAsanaAdapter, ACCOUNT, PROBE_BUDGET_MICRO_USD,
-    PROBE_MAX_OUTPUT_TOKENS, probe_reservation_micro_usd,
+    PROBE_MAX_OUTPUT_TOKENS, PROBE_TOTAL_BUDGET_MICRO_USD,
+    probe_reservation_micro_usd,
 )
 from missingmcp.adapters.base import LoginError
 from missingmcp import store
@@ -134,15 +135,21 @@ async def test_context_boundary_and_idempotent_receipt(tmp_path, monkeypatch):
     assert first == second
     assert calls == [("ASANA", "SHOKKO", PROBE_MAX_OUTPUT_TOKENS)]
     assert (await call("FINAL_FINAL"))["isError"] is True
+    another = await call("FINAL_FINAL", "stable-asana-key-0002")
+    assert another["isError"] is False
+    assert (await call("VENTURE_QUEST", "stable-asana-key-0003"))["isError"] is True
     assert probe_reservation_micro_usd("Review evidence", "SHOKKO") < PROBE_BUDGET_MICRO_USD
     budget = adapter.queue.db.execute(
         "SELECT reserved_micro_usd,call_count FROM metis_asana_probe_budget "
         "WHERE owner=?", (ACCOUNT,)).fetchone()
-    assert budget["call_count"] == 1
+    assert budget["call_count"] == 2
     forwarded = ("Contexto: SHOKKO\nProcedencia del contexto declarada por el cliente: "
                  "current_request\n\nReview evidence")
-    assert budget["reserved_micro_usd"] == probe_reservation_micro_usd(
-        forwarded, "SHOKKO")
+    second_forwarded = forwarded.replace("SHOKKO", "FINAL_FINAL", 1)
+    assert budget["reserved_micro_usd"] == (probe_reservation_micro_usd(
+        forwarded, "SHOKKO") + probe_reservation_micro_usd(
+        second_forwarded, "FINAL_FINAL"))
+    assert budget["reserved_micro_usd"] < PROBE_TOTAL_BUDGET_MICRO_USD
 
 
 @pytest.mark.asyncio
@@ -169,14 +176,17 @@ async def test_probe_budget_survives_restart_and_uncertain_result(tmp_path, monk
     with pytest.raises(RuntimeError, match="unknown"):
         await call(adapter, "stable-probe-key-0001")
     restarted = MetisAsanaAdapter(cfg)
+    monkeypatch.setattr(restarted.direct_audit, "run", uncertain_run)
     assert (await call(restarted, "stable-probe-key-0001"))["isError"] is True
-    assert (await call(restarted, "stable-probe-key-0002"))["isError"] is True
-    assert calls == [1]
+    with pytest.raises(RuntimeError, match="unknown"):
+        await call(restarted, "stable-probe-key-0002")
+    assert (await call(restarted, "stable-probe-key-0003"))["isError"] is True
+    assert calls == [1, 1]
     row = restarted.queue.db.execute(
         "SELECT call_count,reserved_micro_usd FROM metis_asana_probe_budget "
         "WHERE owner=?", (ACCOUNT,)).fetchone()
-    assert row["call_count"] == 1
-    assert 0 < row["reserved_micro_usd"] < PROBE_BUDGET_MICRO_USD
+    assert row["call_count"] == 2
+    assert 0 < row["reserved_micro_usd"] < PROBE_TOTAL_BUDGET_MICRO_USD
 
 
 @pytest.mark.asyncio

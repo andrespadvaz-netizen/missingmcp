@@ -50,13 +50,15 @@ not create a credential, OAuth grant, AI Teammate, or production deployment.
   completed receipt or an `outcome_uncertain` state; they never silently make
   another paid model request. Any uncertain outcome needs operator
   reconciliation.
-- **Initial spending guard:** one new Asana audit for this account across the
+- **Authorized spending guard:** two Asana audits total for this account,
+  including the failed 401 attempt and at most one new call. Each call has a
+  USD 0.10 reservation ceiling; the cumulative ceiling is USD 0.20 across the
   lifetime of the durable Gateway database. The forwarded request is limited
   to 8,192 UTF-8 bytes and GPT-5 output to 4,096 tokens. Before dispatch, an
   SQLite transaction reserves a conservative token-cost ceiling below USD
-  0.10. A failed or uncertain call keeps its reservation. The guard rejects a
-  different configured model and does not reset on restart. A second call
-  requires an explicit later change to this budget policy. The Asana AI
+  0.10 per call. A failed or uncertain call keeps its reservation. The guard
+  rejects a different configured model and does not reset on restart. A third
+  call requires an explicit later change to this budget policy. The Asana AI
   request allowance is billed separately and must be checked in Asana.
 
 ## OAuth compatibility and risk

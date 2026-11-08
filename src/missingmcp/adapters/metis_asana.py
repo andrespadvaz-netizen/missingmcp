@@ -13,10 +13,12 @@ from ..store import encrypt, decrypt
 
 ACCOUNT = "asana-andres-1211117380475084"
 CONTEXTS = frozenset({"SHOKKO", "FINAL_FINAL", "VENTURE_QUEST"})
-# One bounded, lifetime probe. The reservation is never refunded after an
-# uncertain provider outcome. Units are micro-USD at GPT-5's published rate.
+# Two separately authorized, bounded probes. Reservations are never refunded
+# after a provider dispatch, including failed or uncertain outcomes. Units are
+# micro-USD at GPT-5's published rate.
 PROBE_BUDGET_MICRO_USD = 100_000
-PROBE_MAX_CALLS = 1
+PROBE_MAX_CALLS = 2
+PROBE_TOTAL_BUDGET_MICRO_USD = PROBE_BUDGET_MICRO_USD * PROBE_MAX_CALLS
 PROBE_MAX_REQUEST_BYTES = 8_192
 PROBE_MAX_OUTPUT_TOKENS = 4_096
 PROBE_INPUT_OVERHEAD_TOKENS = 1_024
@@ -162,7 +164,7 @@ class MetisAsanaAdapter:
                     reserved = budget["reserved_micro_usd"] if budget else 0
                     calls = budget["call_count"] if budget else 0
                     if total >= PROBE_MAX_CALLS or calls >= PROBE_MAX_CALLS or \
-                            reserved + reservation > PROBE_BUDGET_MICRO_USD:
+                            reserved + reservation > PROBE_TOTAL_BUDGET_MICRO_USD:
                         raise RequestError("probe_budget_exhausted")
                     recent = db.execute("SELECT count(*) FROM metis_asana_audits "
                                         "WHERE owner=? AND created_at > datetime('now','-1 hour')",
