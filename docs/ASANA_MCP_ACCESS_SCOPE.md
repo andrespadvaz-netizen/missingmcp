@@ -53,15 +53,12 @@ not create a credential, OAuth grant, AI Teammate, or production deployment.
 
 ## OAuth compatibility and risk
 
-Existing Gateway clients require PKCE S256. Keep that rule unchanged. Asana's
-public External MCP guide does not say whether its client sends PKCE. The new
-resource should require PKCE when sent. If Asana omits it, accept a confidential
-authorization-code flow **only for the pinned Asana client** with exact redirect
-matching, a client secret at token exchange, CSRF state, one-use short-lived
-codes, per-person login and rate limits. Do not grant a no-PKCE exception to
-dynamic clients or existing resources. The remaining risk is interception of
-an authorization code in the user's browser/redirect path; HTTPS, the exact
-callback and confidential token exchange limit that risk.
+The live Asana External MCP OAuth request included PKCE S256. All Gateway
+clients, including the pinned Asana client, now require PKCE S256 for new
+authorization codes and token exchange. The previously approved conditional
+no-PKCE fallback was not needed and has been removed. The fixed callback,
+confidential client secret, one-use short-lived codes and per-person login
+remain in place.
 
 Saving and distributing the app lets an AI Teammate use this resource on behalf
 of each person who authorizes it. Asana states that a person's app connection
@@ -77,4 +74,5 @@ identity; expose only the read-only cross-audit tool for the three named
 contexts; store the secrets in the deployment secret manager; allow 30-day
 access tokens with per-account revocation and no refresh; and use the
 confidential-client no-PKCE exception only if Asana's client omits PKCE. The
-approval does not authorize model writes or access for other people.
+live request established that Asana sends S256, so the exception is not used.
+The approval does not authorize model writes or access for other people.

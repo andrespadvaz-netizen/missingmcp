@@ -59,11 +59,11 @@ Every audit needs an idempotency key. The Gateway reserves that key before the
 provider call; uncertain calls are not automatically repeated. Receipts are
 encrypted. A cap of 20 new audits per hour bounds model spend.
 
-Asana's public instructions do not establish whether its client sends PKCE.
-The existing Gateway clients still require S256. The Asana resource accepts
-S256 when supplied and otherwise permits the approved confidential-client
-exception only for the pinned Asana client, with exact callback matching,
-one-use code, state, client secret, and individual login. Tokens last 30 days
+Asana's live OAuth request included PKCE S256. The Asana resource and all
+existing Gateway clients require S256 for new authorization codes and token
+exchange. The conditional no-PKCE exception was removed after observing the
+live request. Exact callback matching, one-use code, client secret and
+individual login remain in place. Tokens last 30 days
 and can be revoked with `scripts/revoke.py --account
 metis-asana:asana-andres-1211117380475084`.
 
@@ -82,3 +82,28 @@ References: [agents API](https://developers.asana.com/reference/getagentsforwork
 [task update](https://developers.asana.com/reference/updatetask),
 [task stories](https://developers.asana.com/reference/getstoriesfortask),
 [External MCP setup](https://help.asana.com/s/article/create-custom-mcp-apps-for-ai-teammates).
+
+## AI Teammate creation boundary
+
+The Venture Quest workspace had no configured AI Teammates when the app was
+connected. Asana's blank-teammate form asks for a name, description, behavior
+guide, work access and first tasks. Do not select a template with broad writing
+skills or add a private project by default. An initial evidence-audit teammate
+should have no added work access, no first tasks, and only the Metis Gateway
+app. Its behavior guide should require an explicit request from Andrés, one
+declared context, only evidence supplied for that request, and no Asana edits,
+comments, messages or external actions. Creating the teammate or assigning
+work requires a separate decision about audience and Asana AI usage.
+
+No added work access is **not** zero Asana visibility: Asana says a newly
+created AI Teammate can see public tasks and projects in its domain. It can
+access private work only when added as a member or collaborator. Asana also
+stores task-linked memories after interactions, and comments are visible to
+the task audience. Check the workspace's public data and each task audience
+before creation or assignment. The Gateway's read-only tool restriction does
+not remove the teammate's native Asana permissions. See [Asana access control](https://help.asana.com/s/article/understanding-access-control-for-ai-teammates).
+
+Asana counts completed AI Teammate and Dash requests against a shared account
+allowance, with additional usage depending on the plan. The separate Client
+Management 14-day trial has not been activated. See [Asana pricing](https://asana.com/pricing)
+and [Client Management pricing](https://help.asana.com/s/article/asana-client-management-pricing-and-plans).

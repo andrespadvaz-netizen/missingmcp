@@ -183,11 +183,7 @@ def _oauth_params_from(source) -> dict:
 
 
 def _authorization_proof_valid(params: dict, adapter) -> bool:
-    if params["code_challenge_method"] == "S256" and params["code_challenge"]:
-        return True
-    return (getattr(adapter, "static_oauth_client", False)
-            and not params["code_challenge_method"] and not params["code_challenge"]
-            and bool(params["state"]))
+    return params["code_challenge_method"] == "S256" and bool(params["code_challenge"])
 
 
 async def authorize_get(request, adapter, state, conn, config) -> HTMLResponse | RedirectResponse:
@@ -411,10 +407,7 @@ async def token_exchange(request, conn, config) -> JSONResponse:
             or row["adapter"] != client["adapter"]):
         log_error("token-invalid-grant", reason="client_or_redirect_mismatch")
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
-    if not (row["adapter"] == "metis-asana" and not row["code_challenge"] and not row["code_challenge_method"]):
-        pkce_valid = security.verify_pkce(form.get("code_verifier", ""), row["code_challenge"], row["code_challenge_method"])
-    else:
-        pkce_valid = True  # pinned confidential client with exact redirect and one-use code
+    pkce_valid = security.verify_pkce(form.get("code_verifier", ""), row["code_challenge"], row["code_challenge_method"])
     if not pkce_valid:
         log_error("token-invalid-grant", reason="pkce_mismatch")
         return JSONResponse({"error": "invalid_grant"}, status_code=400)

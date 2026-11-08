@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 from urllib.parse import parse_qs, urlparse
 
@@ -22,15 +24,21 @@ def config(tmp_path):
     })
 
 
-def test_static_confidential_oauth_without_pkce_and_only_one_tool(tmp_path):
+def test_static_confidential_oauth_requires_pkce_and_exposes_one_tool(tmp_path):
     cfg = config(tmp_path)
     client = TestClient(build_app(cfg), follow_redirects=False)
     callback = "https://app.asana.com/-/integrations/oauth/callback"
     metadata = client.get("/.well-known/oauth-authorization-server/metis-asana").json()
     assert "registration_endpoint" not in metadata
     assert client.post("/metis-asana/oauth/register", json={"redirect_uris": [callback]}).status_code == 403
+    assert client.get("/metis-asana/oauth/authorize", params={
+        "client_id": cfg.asana_mcp_client_id, "redirect_uri": callback,
+        "state": "client-state"}).status_code == 400
+    verifier = "asana-test-verifier-" + "x" * 43
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     auth = client.get("/metis-asana/oauth/authorize", params={
-        "client_id": cfg.asana_mcp_client_id, "redirect_uri": callback, "state": "client-state"})
+        "client_id": cfg.asana_mcp_client_id, "redirect_uri": callback, "state": "client-state",
+        "code_challenge": challenge, "code_challenge_method": "S256"})
     assert auth.status_code == 200
     assert "metis_key" in auth.text
     assert client.get("/metis-asana/oauth/authorize", params={
@@ -39,13 +47,14 @@ def test_static_confidential_oauth_without_pkce_and_only_one_tool(tmp_path):
     csrf = auth.text.split('name="csrf" value="')[1].split('"')[0]
     finish = client.post("/metis-asana/oauth/authorize", data={
         "csrf": csrf, "client_id": cfg.asana_mcp_client_id,
-        "redirect_uri": callback, "state": "client-state", "metis_key": "a" * 40})
+        "redirect_uri": callback, "state": "client-state", "metis_key": "a" * 40,
+        "code_challenge": challenge, "code_challenge_method": "S256"})
     assert finish.status_code == 302
     code = parse_qs(urlparse(finish.headers["location"]).query)["code"][0]
     token = client.post("/metis-asana/oauth/token", data={
         "grant_type": "authorization_code", "client_id": cfg.asana_mcp_client_id,
         "client_secret": cfg.asana_mcp_client_secret, "redirect_uri": callback,
-        "code": code})
+        "code": code, "code_verifier": verifier})
     assert token.status_code == 200
     assert token.json()["expires_in"] == 30 * 86400
     bearer = token.json()["access_token"]
