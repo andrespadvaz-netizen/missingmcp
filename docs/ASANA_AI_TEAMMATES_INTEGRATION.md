@@ -41,7 +41,7 @@ work as complete. Task descriptions and comments are visible to the task's
 audience, so the operator should check the audience before placing sensitive
 context in a task.
 
-## Direct Gateway connection design and activation boundary
+## Direct Gateway connection
 
 Asana External MCP requires a registered confidential OAuth client and explicit
 authorization and token URLs. Its callback is
@@ -51,22 +51,31 @@ operator identity. It must not be handed to Asana as-is. A 404 from the current
 production path means the route is absent at that deployment; it is not evidence
 that historical records were deleted.
 
-The proposed Asana resource needs its own OAuth client, per-person Gateway
-identity, server-side context and tool allowlists, separate token namespace,
-revocation, and encrypted receipts. It must expose no operator key, private Dot
-conversation, or unrestricted Metis write tool. Asana's public instructions do
-not establish whether its MCP OAuth client sends PKCE; that behavior needs to
-be observed before choosing the authorization policy. Do not weaken the
-existing clients' PKCE requirement to accommodate an unknown client.
+The `metis-asana` resource has its own pinned confidential OAuth client and
+an individual Gateway identity for Andrés. It exposes only
+`metis_cross_audit` for `SHOKKO`, `FINAL_FINAL`, and `VENTURE_QUEST`. It does
+not expose the operator key, private Dot conversations, or Metis writes.
+Every audit needs an idempotency key. The Gateway reserves that key before the
+provider call; uncertain calls are not automatically repeated. Receipts are
+encrypted. A cap of 20 new audits per hour bounds model spend.
 
-The auto-review gate rejected adding startup provisioning of a persistent Asana
-OAuth client without exact approval for credential and grant configuration.
-No client was provisioned, no Asana app was created, and no Gateway production
-settings were changed in this change set. Once the owner approves the concrete
-identity, context/tool grants, callback and credential handling, implement the
-separate resource and connect it through the Asana developer console. Asana
-documents that app configuration beyond name/description cannot be edited after
-saving, so final URLs and grants must be settled before that save.
+Asana's public instructions do not establish whether its client sends PKCE.
+The existing Gateway clients still require S256. The Asana resource accepts
+S256 when supplied and otherwise permits the approved confidential-client
+exception only for the pinned Asana client, with exact callback matching,
+one-use code, state, client secret, and individual login. Tokens last 30 days
+and can be revoked with `scripts/revoke.py --account
+metis-asana:asana-andres-1211117380475084`.
+
+The owner approved the access scope in [ASANA_MCP_ACCESS_SCOPE.md](ASANA_MCP_ACCESS_SCOPE.md).
+The code enables the resource only when all three `ASANA_MCP_*` values are
+present. To configure Asana External MCP, enter the verified production URLs:
+`/metis-asana/mcp`, `/metis-asana/oauth/authorize`, and
+`/metis-asana/oauth/token`, plus the pinned client ID and secret. Use Asana's
+exact callback `https://app.asana.com/-/integrations/oauth/callback`.
+Asana documents that connection settings cannot be edited after saving, so
+check the deployed origin before that action. Each authorized person connects
+individually; this resource currently accepts only Andrés's key.
 
 References: [agents API](https://developers.asana.com/reference/getagentsforworkspace),
 [agent profile](https://developers.asana.com/reference/getagent),

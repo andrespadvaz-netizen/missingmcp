@@ -56,6 +56,11 @@ def build_app(config: Config) -> Starlette:
     conn = store.init_db(config.db_path)
     telemetry.init(config)   # no-op without POSTHOG_API_KEY
     adapters = build_adapters(config)
+    if "metis-asana" in adapters:
+        store.provision_static_client(
+            conn, config.asana_mcp_client_id,
+            store.hash_token(config.asana_mcp_client_secret),
+            "https://app.asana.com/-/integrations/oauth/callback", "metis-asana")
     # One WorkerManager per worker-based adapter; remote and local adapters need none.
     # NOTE: managers share one port range, one DATA_DIR/users/<key> namespace and
     # one workers.json snapshot — safe while garmin is the only worker-based

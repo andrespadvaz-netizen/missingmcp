@@ -1,0 +1,118 @@
+import json
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from starlette.testclient import TestClient
+
+from missingmcp.app import build_app
+from missingmcp.config import load_config
+from missingmcp.adapters.metis_asana import MetisAsanaAdapter, ACCOUNT
+from missingmcp.adapters.base import LoginError
+from missingmcp import store
+
+
+def config(tmp_path):
+    return load_config({
+        "GATEWAY_SECRET": "g" * 40, "DATA_DIR": str(tmp_path),
+        "PUBLIC_URL": "https://gateway.example.com",
+        "ASANA_MCP_CLIENT_ID": "asana-fixed-client-0001",
+        "ASANA_MCP_CLIENT_SECRET": "c" * 40,
+        "ASANA_MCP_ANDRES_KEY": "a" * 40,
+        "METIS_OPENAI_API_KEY": "test-openai-key",
+    })
+
+
+def test_static_confidential_oauth_without_pkce_and_only_one_tool(tmp_path):
+    cfg = config(tmp_path)
+    client = TestClient(build_app(cfg), follow_redirects=False)
+    callback = "https://app.asana.com/-/integrations/oauth/callback"
+    metadata = client.get("/.well-known/oauth-authorization-server/metis-asana").json()
+    assert "registration_endpoint" not in metadata
+    assert client.post("/metis-asana/oauth/register", json={"redirect_uris": [callback]}).status_code == 403
+    auth = client.get("/metis-asana/oauth/authorize", params={
+        "client_id": cfg.asana_mcp_client_id, "redirect_uri": callback, "state": "client-state"})
+    assert auth.status_code == 200
+    assert "metis_key" in auth.text
+    assert client.get("/metis-asana/oauth/authorize", params={
+        "client_id": cfg.asana_mcp_client_id, "redirect_uri": "https://evil.test/cb",
+        "state": "client-state"}).status_code == 400
+    csrf = auth.text.split('name="csrf" value="')[1].split('"')[0]
+    finish = client.post("/metis-asana/oauth/authorize", data={
+        "csrf": csrf, "client_id": cfg.asana_mcp_client_id,
+        "redirect_uri": callback, "state": "client-state", "metis_key": "a" * 40})
+    assert finish.status_code == 302
+    code = parse_qs(urlparse(finish.headers["location"]).query)["code"][0]
+    token = client.post("/metis-asana/oauth/token", data={
+        "grant_type": "authorization_code", "client_id": cfg.asana_mcp_client_id,
+        "client_secret": cfg.asana_mcp_client_secret, "redirect_uri": callback,
+        "code": code})
+    assert token.status_code == 200
+    assert token.json()["expires_in"] == 30 * 86400
+    bearer = token.json()["access_token"]
+    assert client.post("/metis-asana/oauth/token", data={
+        "grant_type": "authorization_code", "client_id": cfg.asana_mcp_client_id,
+        "client_secret": cfg.asana_mcp_client_secret, "redirect_uri": callback,
+        "code": code}).status_code == 400
+    listed = client.post("/metis-asana/mcp", headers={"Authorization": f"Bearer {bearer}"},
+                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert listed.status_code == 200
+    assert [t["name"] for t in listed.json()["result"]["tools"]] == ["metis_cross_audit"]
+    assert client.post("/metis/mcp", headers={"Authorization": f"Bearer {bearer}"},
+                       json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).status_code != 200
+
+
+def test_asana_credential_is_independent(tmp_path):
+    adapter = MetisAsanaAdapter(config(tmp_path))
+    with pytest.raises(LoginError):
+        adapter.start_login({"metis_key": "o" * 40})
+    assert adapter.start_login({"metis_key": "a" * 40}).account_key == ACCOUNT
+
+
+def test_static_client_rotation_revokes_only_asana_tokens(tmp_path):
+    db = store.init_db(str(tmp_path / "gateway.db"))
+    callback = "https://app.asana.com/-/integrations/oauth/callback"
+    store.provision_static_client(db, "asana-fixed-client-0001", store.hash_token("old"),
+                                  callback, "metis-asana")
+    store.create_access_token(db, store.hash_token("asana-token"), "metis-asana",
+                              ACCOUNT, "asana-fixed-client-0001", ttl=1000)
+    store.create_access_token(db, store.hash_token("other-token"), "garmin",
+                              "human", "other-client", ttl=1000)
+    store.provision_static_client(db, "asana-fixed-client-0001", store.hash_token("new"),
+                                  callback, "metis-asana")
+    assert store.account_key_for_token_hash(db, store.hash_token("asana-token")) is None
+    assert store.account_key_for_token_hash(db, store.hash_token("other-token")) is not None
+    assert store.get_client(db, "asana-fixed-client-0001")["adapter"] == "metis-asana"
+    with pytest.raises(ValueError, match="collides"):
+        store.provision_static_client(db, "asana-fixed-client-0001", "hash", callback, "garmin")
+
+
+@pytest.mark.asyncio
+async def test_context_boundary_and_idempotent_receipt(tmp_path, monkeypatch):
+    adapter = MetisAsanaAdapter(config(tmp_path))
+    calls = []
+
+    async def fake_run(origin, request, context):
+        calls.append((origin, context))
+        return {"status": "COMPLETED", "receipt_id": "receipt-asana-1",
+                "context_project": context, "target_model_provider": "OPENAI",
+                "elapsed_ms": 5, "cost_known": True, "cost_usd": 0.001,
+                "final_answer": "reviewed"}
+
+    monkeypatch.setattr(adapter.direct_audit, "run", fake_run)
+    blob = adapter.start_login({"metis_key": "a" * 40}).blob
+
+    async def call(context, key="stable-asana-key-0001"):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "metis_cross_audit", "arguments": {
+                    "request": "Review evidence", "idempotency_key": key,
+                    "context": {"project": context, "source": "current_request"}}}}
+        _, _, payload = await adapter.handle(None, ACCOUNT, blob, json.dumps(body).encode())
+        return json.loads(payload)["result"]
+
+    assert (await call("PERSONAL"))["isError"] is True
+    assert calls == []
+    first = await call("SHOKKO")
+    second = await call("SHOKKO")
+    assert first == second
+    assert calls == [("ASANA", "SHOKKO")]
+    assert (await call("FINAL_FINAL"))["isError"] is True
