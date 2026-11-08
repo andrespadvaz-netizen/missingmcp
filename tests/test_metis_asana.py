@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from dataclasses import replace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -8,7 +9,10 @@ from starlette.testclient import TestClient
 
 from missingmcp.app import build_app
 from missingmcp.config import load_config
-from missingmcp.adapters.metis_asana import MetisAsanaAdapter, ACCOUNT
+from missingmcp.adapters.metis_asana import (
+    MetisAsanaAdapter, ACCOUNT, PROBE_BUDGET_MICRO_USD,
+    PROBE_MAX_OUTPUT_TOKENS, probe_reservation_micro_usd,
+)
 from missingmcp.adapters.base import LoginError
 from missingmcp import store
 
@@ -22,6 +26,11 @@ def config(tmp_path):
         "ASANA_MCP_ANDRES_KEY": "a" * 40,
         "METIS_OPENAI_API_KEY": "test-openai-key",
     })
+
+
+def test_probe_worst_case_reservation_is_below_authorized_budget():
+    assert probe_reservation_micro_usd("x" * 8192, "VENTURE_QUEST") < \
+        PROBE_BUDGET_MICRO_USD
 
 
 def test_static_confidential_oauth_requires_pkce_and_exposes_one_tool(tmp_path):
@@ -100,8 +109,8 @@ async def test_context_boundary_and_idempotent_receipt(tmp_path, monkeypatch):
     adapter = MetisAsanaAdapter(config(tmp_path))
     calls = []
 
-    async def fake_run(origin, request, context):
-        calls.append((origin, context))
+    async def fake_run(origin, request, context, *, max_output_tokens):
+        calls.append((origin, context, max_output_tokens))
         return {"status": "COMPLETED", "receipt_id": "receipt-asana-1",
                 "context_project": context, "target_model_provider": "OPENAI",
                 "elapsed_ms": 5, "cost_known": True, "cost_usd": 0.001,
@@ -123,5 +132,67 @@ async def test_context_boundary_and_idempotent_receipt(tmp_path, monkeypatch):
     first = await call("SHOKKO")
     second = await call("SHOKKO")
     assert first == second
-    assert calls == [("ASANA", "SHOKKO")]
+    assert calls == [("ASANA", "SHOKKO", PROBE_MAX_OUTPUT_TOKENS)]
     assert (await call("FINAL_FINAL"))["isError"] is True
+    assert probe_reservation_micro_usd("Review evidence", "SHOKKO") < PROBE_BUDGET_MICRO_USD
+    budget = adapter.queue.db.execute(
+        "SELECT reserved_micro_usd,call_count FROM metis_asana_probe_budget "
+        "WHERE owner=?", (ACCOUNT,)).fetchone()
+    assert budget["call_count"] == 1
+    forwarded = ("Contexto: SHOKKO\nProcedencia del contexto declarada por el cliente: "
+                 "current_request\n\nReview evidence")
+    assert budget["reserved_micro_usd"] == probe_reservation_micro_usd(
+        forwarded, "SHOKKO")
+
+
+@pytest.mark.asyncio
+async def test_probe_budget_survives_restart_and_uncertain_result(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    adapter = MetisAsanaAdapter(cfg)
+    blob = adapter.start_login({"metis_key": "a" * 40}).blob
+    calls = []
+
+    async def uncertain_run(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("provider outcome unknown")
+
+    monkeypatch.setattr(adapter.direct_audit, "run", uncertain_run)
+
+    async def call(target, key, request="Harmless evidence"):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "metis_cross_audit", "arguments": {
+                    "request": request, "idempotency_key": key,
+                    "context": {"project": "SHOKKO", "source": "current_request"}}}}
+        _, _, payload = await target.handle(None, ACCOUNT, blob, json.dumps(body).encode())
+        return json.loads(payload)["result"]
+
+    with pytest.raises(RuntimeError, match="unknown"):
+        await call(adapter, "stable-probe-key-0001")
+    restarted = MetisAsanaAdapter(cfg)
+    assert (await call(restarted, "stable-probe-key-0001"))["isError"] is True
+    assert (await call(restarted, "stable-probe-key-0002"))["isError"] is True
+    assert calls == [1]
+    row = restarted.queue.db.execute(
+        "SELECT call_count,reserved_micro_usd FROM metis_asana_probe_budget "
+        "WHERE owner=?", (ACCOUNT,)).fetchone()
+    assert row["call_count"] == 1
+    assert 0 < row["reserved_micro_usd"] < PROBE_BUDGET_MICRO_USD
+
+
+@pytest.mark.asyncio
+async def test_probe_rejects_oversize_and_unpriced_model_before_reservation(tmp_path):
+    adapter = MetisAsanaAdapter(config(tmp_path))
+    blob = adapter.start_login({"metis_key": "a" * 40}).blob
+
+    async def call(request):
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "metis_cross_audit", "arguments": {
+                    "request": request, "idempotency_key": "stable-probe-key-0001",
+                    "context": {"project": "SHOKKO", "source": "current_request"}}}}
+        _, _, payload = await adapter.handle(None, ACCOUNT, blob, json.dumps(body).encode())
+        return json.loads(payload)["result"]
+
+    assert (await call("x" * 8193))["isError"] is True
+    adapter.config = replace(adapter.config, metis_openai_model="unknown-model")
+    assert (await call("short"))["isError"] is True
+    assert adapter.queue.db.execute("SELECT count(*) FROM metis_asana_audits").fetchone()[0] == 0

@@ -45,7 +45,8 @@ class DirectAudit:
     def enabled(self):
         return bool(self.config.metis_openai_api_key and self.config.metis_anthropic_api_key)
 
-    async def run(self, origin_model: str, request: str, context_project: str):
+    async def run(self, origin_model: str, request: str, context_project: str,
+                  *, max_output_tokens: int | None = None):
         started = time.monotonic()
         receipt_id = str(uuid.uuid4())
         target = "ANTHROPIC" if origin_model == "OPENAI" else "OPENAI"
@@ -53,7 +54,12 @@ class DirectAudit:
             if target == "ANTHROPIC":
                 answer, usage, model, provider_id = await self._anthropic(request, context_project)
             else:
-                answer, usage, model, provider_id = await self._openai(request, context_project)
+                if max_output_tokens is None:
+                    answer, usage, model, provider_id = await self._openai(
+                        request, context_project)
+                else:
+                    answer, usage, model, provider_id = await self._openai(
+                        request, context_project, max_output_tokens=max_output_tokens)
         except DirectAuditError as exc:
             cost = self._cost(target, exc.usage)
             return {
@@ -97,14 +103,14 @@ class DirectAudit:
             raise DirectAuditError("EMPTY_PROVIDER_RESPONSE", False, data.get("id") or request_id)
         return answer, data.get("usage", {}), data.get("model", body["model"]), data.get("id") or request_id
 
-    async def _openai(self, request, context):
+    async def _openai(self, request, context, *, max_output_tokens=8192):
         body = {
             "model": self.config.metis_openai_model,
             "input": [{"role": "system", "content": SYSTEM},
                       {"role": "user", "content": f"Contexto: {context}\n\n{request}"}],
             # This budget includes hidden reasoning tokens. A 4096-token cap
             # exhausted on a substantive audit before any visible text appeared.
-            "max_output_tokens": 8192,
+            "max_output_tokens": max_output_tokens,
             "reasoning": {"effort": "low"},
         }
         data, request_id = await self._post("https://api.openai.com/v1/responses", body, {

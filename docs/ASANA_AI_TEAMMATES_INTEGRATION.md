@@ -57,7 +57,15 @@ an individual Gateway identity for Andrés. It exposes only
 not expose the operator key, private Dot conversations, or Metis writes.
 Every audit needs an idempotency key. The Gateway reserves that key before the
 provider call; uncertain calls are not automatically repeated. Receipts are
-encrypted. A cap of 20 new audits per hour bounds model spend.
+encrypted. The initial production check reserves one call for Andrés for the
+lifetime of the durable database. It accepts at most 8,192 UTF-8 bytes of
+forwarded request text and caps GPT-5 output, including reasoning, at 4,096
+tokens. A conservative reservation is made in the same transaction as the
+idempotency record before dispatch. Its maximum is below USD 0.10 at the
+published GPT-5 token rates. Failed or uncertain calls do not release the
+reservation; a distinct idempotency key cannot trigger another call. This
+one-call guard must be deliberately redesigned and approved before routine
+audits are enabled. Asana request usage is separate from Gateway model cost.
 
 Asana's live OAuth request included PKCE S256. The Asana resource and all
 existing Gateway clients require S256 for new authorization codes and token
