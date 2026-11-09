@@ -21,6 +21,15 @@ def config(tmp_path):
     })
 
 
+def test_asana_dispatch_full_permissions_requests_default_scope(tmp_path):
+    from dataclasses import replace
+
+    oauth = AsanaDispatchOAuth(replace(config(tmp_path),
+                                      asana_dispatch_full_permissions=True))
+    query = parse_qs(urlparse(oauth.begin("s" * 40)).query)
+    assert query["scope"] == ["default"]
+
+
 @pytest.mark.asyncio
 async def test_asana_dispatch_pkce_owner_and_refresh(tmp_path):
     clock = [1000]

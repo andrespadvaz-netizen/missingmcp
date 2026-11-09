@@ -75,7 +75,8 @@ class AsanaDispatchOAuth:
             "redirect_uri": self.redirect_uri,
             "response_type": "code", "state": state,
             "code_challenge_method": "S256", "code_challenge": challenge,
-            "scope": " ".join(SCOPES),
+            "scope": ("default" if self.config.asana_dispatch_full_permissions
+                      else " ".join(SCOPES)),
         })
 
     def _consume_state(self, state: str) -> str:

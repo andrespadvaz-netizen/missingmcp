@@ -66,6 +66,7 @@ class Config:
     asana_dispatch_client_id: str = ""
     asana_dispatch_client_secret: str = ""
     asana_dispatch_setup_key: str = ""
+    asana_dispatch_full_permissions: bool = False
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -153,6 +154,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         asana_dispatch_client_id=dispatch_id,
         asana_dispatch_client_secret=dispatch_secret,
         asana_dispatch_setup_key=dispatch_setup,
+        asana_dispatch_full_permissions=env.get("ASANA_DISPATCH_FULL_PERMISSIONS", "").lower() == "true",
         metis_openai_api_key=metis_openai_api_key,
         metis_anthropic_api_key=metis_anthropic_api_key,
         metis_openai_model=env.get("METIS_OPENAI_MODEL", "gpt-5"),

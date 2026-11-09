@@ -85,6 +85,14 @@ Write actions reject a manual token override and require the individual grant.
 The OAuth scopes govern API capabilities, while project/agent/owner allowlists
 and private-project checks govern each dispatch. Configure the exact mapping
 environment variables and durable ledger paths before invoking a write.
+The Asana Agent API currently returns a 403 requiring Full permissions with
+the four individually selected scopes. Only after explicit owner approval,
+change the Asana app to Full permissions and set
+`ASANA_DISPATCH_FULL_PERMISSIONS=true`. A new authorization then requests
+`scope=default`; this grants the app every Asana API permission held by the
+individual owner, while the dispatch CLI still checks its project, agent,
+owner and private-project allowlists. Keep the flag false until the Asana app
+and its consent are deliberately changed.
 
 ## Direct Gateway connection
 
