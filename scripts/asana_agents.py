@@ -8,6 +8,8 @@ import os
 import sys
 
 from missingmcp.metis.asana_agents import AsanaAgents, AsanaError
+from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
+from missingmcp.config import load_config
 
 
 async def main():
@@ -28,7 +30,12 @@ async def main():
         owners = json.loads(os.environ["ASANA_DISPATCH_OWNER_GIDS_JSON"]) if dispatch else {}
         cross_context = (json.loads(os.environ.get(
             "ASANA_CROSS_CONTEXT_AGENT_GIDS_JSON", "[]")) if dispatch else [])
-        client = AsanaAgents(os.environ["ASANA_ACCESS_TOKEN"],
+        bearer = os.environ.get("ASANA_ACCESS_TOKEN")
+        if dispatch and bearer:
+            raise ValueError("writes_require_individual_oauth_grant")
+        if not bearer:
+            bearer = await AsanaDispatchOAuth(load_config()).access_token()
+        client = AsanaAgents(bearer,
                              os.environ["ASANA_WORKSPACE_GID"], allowed,
                              allowed_agent_gids=allowed_agents,
                              expected_project_owner_gids=owners,
@@ -57,7 +64,7 @@ async def main():
                 agent_gid=args.agent_gid, title=args.title, request=args.request,
                 idempotency_key=args.idempotency_key)
         print(json.dumps(value, ensure_ascii=False, indent=2))
-    except (AsanaError, ValueError, KeyError) as exc:
+    except (AsanaError, DispatchAuthError, ValueError, KeyError) as exc:
         # Never print the bearer or raw upstream response, including on errors.
         print(f"Asana coordination failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

@@ -62,6 +62,10 @@ class Config:
     asana_mcp_client_id: str = ""
     asana_mcp_client_secret: str = ""
     asana_mcp_andres_key: str = ""
+    # Outbound Asana OAuth is separate from the inbound External MCP client.
+    asana_dispatch_client_id: str = ""
+    asana_dispatch_client_secret: str = ""
+    asana_dispatch_setup_key: str = ""
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -83,6 +87,15 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     asana_mcp_client_id = env.get("ASANA_MCP_CLIENT_ID", "")
     asana_mcp_client_secret = env.get("ASANA_MCP_CLIENT_SECRET", "")
     asana_mcp_andres_key = env.get("ASANA_MCP_ANDRES_KEY", "")
+    dispatch_id = env.get("ASANA_DISPATCH_CLIENT_ID", "")
+    dispatch_secret = env.get("ASANA_DISPATCH_CLIENT_SECRET", "")
+    dispatch_setup = env.get("ASANA_DISPATCH_SETUP_KEY", "")
+    if any((dispatch_id, dispatch_secret, dispatch_setup)):
+        if (not public_url.startswith("https://") or
+                not dispatch_id.isdigit() or len(dispatch_secret) < 32 or
+                len(dispatch_setup) < 32 or
+                len({dispatch_secret, dispatch_setup, secret}) != 3):
+            raise ValueError("Asana dispatch requires HTTPS and three distinct credentials")
     if any((asana_mcp_client_id, asana_mcp_client_secret, asana_mcp_andres_key)):
         import re
         if not public_url.startswith("https://"):
@@ -94,6 +107,11 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
                          *([metis_lens_context_key] if metis_lens_context_key else [])]
         if len(set([asana_mcp_client_secret, asana_mcp_andres_key, *other_secrets])) != 2 + len(other_secrets):
             raise ValueError("Asana MCP secrets must be distinct from Gateway and Metis secrets")
+    if dispatch_id and any(dispatch_secret == item or dispatch_setup == item for item in
+                           (asana_mcp_client_secret, asana_mcp_andres_key,
+                            metis[1], metis[2], metis_lens_context_key)
+                           if item):
+        raise ValueError("Asana dispatch secrets must be distinct from existing secrets")
     metis_openai_api_key = env.get("METIS_OPENAI_API_KEY", "")
     metis_anthropic_api_key = env.get("METIS_ANTHROPIC_API_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
@@ -132,6 +150,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         asana_mcp_client_id=asana_mcp_client_id,
         asana_mcp_client_secret=asana_mcp_client_secret,
         asana_mcp_andres_key=asana_mcp_andres_key,
+        asana_dispatch_client_id=dispatch_id,
+        asana_dispatch_client_secret=dispatch_secret,
+        asana_dispatch_setup_key=dispatch_setup,
         metis_openai_api_key=metis_openai_api_key,
         metis_anthropic_api_key=metis_anthropic_api_key,
         metis_openai_model=env.get("METIS_OPENAI_MODEL", "gpt-5"),

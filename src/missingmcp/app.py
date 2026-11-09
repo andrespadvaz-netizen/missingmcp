@@ -8,7 +8,7 @@ import re
 import urllib.parse
 from pathlib import Path
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.middleware.base import BaseHTTPMiddleware
 from . import backup, report, store, oauth, pages, proxy, security, telemetry
@@ -18,6 +18,7 @@ from .adapters import build_adapters, RETIRED_ADAPTERS
 from .adapters.base import is_remote, is_local, is_upstream_oauth
 from .log import log
 from .metis.transport import LensContextBridgeError
+from .metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
 from .health_os.persistence import HealthOSRepository
 from datetime import datetime, timezone
 
@@ -75,6 +76,62 @@ def build_app(config: Config) -> Starlette:
     bk = backup.Backup(config)
     dr = report.DailyReport(config)
     health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if config.health_os_ingest_key else None
+    asana_dispatch = (AsanaDispatchOAuth(config)
+                      if config.asana_dispatch_client_id else None)
+
+    async def asana_dispatch_setup(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        return HTMLResponse(
+            '<!doctype html><html lang="es"><meta charset="utf-8">'
+            '<title>Conectar despacho Asana</title><body>'
+            '<h1>Conectar despacho Asana</h1>'
+            '<form method="post" action="/asana-dispatch/oauth/start">'
+            '<label>Clave de configuración <input type="password" name="setup_key" required></label>'
+            '<button type="submit">Conectar con Asana</button></form></body></html>',
+            headers={"Cache-Control": "no-store"})
+
+    async def asana_dispatch_start(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        ip = request.client.host if request.client else "unknown"
+        if not rate.check(f"asana-dispatch-start:{ip}", 5, 3600):
+            return PlainTextResponse("Too many attempts", status_code=429)
+        raw = await security.read_body_limited(request, max_bytes=2048)
+        if raw is None:
+            return PlainTextResponse("Too large", status_code=413)
+        form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+        try:
+            url = asana_dispatch.begin(form.get("setup_key", [""])[0])
+        except DispatchAuthError:
+            return PlainTextResponse("Unauthorized", status_code=403)
+        response = RedirectResponse(url, status_code=303,
+                                    headers={"Cache-Control": "no-store"})
+        state = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["state"][0]
+        response.set_cookie("asana_dispatch_state", store.hash_token(state),
+                            max_age=600, httponly=True, secure=True, samesite="lax")
+        return response
+
+    async def asana_dispatch_callback(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        if request.query_params.get("error"):
+            return PlainTextResponse("Asana authorization was declined", status_code=400)
+        state = request.query_params.get("state", "")
+        cookie = request.cookies.get("asana_dispatch_state", "")
+        if (not cookie or not hmac.compare_digest(cookie, store.hash_token(state))):
+            return PlainTextResponse("Asana authorization failed", status_code=400,
+                                     headers={"Cache-Control": "no-store"})
+        try:
+            await asana_dispatch.complete(state,
+                                          request.query_params.get("code", ""))
+        except DispatchAuthError:
+            return PlainTextResponse("Asana authorization failed", status_code=400,
+                                     headers={"Cache-Control": "no-store"})
+        response = PlainTextResponse("Asana dispatch connected for Andrés.",
+                                     headers={"Cache-Control": "no-store"})
+        response.delete_cookie("asana_dispatch_state", secure=True, samesite="lax")
+        return response
 
     def _health_os_authorized(request):
         return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
@@ -480,6 +537,9 @@ def build_app(config: Config) -> Starlette:
         Route("/subscribe", subscribe, methods=["POST"]),
         Route("/suggest", suggest, methods=["POST"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/asana-dispatch/oauth/setup", asana_dispatch_setup, methods=["GET"]),
+        Route("/asana-dispatch/oauth/start", asana_dispatch_start, methods=["POST"]),
+        Route("/asana-dispatch/oauth/callback", asana_dispatch_callback, methods=["GET"]),
         Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
         Route("/health-os/ingest", health_os_ingest, methods=["POST"]),
         Route("/health-os/quality", health_os_quality, methods=["GET"]),

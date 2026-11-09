@@ -64,6 +64,28 @@ work as complete. Task descriptions and comments are visible to the task's
 audience, so the operator should check the audience before placing sensitive
 context in a task.
 
+### Individual outbound OAuth grant
+
+The reverse direction uses a separate Asana API application. Register exactly
+`https://missingmcp-production.up.railway.app/asana-dispatch/oauth/callback`
+and only `projects:read`, `stories:read`, `tasks:read`, `tasks:write`.
+Set `ASANA_DISPATCH_CLIENT_ID`, `ASANA_DISPATCH_CLIENT_SECRET`, and a distinct
+random `ASANA_DISPATCH_SETUP_KEY` of at least 32 characters in the Gateway's
+secret configuration. All three values are required; the routes stay disabled
+when they are absent. No value belongs in this repository or command history.
+
+An operator opens `/asana-dispatch/oauth/setup`, enters the setup key over
+HTTPS, and authorizes the Asana account. The Gateway uses a browser-bound,
+one-use state and PKCE S256. It rejects any grant whose token response does
+not identify the designated individual owner. Access and refresh tokens are
+encrypted in the durable SQLite volume. Access tokens are renewed shortly
+before expiry; an uncertain refresh is not retried automatically. With no
+`ASANA_ACCESS_TOKEN` override, the operator CLI uses this individual grant.
+Write actions reject a manual token override and require the individual grant.
+The OAuth scopes govern API capabilities, while project/agent/owner allowlists
+and private-project checks govern each dispatch. Configure the exact mapping
+environment variables and durable ledger paths before invoking a write.
+
 ## Direct Gateway connection
 
 Asana External MCP requires a registered confidential OAuth client and explicit
