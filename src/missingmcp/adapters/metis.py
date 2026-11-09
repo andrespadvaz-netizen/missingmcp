@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -128,6 +129,38 @@ class MetisAdapter:
                     self.asana_dot_policy_raw and self.asana_profiles_raw and
                     self.config.asana_dispatch_client_id)
 
+    def asana_create_tool(self):
+        policy = json.loads(self.asana_dot_policy_raw)
+        if (not isinstance(policy, dict) or
+                any(not isinstance(policy.get(field), str) or
+                    not policy[field].isdigit()
+                    for field in ("workspace_gid", "project_gid", "owner_gid", "creator_gid")) or
+                not isinstance(policy.get("context"), str) or not policy["context"] or
+                any(not isinstance(policy.get(field), list) or not policy[field] or
+                    any(not isinstance(value, str) or not value
+                        for value in policy[field])
+                    for field in ("audiences", "sources")) or
+                not isinstance(policy.get("eligible_task_names"), list) or
+                not isinstance(policy.get("routing"), dict) or
+                not isinstance(policy.get("specialties"), list)):
+            raise ValueError("invalid_asana_dot_policy")
+        tool = copy.deepcopy(ASANA_CREATE_TOOL)
+        tool["inputSchema"]["properties"]["brief"] = {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "context": {"type": "string", "const": policy["context"]},
+                "project_gid": {"type": "string", "const": policy["project_gid"]},
+                "audience": {"type": "string", "enum": policy["audiences"]},
+                "authorized_sources": {"type": "array", "minItems": 1,
+                                       "items": {"type": "string", "enum": policy["sources"]}},
+                "deliverable": {"type": "string", "minLength": 1},
+                "request": {"type": "string", "minLength": 1},
+            },
+            "required": ["context", "project_gid", "audience",
+                         "authorized_sources", "deliverable", "request"],
+        }
+        return tool
+
     async def create_asana_dot_task(self, args):
         if not self.asana_dot_enabled:
             raise RequestError("asana_dot_not_configured")
@@ -138,6 +171,7 @@ class MetisAdapter:
             profiles = json.loads(self.asana_profiles_raw)
             if not isinstance(policy, dict) or not isinstance(profiles, dict):
                 raise ValueError("invalid_asana_dot_policy")
+            self.asana_create_tool()  # Validate the server policy before any Asana write.
             oauth = AsanaDispatchOAuth(self.config)
             try:
                 bearer = await oauth.access_token()
@@ -146,7 +180,7 @@ class MetisAdapter:
             project = policy["project_gid"]
             client = AsanaAgents(
                 bearer, policy["workspace_gid"], {project: policy["context"]},
-                allowed_agent_gids={project: list(profiles)},
+                allowed_agent_gids={project: list(profiles)} if profiles else {},
                 expected_project_owner_gids=({project: policy["project_owner_gid"]}
                                              if policy.get("project_owner_gid") else {}),
                 ledger_path=self.config.db_path, handoff_ledger_path=self.config.db_path)
@@ -216,7 +250,13 @@ class MetisAdapter:
         if method == "ping":
             return result({})
         if method == "tools/list":
-            return result({"tools": TOOLS + ([ASANA_CREATE_TOOL] if self.asana_dot_enabled else [])})
+            asana_tools = []
+            if self.asana_dot_enabled:
+                try:
+                    asana_tools = [self.asana_create_tool()]
+                except (ValueError, KeyError, TypeError):
+                    pass
+            return result({"tools": TOOLS + asana_tools})
         if method != "tools/call":
             return error(-32601, "Method not found")
         params = req.get("params")

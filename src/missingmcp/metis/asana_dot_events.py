@@ -57,10 +57,12 @@ class DotEvents:
         name = event.get("name")
         project = policy.get("project_gid")
         owner = policy.get("owner_gid")
+        creator = policy.get("creator_gid")
         if (not isinstance(name, str) or not name.strip() or len(name) > 200 or
                 any(ord(ch) < 32 for ch in name) or
                 not isinstance(project, str) or not project.isdigit() or
-                not isinstance(owner, str) or not owner.isdigit()):
+                not isinstance(owner, str) or not owner.isdigit() or
+                not isinstance(creator, str) or not creator.isdigit()):
             raise DotEventError("source_scope_forbidden")
         brief = event.get("brief")
         if (not isinstance(brief, Mapping) or brief.get("context") != policy.get("context") or
@@ -70,11 +72,22 @@ class DotEvents:
                 not brief["authorized_sources"] or
                 any(not isinstance(source, str) or
                     source not in policy.get("sources", ())
-                    for source in brief["authorized_sources"])):
+                    for source in brief["authorized_sources"]) or
+                any(not isinstance(brief.get(field), str) or not brief[field].strip()
+                    for field in ("deliverable", "request")) or
+                brief.get("requires_private_memory") is True):
             raise DotEventError("source_brief_scope_forbidden")
         await self._verify_project(client, project)
+        notes = (f"Metis Dot source reference: {key}\n\n"
+                 f"Contexto: {brief['context']}\n"
+                 f"Audiencia: {brief['audience']}\n"
+                 f"Fuentes autorizadas: {', '.join(brief['authorized_sources'])}\n"
+                 f"Entregable: {brief['deliverable']}\n"
+                 f"Solicitud: {brief['request']}")
+        if len(notes.encode("utf-8")) > 10_000:
+            raise DotEventError("source_brief_too_large")
         payload = {"name": name, "projects": [project], "assignee": owner,
-                   "notes": f"Metis Dot source reference: {key}"}
+                   "notes": notes}
         fingerprint = hashlib.sha256(json.dumps(
             {"payload": payload, "brief": event.get("brief")}, sort_keys=True).encode()).hexdigest()
         brief_fingerprint = hashlib.sha256(json.dumps(
@@ -141,7 +154,8 @@ class DotEvents:
         matches = [t async for t in client._pages(
             f"/projects/{project}/tasks",
             params={"opt_fields": "gid,notes"})
-            if (t.get("notes") or "") == f"Metis Dot source reference: {key}"]
+            if ((t.get("notes") or "") == f"Metis Dot source reference: {key}" or
+                (t.get("notes") or "").startswith(f"Metis Dot source reference: {key}\n"))]
         if len(matches) != 1:
             raise DotEventError("source_creation_uncertain")
         gid = str(matches[0].get("gid", ""))

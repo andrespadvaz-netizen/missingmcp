@@ -34,12 +34,19 @@ async def test_metis_create_tool_is_only_listed_with_policy(tmp_path, monkeypatc
     assert "metis_asana_create_task" not in [t["name"] for t in json.loads(raw)["result"]["tools"]]
     monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
         "workspace_gid": "100", "project_gid": "200", "context": "SHOKKO",
-        "owner_gid": "44"}))
+        "owner_gid": "44", "creator_gid": "55", "audiences": ["internal"],
+        "sources": ["current_request"], "eligible_task_names": [],
+        "routing": {}, "specialties": []}))
     monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", json.dumps({"11": {}}))
     adapter = MetisAdapter(config(tmp_path))
     _, _, raw = await adapter.handle(None, "metis-operator",
                                      adapter.credential_version, request("tools/list"))
     assert "metis_asana_create_task" in [t["name"] for t in json.loads(raw)["result"]["tools"]]
+    create_tool = next(t for t in json.loads(raw)["result"]["tools"]
+                       if t["name"] == "metis_asana_create_task")
+    brief_schema = create_tool["inputSchema"]["properties"]["brief"]
+    assert brief_schema["properties"]["context"]["const"] == "SHOKKO"
+    assert brief_schema["properties"]["authorized_sources"]["items"]["enum"] == ["current_request"]
     other = MetisChatGPTAdapter(config(tmp_path))
     _, _, raw = await other.handle(None, "metis-operator", other.credential_version,
                                    request("tools/list"))
@@ -55,7 +62,9 @@ async def test_metis_tool_uses_server_identity_and_durable_creation(tmp_path, mo
                                                                     adapter_type):
     monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
         "workspace_gid": "100", "project_gid": "200", "context": "SHOKKO",
-        "owner_gid": "44"}))
+        "owner_gid": "44", "creator_gid": "55", "audiences": ["internal"],
+        "sources": ["current_request"], "eligible_task_names": [],
+        "routing": {}, "specialties": []}))
     monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", json.dumps({"11": {}}))
     calls = []
 

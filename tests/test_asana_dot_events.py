@@ -335,13 +335,16 @@ def test_event_endpoint_requires_existing_metis_credential(tmp_path, monkeypatch
     assert response.json()["reason"] == "source_not_created_by_integration"
 
 
-def test_http_create_is_authenticated_durable_and_quota_blocked(tmp_path, monkeypatch):
+@pytest.mark.parametrize("human_only", [False, True])
+def test_http_create_is_authenticated_durable_and_quota_blocked(tmp_path, monkeypatch,
+                                                                human_only):
     import json
     import missingmcp.app as app_module
     from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth
 
-    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps(POLICY))
-    monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", json.dumps(PROFILES))
+    policy = POLICY | {"eligible_task_names": [], "routing": {}, "specialties": []} if human_only else POLICY
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps(policy))
+    monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", json.dumps({} if human_only else PROFILES))
     cfg = load_config({"GATEWAY_SECRET": "g" * 40, "DATA_DIR": str(tmp_path),
                        "DB_PATH": str(tmp_path / "gateway.db"),
                        "PUBLIC_URL": "https://gateway.example.com",
@@ -379,8 +382,10 @@ def test_http_create_is_authenticated_durable_and_quota_blocked(tmp_path, monkey
     headers = {"Authorization": "Bearer " + "m" * 40}
     first = client.post("/asana-dot/event", json=event, headers=headers)
     assert first.status_code == 200, first.text
-    assert first.json() == {"source_task_gid": "300", "evaluation": {
-        "action": "blocked", "reason": "shared_quota_unavailable"}}
+    assert first.json() == {"source_task_gid": "300", "evaluation": (
+        {"action": "skip", "reason": "task_not_eligible"} if human_only else
+        {"action": "blocked", "reason": "shared_quota_unavailable"})}
     second = client.post("/asana-dot/event", json=event, headers=headers)
     assert second.status_code == 200 and second.json()["source_task_gid"] == "300"
     assert len(posts) == 1 and posts[0]["assignee"] == "44"
+    assert "Solicitud: Summarize the permitted evidence" in posts[0]["notes"]
