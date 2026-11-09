@@ -71,7 +71,7 @@ class DotEvents:
                     source not in policy.get("sources", ())
                     for source in brief["authorized_sources"])):
             raise DotEventError("source_brief_scope_forbidden")
-        await self._verify_project(client, project, owner)
+        await self._verify_project(client, project)
         payload = {"name": name, "projects": [project], "assignee": owner,
                    "notes": f"Metis Dot source reference: {key}"}
         fingerprint = hashlib.sha256(json.dumps(
@@ -114,15 +114,14 @@ class DotEvents:
         return task
 
     @staticmethod
-    async def _verify_project(client, project, owner):
+    async def _verify_project(client, project):
         project_body = await client._request("GET", f"/projects/{project}",
-                                             params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting"})
+                                             params={"opt_fields": "gid,workspace.gid,privacy_setting"})
         observed_project = project_body.get("data") or {}
         if (str(observed_project.get("gid")) != project or
                 str((observed_project.get("workspace") or {}).get("gid")) != client.workspace_gid or
-                str((observed_project.get("owner") or {}).get("gid")) != owner or
                 observed_project.get("privacy_setting") != "private"):
-            raise DotEventError("source_project_not_private_or_owned")
+            raise DotEventError("source_project_not_private")
 
     @staticmethod
     def _verify_source(task, project, owner, name, creator):
@@ -137,7 +136,7 @@ class DotEvents:
         if row is None or row["state"] != "POST_SENT":
             raise DotEventError("source_reconciliation_not_pending")
         project, owner = policy["project_gid"], policy["owner_gid"]
-        await self._verify_project(client, project, owner)
+        await self._verify_project(client, project)
         matches = [t async for t in client._pages(
             f"/projects/{project}/tasks",
             params={"opt_fields": "gid,notes"})

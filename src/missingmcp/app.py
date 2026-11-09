@@ -109,7 +109,8 @@ def build_app(config: Config) -> Starlette:
                 await asana_dispatch.access_token(), policy["workspace_gid"],
                 {project: policy["context"]},
                 allowed_agent_gids={project: list(profiles)},
-                expected_project_owner_gids={project: policy["owner_gid"]},
+                expected_project_owner_gids=({project: policy["project_owner_gid"]}
+                                             if policy.get("project_owner_gid") else {}),
                 ledger_path=config.db_path, handoff_ledger_path=config.db_path)
             if body.get("type") == "task.create":
                 task = await dot_events.create_source(client, body, policy)

@@ -147,7 +147,8 @@ class MetisAdapter:
             client = AsanaAgents(
                 bearer, policy["workspace_gid"], {project: policy["context"]},
                 allowed_agent_gids={project: list(profiles)},
-                expected_project_owner_gids={project: policy["owner_gid"]},
+                expected_project_owner_gids=({project: policy["project_owner_gid"]}
+                                             if policy.get("project_owner_gid") else {}),
                 ledger_path=self.config.db_path, handoff_ledger_path=self.config.db_path)
             events = DotEvents(self.config.db_path)
             try:

@@ -75,6 +75,33 @@ async def test_authenticated_source_creation_is_durable_and_verified(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_private_project_owner_can_differ_from_human_task_owner(tmp_path):
+    import json
+    posts = []
+
+    def handler(request):
+        if request.url.path.endswith("/projects/200"):
+            return httpx.Response(200, json={"data": {"gid": "200",
+                "workspace": {"gid": "100"}, "owner": {"gid": "77"},
+                "privacy_setting": "private"}})
+        if request.method == "POST":
+            posts.append(json.loads(request.content)["data"])
+            return httpx.Response(201, json={"data": {"gid": "300"}})
+        return httpx.Response(200, json={"data": {
+            "gid": "300", "name": "Research task", "workspace": {"gid": "100"},
+            "created_by": {"gid": "55"}, "projects": [{"gid": "200"}],
+            "assignee": {"gid": "44"}, "completed": False}})
+
+    events = DotEvents(str(tmp_path / "events.db"))
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    event = {"type": "task.create", "idempotency_key": "separate-project-owner-0001",
+             "name": "Research task", "brief": BRIEF}
+    assert (await events.create_source(asana, event, POLICY))["gid"] == "300"
+    assert len(posts) == 1 and posts[0]["assignee"] == "44"
+
+
+@pytest.mark.asyncio
 async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path):
     posts = []
 
@@ -157,7 +184,7 @@ async def test_public_source_project_is_rejected_before_post(tmp_path):
     events = DotEvents(str(tmp_path / "events.db"))
     asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
                         transport=httpx.MockTransport(handler))
-    with pytest.raises(DotEventError, match="source_project_not_private_or_owned"):
+    with pytest.raises(DotEventError, match="source_project_not_private"):
         await events.create_source(asana, {
             "type": "task.create", "idempotency_key": "dot-source-creation-0001",
             "name": "Research task", "brief": BRIEF}, POLICY)

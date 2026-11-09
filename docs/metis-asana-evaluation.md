@@ -11,6 +11,11 @@ no se derivan del evento. La política fija `workspace_gid`, `creator_gid`,
 `specialties`, `contexts`, `audiences` y `dot_authorized`. Meli y Val no usan
 esta clave ni esta política.
 
+`owner_gid` es el responsable humano de la tarea; no tiene que ser el dueño
+del proyecto. El proyecto debe ser privado y pertenecer al workspace fijado.
+`project_owner_gid` puede fijarse por separado para una futura autorización
+de despachos; si falta, el control de destino también bloquea ese despacho.
+
 ## Crear y evaluar
 
 El emisor autorizado envía `task.create` con `idempotency_key` estable,
