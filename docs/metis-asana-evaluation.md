@@ -19,7 +19,7 @@ de despachos; si falta, el control de destino también bloquea ese despacho.
 ## Crear y evaluar
 
 El emisor autorizado envía `task.create` con `idempotency_key` estable,
-`name` (uno de `eligible_task_names`) y `brief`. El Gateway reserva la clave
+`name` y `brief`. El Gateway reserva la clave
 en SQLite **antes** de enviar el POST a Asana. El POST crea la tarea en el
 proyecto permitido con `owner_gid` como responsable humano y una referencia
 estable en las notas. Después lee la tarea desde Asana y comprueba nombre,
@@ -32,6 +32,9 @@ origen es la reserva previa, el POST del servidor y la lectura posterior.
 Un evento `task.created` externo solo puede evaluar un GID registrado por
 esa secuencia. Una repetición con la misma clave no hace otro POST; un
 cambio de contenido causa conflicto.
+Un nombre fuera de `eligible_task_names` todavía puede crear la tarea humana,
+pero la evaluación se abstiene de encargarla a un agente. Una lista vacía
+permite activar solo la creación y la abstención, sin habilitar especialidades.
 
 Si la respuesta del POST se pierde, la clave permanece incierta y no se
 reenvía. `task.source_reconcile` con la misma clave busca la referencia en

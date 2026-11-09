@@ -57,7 +57,8 @@ class DotEvents:
         name = event.get("name")
         project = policy.get("project_gid")
         owner = policy.get("owner_gid")
-        if (not isinstance(name, str) or name not in policy.get("eligible_task_names", ()) or
+        if (not isinstance(name, str) or not name.strip() or len(name) > 200 or
+                any(ord(ch) < 32 for ch in name) or
                 not isinstance(project, str) or not project.isdigit() or
                 not isinstance(owner, str) or not owner.isdigit()):
             raise DotEventError("source_scope_forbidden")

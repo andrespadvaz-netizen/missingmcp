@@ -102,6 +102,31 @@ async def test_private_project_owner_can_differ_from_human_task_owner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unrouted_human_task_is_created_but_agent_is_skipped(tmp_path):
+    def handler(request):
+        if request.url.path.endswith("/projects/200"):
+            return httpx.Response(200, json={"data": {"gid": "200",
+                "workspace": {"gid": "100"}, "privacy_setting": "private"}})
+        if request.method == "POST":
+            return httpx.Response(201, json={"data": {"gid": "300"}})
+        return httpx.Response(200, json={"data": {
+            "gid": "300", "name": "Unrouted human task", "workspace": {"gid": "100"},
+            "created_by": {"gid": "55"}, "projects": [{"gid": "200"}],
+            "assignee": {"gid": "44"}, "completed": False}})
+
+    events = DotEvents(str(tmp_path / "events.db"))
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    brief = {k: v for k, v in BRIEF.items() if k != "source_task_gid"}
+    event = {"type": "task.create", "idempotency_key": "unrouted-human-task-0001",
+             "name": "Unrouted human task", "brief": brief}
+    assert (await events.create_source(asana, event, POLICY))["gid"] == "300"
+    result = await events.created(asana, {"type": "task.created", "task_gid": "300",
+                                          "brief": brief}, POLICY, PROFILES, dispatch=True)
+    assert result == {"action": "skip", "reason": "task_not_eligible"}
+
+
+@pytest.mark.asyncio
 async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path):
     posts = []
 
