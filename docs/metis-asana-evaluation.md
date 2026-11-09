@@ -86,7 +86,8 @@ la decisión y el revisor. La propuesta no aprueba ni cierra la tarea humana.
 
 Para revertir la entrada, retire la política o desconecte el emisor. Conserve
 los libros SQLite y los GID para no perder deduplicación ni trazabilidad.
-La sesión MCP autenticada de Metis ofrece `metis_asana_create_task` cuando
+Las sesiones MCP autenticadas de Metis (`metis` y `metis-chatgpt`) ofrecen
+`metis_asana_create_task` cuando
 están configuradas la política y la conexión saliente. Esa herramienta usa
 el mismo libro durable y la evaluación del Gateway; no requiere instalar
 un emisor adicional en la cuenta de Metis. Las creaciones de Asana cuyo

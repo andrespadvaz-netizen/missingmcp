@@ -43,14 +43,16 @@ async def test_metis_create_tool_is_only_listed_with_policy(tmp_path, monkeypatc
     other = MetisChatGPTAdapter(config(tmp_path))
     _, _, raw = await other.handle(None, "metis-operator", other.credential_version,
                                    request("tools/list"))
-    assert "metis_asana_create_task" not in [t["name"] for t in json.loads(raw)["result"]["tools"]]
+    assert "metis_asana_create_task" in [t["name"] for t in json.loads(raw)["result"]["tools"]]
     with pytest.raises(Exception):
         await adapter.handle(None, "wrong-account", adapter.credential_version,
                              request("tools/list"))
 
 
 @pytest.mark.asyncio
-async def test_metis_tool_uses_server_identity_and_durable_creation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("adapter_type", [MetisAdapter, MetisChatGPTAdapter])
+async def test_metis_tool_uses_server_identity_and_durable_creation(tmp_path, monkeypatch,
+                                                                    adapter_type):
     monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
         "workspace_gid": "100", "project_gid": "200", "context": "SHOKKO",
         "owner_gid": "44"}))
@@ -86,7 +88,7 @@ async def test_metis_tool_uses_server_identity_and_durable_creation(tmp_path, mo
     monkeypatch.setattr("missingmcp.adapters.metis.AsanaDispatchOAuth", OAuth)
     monkeypatch.setattr("missingmcp.adapters.metis.AsanaAgents", Client)
     monkeypatch.setattr("missingmcp.adapters.metis.DotEvents", Events)
-    adapter = MetisAdapter(config(tmp_path))
+    adapter = adapter_type(config(tmp_path))
     args = {"idempotency_key": "source-event-000001", "name": "Research task",
             "brief": {"context": "SHOKKO"}}
     _, _, raw = await adapter.handle(None, "metis-operator",

@@ -124,7 +124,8 @@ class MetisAdapter:
 
     @property
     def asana_dot_enabled(self):
-        return bool(self.name == "metis" and self.asana_dot_policy_raw and self.asana_profiles_raw and
+        return bool(self.name in {"metis", "metis-chatgpt"} and
+                    self.asana_dot_policy_raw and self.asana_profiles_raw and
                     self.config.asana_dispatch_client_id)
 
     async def create_asana_dot_task(self, args):
