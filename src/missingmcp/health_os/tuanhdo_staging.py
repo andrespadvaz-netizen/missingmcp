@@ -185,6 +185,24 @@ def activity_cross_day_exclusions(repo: HealthOSRepository, now: datetime,
     return counts
 
 
+def _read_batch_samples(repo: HealthOSRepository, batch_key: str) -> dict[int, Sample]:
+    """Read one batch, not a copy of its ciphertext for every linked record.
+
+    Callers cache this result only for their current read. Fingerprint and core
+    key checks still happen for every record before it can count as evidence.
+    """
+    row = repo.conn.execute(
+        "SELECT payload_enc FROM health_os_tuanhdo_batches WHERE batch_key=?",
+        (batch_key,),
+    ).fetchone()
+    if row is None:
+        # A batch removed between the metadata read and this lookup supplies
+        # no proof. Never manufacture evidence from a dangling link.
+        return {}
+    payload = json.loads(store.decrypt(repo.data_key, row["payload_enc"]))
+    return {sample.record_index: sample for sample in parse_health_export(payload).samples}
+
+
 def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Sample]:
     """Only accepted post-cut stages whose staging identity still matches core."""
     if repo.sleep_series_start is None:
@@ -196,7 +214,7 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Samp
                          "AND name='health_os_tuanhdo_records'").fetchone() is None:
         return []
     rows = repo.conn.execute(
-        "SELECT r.batch_key,r.record_index,r.fingerprint,l.core_event_key,b.payload_enc "
+        "SELECT r.batch_key,r.record_index,r.fingerprint,l.core_event_key "
         "FROM health_os_tuanhdo_records r "
         "JOIN health_os_tuanhdo_promotion_links l "
         "ON l.batch_key=r.batch_key AND l.record_index=r.record_index "
@@ -209,9 +227,7 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Samp
             continue
         batch_key = row["batch_key"]
         if batch_key not in parsed:
-            payload = json.loads(store.decrypt(repo.data_key, row["payload_enc"]))
-            parsed[batch_key] = {sample.record_index: sample
-                                 for sample in parse_health_export(payload).samples}
+            parsed[batch_key] = _read_batch_samples(repo, batch_key)
         sample = parsed[batch_key].get(row["record_index"])
         if (sample is None or sample.sleep_stage not in {"core", "deep", "rem"}
                 or sample.start_at < repo.sleep_series_start
@@ -284,7 +300,7 @@ def accepted_watch_identity_by_key(
                "active_energy", "exercise_time", "respiratory_rate")
     placeholders = ",".join("?" for _ in metrics)
     rows = repo.conn.execute(
-        "SELECT r.batch_key,r.record_index,r.fingerprint,r.metric,l.core_event_key,b.payload_enc "
+        "SELECT r.batch_key,r.record_index,r.fingerprint,r.metric,l.core_event_key "
         "FROM health_os_tuanhdo_records r "
         "JOIN health_os_tuanhdo_promotion_links l ON l.batch_key=r.batch_key "
         "AND l.record_index=r.record_index "
@@ -299,9 +315,7 @@ def accepted_watch_identity_by_key(
             continue
         batch_key = row["batch_key"]
         if batch_key not in parsed:
-            payload = json.loads(store.decrypt(repo.data_key, row["payload_enc"]))
-            parsed[batch_key] = {sample.record_index: sample
-                                 for sample in parse_health_export(payload).samples}
+            parsed[batch_key] = _read_batch_samples(repo, batch_key)
         sample = parsed[batch_key].get(row["record_index"])
         match = (_watch_match(sample, approved_watch, derived_watch)
                  if sample is not None else None)
