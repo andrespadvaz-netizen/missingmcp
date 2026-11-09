@@ -210,6 +210,86 @@ async def test_uncertain_create_is_not_repeated(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_uncertain_handoff_reconciles_one_visible_task_without_repost(tmp_path):
+    posts = []
+    key = "uncertain-handoff-0001"
+
+    def handler(request):
+        meta = dispatch_metadata(request)
+        if meta is not None:
+            return meta
+        if request.url.path.endswith("/agents"):
+            return httpx.Response(200, json={"data": [{"gid": "11"}]})
+        if request.url.path.endswith("/projects/200/tasks"):
+            return httpx.Response(200, json={"data": [{
+                "gid": "301", "notes": f"Encargo Metis. Referencia: {key}\n",
+                "assignee": {"gid": "11"}}]})
+        if request.method == "POST":
+            posts.append(1)
+            raise httpx.ReadTimeout("lost response")
+        gid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"data": {
+            "gid": gid, "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}],
+            "assignee": {"gid": "11" if gid == "301" else "44"}}})
+
+    client = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                         allowed_agent_gids={"200": "11"},
+                         expected_project_owner_gids={"200": "44"},
+                         transport=httpx.MockTransport(handler),
+                         ledger_path=str(tmp_path / "dispatch.db"),
+                         handoff_ledger_path=str(tmp_path / "handoff.db"))
+    with pytest.raises(AsanaError, match="transport_uncertain"):
+        await client.create_handoff_task(source_task_gid="300", project_gid="200",
+                                         agent_gid="11", title="Review", request="Evidence",
+                                         idempotency_key=key)
+    assert (await client.reconcile_handoff(key, "200", "11"))["gid"] == "301"
+    assert (await client.reconcile_handoff(key, "200", "11"))["gid"] == "301"
+    assert len(posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_handoff_never_posts_twice(tmp_path):
+    import asyncio
+    started = asyncio.Event()
+    release = asyncio.Event()
+    posts = []
+
+    async def handler(request):
+        meta = dispatch_metadata(request)
+        if meta is not None:
+            return meta
+        if request.url.path.endswith("/agents"):
+            return httpx.Response(200, json={"data": [{"gid": "11"}]})
+        if request.method == "POST":
+            posts.append(1)
+            started.set()
+            await release.wait()
+            return httpx.Response(201, json={"data": {"gid": "301"}})
+        gid = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"data": {
+            "gid": gid, "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}],
+            "assignee": {"gid": "11" if gid == "301" else "44"}}})
+
+    client = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                         allowed_agent_gids={"200": "11"},
+                         expected_project_owner_gids={"200": "44"},
+                         transport=httpx.MockTransport(handler),
+                         ledger_path=str(tmp_path / "dispatch.db"),
+                         handoff_ledger_path=str(tmp_path / "handoff.db"))
+    args = dict(source_task_gid="300", project_gid="200", agent_gid="11",
+                title="Review", request="Evidence", idempotency_key="concurrent-handoff-0001")
+    first = asyncio.create_task(client.create_handoff_task(**args))
+    await started.wait()
+    with pytest.raises(AsanaError, match="dispatch_uncertain"):
+        await client.create_handoff_task(**args)
+    release.set()
+    assert (await first)["gid"] == "301"
+    assert len(posts) == 1
+
+
+@pytest.mark.asyncio
 async def test_dispatch_rejects_public_project_and_unlisted_agent_before_write(tmp_path):
     writes = []
 
@@ -262,7 +342,7 @@ async def test_self_contained_brief_has_no_source_task_link(tmp_path):
         project_gid="200", agent_gid="11", title="Evidence review",
         request="Evaluate only 2 + 2 = 4", idempotency_key="safe-dispatch-0002")
     assert task["gid"] == "301"
-    assert posted[0]["notes"] == "Encargo Metis. Contexto: VENTURE_QUEST\n\nEvaluate only 2 + 2 = 4"
+    assert posted[0]["notes"] == "Encargo Metis. Referencia: safe-dispatch-0002\nContexto: VENTURE_QUEST\n\nEvaluate only 2 + 2 = 4"
 
 
 @pytest.mark.asyncio

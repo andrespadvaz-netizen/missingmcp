@@ -5,7 +5,7 @@ import pytest
 
 from missingmcp.metis.queue import Queue
 from missingmcp.metis.transport import Worker
-from missingmcp.metis.writes import WriteWorker, receipts
+from missingmcp.metis.writes import WriteWorker, receipts, validate_plan
 
 
 SECRET = 'synthetic-storage-secret-' * 3
@@ -19,6 +19,20 @@ def plan(count=1):
           "object_id": f"root-{n}", "operation": "create", "payload": {"title": "Private title", "text": "PRIVATE BUSINESS CONTENT"},
           "snapshot": {}, "policy_revision": "one", "policy_hash": "a" * 64}}
         for n in range(1, count+1)]}
+
+
+def test_routed_asana_creation_cannot_use_old_productive_path(monkeypatch):
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
+        "context": "SHOKKO", "routing": {"Research task": "research"}}))
+    value = plan()
+    value["resolved_context"] = "SHOKKO"
+    action = value["write_plan"][0]["action"]
+    action.update(context="SHOKKO", provider="ASANA",
+                  payload={"title": "Research task"})
+    with pytest.raises(ValueError, match="use_metis_asana_create_task"):
+        validate_plan(value, "SHOKKO")
+    action["payload"]["title"] = "Unrelated task"
+    assert len(validate_plan(value, "SHOKKO")) == 1
 
 
 @pytest.fixture

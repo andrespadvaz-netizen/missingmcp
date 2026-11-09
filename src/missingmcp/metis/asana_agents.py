@@ -167,7 +167,7 @@ class AsanaAgents:
 
     async def task(self, task_gid: str):
         body = await self._request("GET", f"/tasks/{_gid(task_gid)}",
-                                   params={"opt_fields": "gid,name,assignee.gid,projects.gid,workspace.gid,completed,modified_at"})
+                                   params={"opt_fields": "gid,name,assignee.gid,created_by.gid,projects.gid,workspace.gid,completed,modified_at"})
         task = body.get("data")
         if not isinstance(task, dict) or str(task.get("workspace", {}).get("gid")) != self.workspace_gid:
             raise AsanaError("task_workspace_mismatch")
@@ -238,7 +238,7 @@ class AsanaAgents:
                 raise AsanaError("source_project_mismatch")
         payload = {"name": title.strip(), "projects": [project_gid],
                    "assignee": agent_gid,
-                   "notes": (f"Encargo Metis. Contexto: {self.allowed_projects[project_gid]}\n"
+                   "notes": (f"Encargo Metis. Referencia: {idempotency_key}\nContexto: {self.allowed_projects[project_gid]}\n"
                              + (f"Tarea original: https://app.asana.com/0/0/{source_task_gid}\n"
                                 if source_task_gid else "") + f"\n{request}")}
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -282,7 +282,8 @@ class AsanaAgents:
         """Correlate two tasks in one context without leaking source details.
 
         The caller supplies an audience-safe, self-contained request. The
-        source GID is kept in the private ledger, not copied into task notes.
+        source GID is kept in the private ledger and linked from the new task;
+        source task contents are not copied into the agent brief.
         """
         if self.handoffs is None or self.ledger is None:
             raise AsanaError("handoff_ledger_required")
@@ -331,3 +332,27 @@ class AsanaAgents:
         return [story async for story in self._pages(
             f"/tasks/{_gid(task_gid)}/stories",
             params={"opt_fields": "gid,created_at,resource_subtype,text,created_by.gid"})]
+
+    async def reconcile_handoff(self, key: str, project_gid: str, agent_gid: str):
+        """Check Asana after an uncertain POST; never issue another POST."""
+        if self.ledger is None or self.handoffs is None or not IDEM.fullmatch(key):
+            raise AsanaError("reconciliation_unavailable")
+        row = self.ledger.execute("SELECT * FROM asana_agent_dispatches WHERE idem=?",
+                                  (key,)).fetchone()
+        if row is None:
+            raise AsanaError("dispatch_not_found")
+        if row["task_gid"]:
+            return await self._verified_agent_task(row["task_gid"], project_gid, agent_gid)
+        matches = [task async for task in self._pages(
+            f"/projects/{_gid(project_gid)}/tasks",
+            params={"opt_fields": "gid,notes,assignee.gid,projects.gid"})
+            if f"Referencia: {key}\n" in (task.get("notes") or "")
+            and str((task.get("assignee") or {}).get("gid")) == agent_gid]
+        if len(matches) != 1:
+            raise AsanaError("dispatch_uncertain")
+        gid = _gid(str(matches[0]["gid"]))
+        task = await self._verified_agent_task(gid, project_gid, agent_gid)
+        self.ledger.execute("UPDATE asana_agent_dispatches SET state='CREATED',task_gid=? "
+                            "WHERE idem=? AND task_gid IS NULL", (gid, key))
+        self.handoffs.record_target(key, gid)
+        return task

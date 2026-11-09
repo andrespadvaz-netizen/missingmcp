@@ -8,13 +8,14 @@ import os
 import sys
 
 from missingmcp.metis.asana_agents import AsanaAgents, AsanaError
+from missingmcp.metis.asana_evaluation import evaluate_and_dispatch
 from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
 from missingmcp.config import load_config
 
 
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["discover", "agent", "task", "stories", "assign", "create", "handoff"])
+    parser.add_argument("action", choices=["discover", "agent", "task", "stories", "assign", "create", "handoff", "evaluate", "reconcile"])
     parser.add_argument("--agent-gid")
     parser.add_argument("--task-gid")
     parser.add_argument("--project-gid")
@@ -22,10 +23,14 @@ async def main():
     parser.add_argument("--title")
     parser.add_argument("--request")
     parser.add_argument("--idempotency-key")
+    parser.add_argument("--brief-file", help="JSON brief supplied by the authorized Dot")
+    parser.add_argument("--dispatch", action="store_true", help="Create the evaluated handoff")
     args = parser.parse_args()
     try:
+        if args.action in {"assign", "create", "handoff"} or args.dispatch:
+            raise ValueError("shared_quota_unavailable")
         allowed = json.loads(os.environ["ASANA_AGENT_PROJECTS_JSON"])
-        dispatch = args.action in {"assign", "create", "handoff"}
+        dispatch = args.action in {"assign", "create", "handoff", "evaluate", "reconcile"}
         allowed_agents = json.loads(os.environ["ASANA_AGENT_GIDS_JSON"]) if dispatch else {}
         owners = json.loads(os.environ["ASANA_DISPATCH_OWNER_GIDS_JSON"]) if dispatch else {}
         cross_context = (json.loads(os.environ.get(
@@ -53,6 +58,20 @@ async def main():
         elif args.action == "assign":
             value = await client.assign_dedicated_task(
                 args.task_gid, args.agent_gid, args.project_gid)
+        elif args.action == "evaluate":
+            if not args.brief_file or not args.source_task_gid or not args.project_gid:
+                raise ValueError("evaluate_requires_brief_source_and_project")
+            with open(args.brief_file, encoding="utf-8") as file:
+                brief = json.load(file)
+            profiles = json.loads(os.environ.get("ASANA_AGENT_PROFILES_JSON", "{}"))
+            decision, task = await evaluate_and_dispatch(
+                client, source_task_gid=args.source_task_gid,
+                project_gid=args.project_gid, brief=brief, agents=profiles,
+                dispatch=args.dispatch)
+            value = {"decision": vars(decision), "created_task_gid": task["gid"] if task else None}
+        elif args.action == "reconcile":
+            value = await client.reconcile_handoff(
+                args.idempotency_key, args.project_gid, args.agent_gid)
         elif args.action == "handoff":
             value = await client.create_handoff_task(
                 source_task_gid=args.source_task_gid, project_gid=args.project_gid,

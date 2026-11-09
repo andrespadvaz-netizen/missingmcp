@@ -3,10 +3,14 @@ import asyncio
 import hashlib
 import hmac
 import json
+import os
 from .base import LoginError, LoginOk, SessionExpired
 from ..metis.queue import Queue, RequestError, TERMINAL, MAX_REQUEST_BYTES, MAX_ENVELOPE_BYTES, validate
 from ..metis.transport import Bridge, Worker
 from ..metis.direct_audit import DirectAudit
+from ..metis.asana_agents import AsanaAgents, AsanaError
+from ..metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
+from ..metis.asana_dot_events import DotEvents, DotEventError
 
 POLL_WAIT_SECONDS = 20
 
@@ -84,6 +88,21 @@ TOOLS = [
      "annotations":{"readOnlyHint":True,"idempotentHint":True,"openWorldHint":False}}
 ]
 
+ASANA_CREATE_TOOL = {
+    "name": "metis_asana_create_task",
+    "description": "Create one human-owned Asana task through the authenticated Metis Gateway path, "
+                   "then evaluate a separate AI handoff. Requires the configured private project, "
+                   "audience and sources. Agent dispatch stays blocked while the shared quota is unavailable. "
+                   "Keep one idempotency_key for retries; an uncertain creation requires reconciliation.",
+    "inputSchema": {"type": "object", "additionalProperties": False,
+                    "properties": {"idempotency_key": {"type": "string", "minLength": 16, "maxLength": 128},
+                                   "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                                   "brief": {"type": "object"}},
+                    "required": ["idempotency_key", "name", "brief"]},
+    "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                    "idempotentHint": True, "openWorldHint": True},
+}
+
 
 class MetisAdapter:
     name = "metis"
@@ -100,6 +119,51 @@ class MetisAdapter:
         self.worker = shared.worker if shared else Worker(self.queue, Bridge(config.metis_bridge_url, config.metis_bridge_secret))
         self.direct_audit = shared.direct_audit if shared else DirectAudit(config)
         self.credential_version = hashlib.sha256(config.metis_operator_key.encode()).hexdigest()
+        self.asana_dot_policy_raw = os.environ.get("ASANA_METIS_DOT_POLICY_JSON", "")
+        self.asana_profiles_raw = os.environ.get("ASANA_AGENT_PROFILES_JSON", "")
+
+    @property
+    def asana_dot_enabled(self):
+        return bool(self.name == "metis" and self.asana_dot_policy_raw and self.asana_profiles_raw and
+                    self.config.asana_dispatch_client_id)
+
+    async def create_asana_dot_task(self, args):
+        if not self.asana_dot_enabled:
+            raise RequestError("asana_dot_not_configured")
+        if not isinstance(args, dict) or set(args) != {"idempotency_key", "name", "brief"}:
+            raise RequestError("invalid_asana_dot_arguments")
+        try:
+            policy = json.loads(self.asana_dot_policy_raw)
+            profiles = json.loads(self.asana_profiles_raw)
+            if not isinstance(policy, dict) or not isinstance(profiles, dict):
+                raise ValueError("invalid_asana_dot_policy")
+            oauth = AsanaDispatchOAuth(self.config)
+            try:
+                bearer = await oauth.access_token()
+            finally:
+                oauth.db.close()
+            project = policy["project_gid"]
+            client = AsanaAgents(
+                bearer, policy["workspace_gid"], {project: policy["context"]},
+                allowed_agent_gids={project: list(profiles)},
+                expected_project_owner_gids={project: policy["owner_gid"]},
+                ledger_path=self.config.db_path, handoff_ledger_path=self.config.db_path)
+            events = DotEvents(self.config.db_path)
+            try:
+                task = await events.create_source(client, {"type": "task.create", **args}, policy)
+                evaluation = await events.created(
+                    client, {"type": "task.created", "task_gid": str(task["gid"]),
+                             "brief": args["brief"]}, policy, profiles, dispatch=True)
+                return {"source_task_gid": str(task["gid"]), "evaluation": evaluation}
+            finally:
+                events.db.close()
+                if client.ledger is not None:
+                    client.ledger.close()
+                if client.handoffs is not None:
+                    client.handoffs.close()
+        except (AsanaError, DispatchAuthError, DotEventError, ValueError, KeyError,
+                TypeError) as exc:
+            raise RequestError(str(exc)) from exc
 
     def login_hint(self, form):
         return "metis-operator"
@@ -150,7 +214,7 @@ class MetisAdapter:
         if method == "ping":
             return result({})
         if method == "tools/list":
-            return result({"tools":TOOLS})
+            return result({"tools": TOOLS + ([ASANA_CREATE_TOOL] if self.asana_dot_enabled else [])})
         if method != "tools/call":
             return error(-32601, "Method not found")
         params = req.get("params")
@@ -169,6 +233,8 @@ class MetisAdapter:
                 self.queue.record_direct_audit(account_key, self.origin_model, text, value)
             elif params.get("name") == "metis_create_execution":
                 value = self.queue.create(account_key, args, self.origin_model)
+            elif params.get("name") == "metis_asana_create_task":
+                value = await self.create_asana_dot_task(args)
             elif params.get("name") == "metis_list_direct_audits":
                 if not isinstance(args, dict) or not set(args).issubset({"context", "start_date", "end_date", "limit"}) \
                         or not {"context", "start_date", "end_date"}.issubset(args):

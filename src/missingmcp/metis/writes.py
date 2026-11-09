@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+import os
 
 from ..store import encrypt, decrypt
 
@@ -39,6 +40,7 @@ def validate_plan(result, expected_context=None):
     if expected_context is not None and result["resolved_context"] != expected_context:
         raise ValueError("write_context_mismatch")
     seen = set()
+    dot_policy_raw = os.environ.get("ASANA_METIS_DOT_POLICY_JSON", "")
     for index, item in enumerate(plan, 1):
         if not isinstance(item, dict) or set(item) != {"ordinal", "action"} or item["ordinal"] != index or isinstance(item["ordinal"], bool):
             raise ValueError("invalid_write_identity")
@@ -51,6 +53,14 @@ def validate_plan(result, expected_context=None):
                 not isinstance(action["object_id"], str) or not isinstance(action["payload"], dict) or
                 not isinstance(action["snapshot"], dict) or len(canonical(action).encode("utf-8")) > 32000):
             raise ValueError("invalid_write_action")
+        if dot_policy_raw and action["provider"] == "ASANA" and action["operation"] == "create":
+            dot_policy = json.loads(dot_policy_raw)
+            if not isinstance(dot_policy, dict):
+                raise ValueError("invalid_asana_dot_policy")
+            routing = dot_policy.get("routing")
+            if (action["context"] == dot_policy.get("context") and
+                    isinstance(routing, dict) and action["payload"].get("title") in routing):
+                raise ValueError("use_metis_asana_create_task")
         target_id = action["object_id"].replace("-", "").lower() if action["provider"] == "NOTION" else action["object_id"]
         target = (action["provider"], target_id, canonical(action["payload"]) if action["operation"] == "create" else None)
         if target in seen:

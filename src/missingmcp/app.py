@@ -19,6 +19,8 @@ from .adapters.base import is_remote, is_local, is_upstream_oauth
 from .log import log
 from .metis.transport import LensContextBridgeError
 from .metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
+from .metis.asana_agents import AsanaAgents, AsanaError
+from .metis.asana_dot_events import DotEvents, DotEventError
 from .health_os.persistence import HealthOSRepository
 from datetime import datetime, timezone
 
@@ -78,6 +80,76 @@ def build_app(config: Config) -> Starlette:
     health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if config.health_os_ingest_key else None
     asana_dispatch = (AsanaDispatchOAuth(config)
                       if config.asana_dispatch_client_id else None)
+    # Explicitly disabled until an operator supplies the Metis-only policy.
+    dot_policy_raw = os.environ.get("ASANA_METIS_DOT_POLICY_JSON", "")
+    agent_profiles_raw = os.environ.get("ASANA_AGENT_PROFILES_JSON", "")
+    dot_events_enabled = bool(dot_policy_raw and agent_profiles_raw)
+
+    async def asana_dot_event(request):
+        if not dot_events_enabled or not asana_dispatch or not config.metis_operator_key:
+            return JSONResponse({"status": "UNAVAILABLE"}, status_code=404)
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied, "Bearer " + config.metis_operator_key):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=12_000)
+        if raw is None:
+            return JSONResponse({"status": "INVALID"}, status_code=413)
+        dot_events = None
+        client = None
+        try:
+            dot_events = DotEvents(config.db_path)
+            body = json.loads(raw)
+            policy = json.loads(dot_policy_raw)
+            profiles = json.loads(agent_profiles_raw)
+            if (not isinstance(body, dict) or not isinstance(policy, dict) or
+                    not isinstance(profiles, dict)):
+                raise ValueError("invalid_policy")
+            project = policy["project_gid"]
+            client = AsanaAgents(
+                await asana_dispatch.access_token(), policy["workspace_gid"],
+                {project: policy["context"]},
+                allowed_agent_gids={project: list(profiles)},
+                expected_project_owner_gids={project: policy["owner_gid"]},
+                ledger_path=config.db_path, handoff_ledger_path=config.db_path)
+            if body.get("type") == "task.create":
+                task = await dot_events.create_source(client, body, policy)
+                decision = await dot_events.created(
+                    client, {"type": "task.created", "task_gid": str(task["gid"]),
+                             "brief": body.get("brief")}, policy, profiles, dispatch=True)
+                result = {"source_task_gid": str(task["gid"]), "evaluation": decision}
+            elif body.get("type") == "task.source_reconcile":
+                task = await dot_events.reconcile_source(
+                    client, body["idempotency_key"], policy)
+                result = {"source_task_gid": str(task["gid"]), "state": "CREATED"}
+            elif body.get("type") == "task.created":
+                result = await dot_events.created(client, body, policy, profiles,
+                                                  dispatch=True)
+            elif body.get("type") == "task.review":
+                result = await dot_events.review(
+                    client, body["task_gid"], body["story_gid"],
+                    policy["owner_gid"])
+            elif body.get("type") == "task.proposal":
+                result = await dot_events.propose(
+                    client, body["task_gid"], body["story_gid"])
+            elif body.get("type") == "task.reconcile":
+                result = await dot_events.reconcile(
+                    client, body["task_gid"], project, policy["context"])
+            else:
+                return JSONResponse({"status": "INVALID"}, status_code=400)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except (ValueError, KeyError, TypeError, AsanaError, DotEventError,
+                DispatchAuthError, json.JSONDecodeError) as exc:
+            # Codes only; no event body, token, source text or upstream response.
+            return JSONResponse({"status": "BLOCKED", "reason": str(exc)[:80]},
+                                status_code=409)
+        finally:
+            if client is not None:
+                if client.ledger is not None:
+                    client.ledger.close()
+                if client.handoffs is not None:
+                    client.handoffs.close()
+            if dot_events is not None:
+                dot_events.db.close()
 
     async def asana_dispatch_setup(request):
         if asana_dispatch is None:
@@ -540,6 +612,7 @@ def build_app(config: Config) -> Starlette:
         Route("/asana-dispatch/oauth/setup", asana_dispatch_setup, methods=["GET"]),
         Route("/asana-dispatch/oauth/start", asana_dispatch_start, methods=["POST"]),
         Route("/asana-dispatch/oauth/callback", asana_dispatch_callback, methods=["GET"]),
+        Route("/asana-dot/event", asana_dot_event, methods=["POST"]),
         Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
         Route("/health-os/ingest", health_os_ingest, methods=["POST"]),
         Route("/health-os/quality", health_os_quality, methods=["GET"]),
