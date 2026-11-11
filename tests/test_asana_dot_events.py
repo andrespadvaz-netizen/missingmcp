@@ -127,7 +127,8 @@ async def test_unrouted_human_task_is_created_but_agent_is_skipped(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path):
+@pytest.mark.parametrize("human_only", [False, True])
+async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path, human_only):
     posts = []
 
     def handler(request):
@@ -151,11 +152,13 @@ async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path):
                         transport=httpx.MockTransport(handler))
     event = {"type": "task.create", "idempotency_key": "dot-source-creation-0001",
              "name": "Research task", "brief": BRIEF}
+    policy = (POLICY | {"eligible_task_names": [], "routing": {}, "specialties": []}
+              if human_only else POLICY)
     with pytest.raises(Exception, match="transport_uncertain"):
-        await events.create_source(asana, event, POLICY)
+        await events.create_source(asana, event, policy)
     with pytest.raises(DotEventError, match="source_creation_uncertain"):
-        await events.create_source(asana, event, POLICY)
-    assert (await events.reconcile_source(asana, "dot-source-creation-0001", POLICY))[
+        await events.create_source(asana, event, policy)
+    assert (await events.reconcile_source(asana, "dot-source-creation-0001", policy))[
         "gid"] == "300"
     assert len(posts) == 1
 
@@ -209,11 +212,43 @@ async def test_public_source_project_is_rejected_before_post(tmp_path):
     events = DotEvents(str(tmp_path / "events.db"))
     asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
                         transport=httpx.MockTransport(handler))
-    with pytest.raises(DotEventError, match="source_project_not_private"):
+    with pytest.raises(DotEventError, match="source_project_privacy_mismatch"):
         await events.create_source(asana, {
             "type": "task.create", "idempotency_key": "dot-source-creation-0001",
             "name": "Research task", "brief": BRIEF}, POLICY)
     assert not writes
+
+
+@pytest.mark.asyncio
+async def test_public_project_requires_explicit_workspace_audience(tmp_path):
+    posts = []
+
+    def handler(request):
+        if request.url.path.endswith("/projects/200"):
+            return httpx.Response(200, json={"data": {"gid": "200",
+                "workspace": {"gid": "100"}, "privacy_setting": "public_to_workspace"}})
+        if request.method == "POST":
+            posts.append(1)
+            return httpx.Response(201, json={"data": {"gid": "300"}})
+        return httpx.Response(200, json={"data": {
+            "gid": "300", "name": "Research task", "workspace": {"gid": "100"},
+            "created_by": {"gid": "55"}, "projects": [{"gid": "200"}],
+            "assignee": {"gid": "44"}, "completed": False}})
+
+    events = DotEvents(str(tmp_path / "events.db"))
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    event = {"type": "task.create", "idempotency_key": "explicit-workspace-task-0001",
+             "name": "Research task", "brief": BRIEF | {"audience": "workspace"}}
+    with pytest.raises(DotEventError, match="source_audience_policy_invalid"):
+        await events.create_source(asana, event,
+                                   POLICY | {"privacy_setting": "public_to_workspace",
+                                             "audiences": ["internal", "workspace"]})
+    assert not posts
+    task = await events.create_source(asana, event,
+                                      POLICY | {"privacy_setting": "public_to_workspace",
+                                                "audiences": ["workspace"]})
+    assert task["gid"] == "300" and len(posts) == 1
 
 
 @pytest.mark.asyncio

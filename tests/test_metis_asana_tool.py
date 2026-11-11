@@ -54,6 +54,16 @@ async def test_metis_create_tool_is_only_listed_with_policy(tmp_path, monkeypatc
     with pytest.raises(Exception):
         await adapter.handle(None, "wrong-account", adapter.credential_version,
                              request("tools/list"))
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
+        "workspace_gid": "100", "project_gid": "200", "context": "SHOKKO",
+        "owner_gid": "44", "creator_gid": "55",
+        "audiences": ["internal"], "sources": ["current_request"],
+        "privacy_setting": "public_to_workspace", "eligible_task_names": [],
+        "routing": {}, "specialties": []}))
+    guarded = MetisChatGPTAdapter(config(tmp_path))
+    _, _, raw = await guarded.handle(None, "metis-operator", guarded.credential_version,
+                                     request("tools/list"))
+    assert "metis_asana_create_task" not in [t["name"] for t in json.loads(raw)["result"]["tools"]]
 
 
 @pytest.mark.asyncio

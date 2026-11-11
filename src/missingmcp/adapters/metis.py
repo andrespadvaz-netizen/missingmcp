@@ -140,6 +140,10 @@ class MetisAdapter:
                     any(not isinstance(value, str) or not value
                         for value in policy[field])
                     for field in ("audiences", "sources")) or
+                policy.get("privacy_setting", "private") not in
+                    {"private", "public_to_workspace"} or
+                (policy.get("privacy_setting") == "public_to_workspace" and
+                 policy.get("audiences") != ["workspace"]) or
                 not isinstance(policy.get("eligible_task_names"), list) or
                 not isinstance(policy.get("routing"), dict) or
                 not isinstance(policy.get("specialties"), list)):

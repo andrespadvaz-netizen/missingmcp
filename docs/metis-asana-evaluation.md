@@ -12,9 +12,15 @@ no se derivan del evento. La política fija `workspace_gid`, `creator_gid`,
 esta clave ni esta política.
 
 `owner_gid` es el responsable humano de la tarea; no tiene que ser el dueño
-del proyecto. El proyecto debe ser privado y pertenecer al workspace fijado.
+del proyecto. Por defecto, el proyecto debe ser privado y pertenecer al
+workspace fijado.
 `project_owner_gid` puede fijarse por separado para una futura autorización
 de despachos; si falta, el control de destino también bloquea ese despacho.
+Para un proyecto visible a todo el workspace, la política debe declarar
+explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
+`workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
+La política actual que espera `private` no puede usar un proyecto público por
+accidente. Un proyecto público no autoriza fuentes privadas ni agentes.
 
 ## Crear y evaluar
 

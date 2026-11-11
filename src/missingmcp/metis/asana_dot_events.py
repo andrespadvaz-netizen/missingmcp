@@ -77,7 +77,7 @@ class DotEvents:
                     for field in ("deliverable", "request")) or
                 brief.get("requires_private_memory") is True):
             raise DotEventError("source_brief_scope_forbidden")
-        await self._verify_project(client, project)
+        await self._verify_project(client, project, policy)
         notes = (f"Metis Dot source reference: {key}\n\n"
                  f"Contexto: {brief['context']}\n"
                  f"Audiencia: {brief['audience']}\n"
@@ -128,14 +128,19 @@ class DotEvents:
         return task
 
     @staticmethod
-    async def _verify_project(client, project):
+    async def _verify_project(client, project, policy):
+        expected_privacy = policy.get("privacy_setting", "private")
+        if (expected_privacy not in {"private", "public_to_workspace"} or
+                (expected_privacy == "public_to_workspace" and
+                 policy.get("audiences") != ["workspace"])):
+            raise DotEventError("source_audience_policy_invalid")
         project_body = await client._request("GET", f"/projects/{project}",
                                              params={"opt_fields": "gid,workspace.gid,privacy_setting"})
         observed_project = project_body.get("data") or {}
         if (str(observed_project.get("gid")) != project or
                 str((observed_project.get("workspace") or {}).get("gid")) != client.workspace_gid or
-                observed_project.get("privacy_setting") != "private"):
-            raise DotEventError("source_project_not_private")
+                observed_project.get("privacy_setting") != expected_privacy):
+            raise DotEventError("source_project_privacy_mismatch")
 
     @staticmethod
     def _verify_source(task, project, owner, name, creator):
@@ -150,7 +155,7 @@ class DotEvents:
         if row is None or row["state"] != "POST_SENT":
             raise DotEventError("source_reconciliation_not_pending")
         project, owner = policy["project_gid"], policy["owner_gid"]
-        await self._verify_project(client, project)
+        await self._verify_project(client, project, policy)
         matches = [t async for t in client._pages(
             f"/projects/{project}/tasks",
             params={"opt_fields": "gid,notes"})
@@ -164,8 +169,6 @@ class DotEvents:
         task = await client.task(gid)
         self._verify_source(task, project, owner, row["source_name"],
                             policy.get("creator_gid"))
-        if row["source_name"] not in policy.get("eligible_task_names", ()):
-            raise DotEventError("source_scope_forbidden")
         self.db.execute("UPDATE asana_dot_sources SET state='CREATED',task_gid=? "
                         "WHERE idem=? AND state='POST_SENT'", (gid, key))
         return task
