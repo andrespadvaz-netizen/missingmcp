@@ -75,6 +75,60 @@ async def test_asana_dispatch_pkce_owner_and_refresh(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_refresh_without_replacement_token_keeps_prior_grant(tmp_path):
+    clock = [1000]
+    refreshes = []
+
+    def upstream(request):
+        form = parse_qs(request.content.decode())
+        if form["grant_type"] == ["authorization_code"]:
+            return httpx.Response(200, json={
+                "access_token": "access-" + "a" * 32,
+                "refresh_token": "refresh-" + "r" * 32,
+                "expires_in": 3600, "token_type": "bearer",
+                "data": {"gid": OWNER_GID}})
+        refreshes.append(form["refresh_token"][0])
+        return httpx.Response(200, json={
+            "access_token": "access-" + "b" * 32,
+            "expires_in": 3600, "token_type": "bearer"})
+
+    oauth = AsanaDispatchOAuth(config(tmp_path), transport=httpx.MockTransport(upstream),
+                               clock=lambda: clock[0])
+    state = parse_qs(urlparse(oauth.begin("s" * 40)).query)["state"][0]
+    await oauth.complete(state, "one-use-code")
+    clock[0] = 4490
+    assert await oauth.access_token() == "access-" + "b" * 32
+    assert refreshes == ["refresh-" + "r" * 32]
+    assert oauth.db.execute("SELECT refresh_state FROM asana_dispatch_oauth_tokens").fetchone()[0] == "READY"
+    assert oauth.db.execute("SELECT refresh_enc FROM asana_dispatch_oauth_tokens").fetchone()[0] != refreshes[0]
+
+
+@pytest.mark.asyncio
+async def test_malformed_replacement_refresh_token_is_not_accepted(tmp_path):
+    clock = [1000]
+
+    def upstream(request):
+        form = parse_qs(request.content.decode())
+        if form["grant_type"] == ["authorization_code"]:
+            return httpx.Response(200, json={
+                "access_token": "access-" + "a" * 32,
+                "refresh_token": "refresh-" + "r" * 32,
+                "expires_in": 3600, "data": {"gid": OWNER_GID}})
+        return httpx.Response(200, json={
+            "access_token": "access-" + "b" * 32,
+            "refresh_token": "", "expires_in": 3600})
+
+    oauth = AsanaDispatchOAuth(config(tmp_path), transport=httpx.MockTransport(upstream),
+                               clock=lambda: clock[0])
+    state = parse_qs(urlparse(oauth.begin("s" * 40)).query)["state"][0]
+    await oauth.complete(state, "one-use-code")
+    clock[0] = 4490
+    with pytest.raises(DispatchAuthError, match="invalid_token_response"):
+        await oauth.access_token()
+    assert oauth.db.execute("SELECT refresh_state FROM asana_dispatch_oauth_tokens").fetchone()[0] == "UNCERTAIN"
+
+
+@pytest.mark.asyncio
 async def test_invalid_refresh_is_barred_until_new_grant(tmp_path):
     clock = [1000]
     refreshes = []

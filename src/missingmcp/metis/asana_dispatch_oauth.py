@@ -121,9 +121,15 @@ class AsanaDispatchOAuth:
         return value
 
     @staticmethod
-    def _parse_token(value: dict, *, require_owner: bool) -> tuple[str, str, int]:
+    def _parse_token(value: dict, *, require_owner: bool,
+                     prior_refresh: str | None = None) -> tuple[str, str, int]:
         access, refresh, ttl = (value.get("access_token"),
                                 value.get("refresh_token"), value.get("expires_in"))
+        # RFC 6749 section 6 permits a refresh response without a replacement
+        # refresh token. In that case the existing token remains in force.
+        # A supplied but malformed replacement is never silently ignored.
+        if refresh is None and prior_refresh is not None:
+            refresh = prior_refresh
         token_type = value.get("token_type", "bearer")
         owner = value.get("data")
         if (not isinstance(access, str) or len(access) < 16 or
@@ -188,7 +194,8 @@ class AsanaDispatchOAuth:
             "client_secret": self.config.asana_dispatch_client_secret,
             "refresh_token": refresh,
         })
-        access, new_refresh, ttl = self._parse_token(value, require_owner=False)
+        access, new_refresh, ttl = self._parse_token(
+            value, require_owner=False, prior_refresh=refresh)
         self.db.execute("BEGIN IMMEDIATE")
         try:
             self.db.execute("UPDATE asana_dispatch_oauth_tokens SET "

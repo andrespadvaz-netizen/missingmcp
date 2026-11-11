@@ -168,6 +168,9 @@ o incierta, el Gateway deja una barrera durable `UNCERTAIN` antes de intentar
 otra operación. No se vuelve a usar el refresh token anterior: la persona
 titular debe reconectar el mismo grant mediante
 `/asana-dispatch/oauth/setup`, con la clave ya guardada fuera del repositorio.
+Una respuesta de renovación válida puede omitir un nuevo `refresh_token`; en
+ese caso se conserva el anterior, conforme a OAuth 2.0. Si trae un reemplazo
+inválido o faltan el access token o la duración, permanece la barrera.
 No se copia la clave, el token ni la respuesta del proveedor a chats o logs.
 El nuevo grant reemplaza el par cifrado y limpia la barrera. En una migración
 desde versiones anteriores, cualquier token ya próximo a vencer también
