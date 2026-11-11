@@ -11,6 +11,47 @@ no se derivan del evento. La política fija `workspace_gid`, `creator_gid`,
 `specialties`, `contexts`, `audiences` y `dot_authorized`. Meli y Val no usan
 esta clave ni esta política.
 
+## Descubrimiento global y autorizaciones por proyecto
+
+La sesión MCP autenticada de Metis expone `metis_asana_workspace_inventory`
+cuando hay OAuth saliente y `ASANA_WORKSPACE_GID`. Recorre proyectos visibles
+mediante la API de Asana, sin escribir ni leer tareas. Devuelve nombre, GID y
+privacidad de proyectos `public_to_workspace`; de privados no registrados
+devuelve solo un conteo. Un privado registrado puede mostrar sus metadatos.
+`authorized` indica una autorización de servidor: descubrir un proyecto jamás
+lo agrega a la política. Más de diez páginas dan `complete: false`. El OAuth
+solo descubre lo accesible a la cuenta conectada, no cuentas ni memorias
+ajenas.
+
+Para operar varios proyectos, `ASANA_METIS_DOT_POLICY_JSON` acepta un registro
+con `workspace_gid`, `creator_gid` y `projects`. Cada clave de `projects` es un
+GID; cada entrada fija `context`, `owner_gid`, `privacy_setting`, `audiences`,
+`sources`, `eligible_task_names`, `routing`, `specialties` y `agent_gids`.
+`project_owner_gid` puede fijarse por separado. La forma anterior de un solo
+proyecto sigue funcionando. Ejemplo sintético, sin datos reales:
+
+```json
+{
+  "workspace_gid": "100", "creator_gid": "55",
+  "projects": {
+    "200": {
+      "context": "SHOKKO", "owner_gid": "44",
+      "privacy_setting": "private", "audiences": ["project_members"],
+      "sources": ["current_request"], "eligible_task_names": [],
+      "routing": {}, "specialties": [], "agent_gids": []
+    }
+  }
+}
+```
+
+Cada entrada necesita autorización verificable del contexto, audiencia,
+fuentes y responsable humano. Un privado solo admite `project_members`; un
+proyecto visible al workspace solo admite `workspace`. Antes del POST el
+Gateway compara la privacidad real en Asana. Un proyecto descubierto pero no
+registrado responde `project_not_authorized`. `agent_gids: []` deja únicamente
+tareas humanas. No se incorpora automáticamente .Final_Final ni se activan
+Dots, cuentas o memorias de Meli y Val por pertenecer al workspace.
+
 `owner_gid` es el responsable humano de la tarea; no tiene que ser el dueño
 del proyecto. Por defecto, el proyecto debe ser privado y pertenecer al
 workspace fijado.
@@ -104,6 +145,10 @@ la decisión y el revisor. La propuesta no aprueba ni cierra la tarea humana.
 
 Para revertir la entrada, retire la política o desconecte el emisor. Conserve
 los libros SQLite y los GID para no perder deduplicación ni trazabilidad.
+Para retirar un solo proyecto, elimine su entrada. Sus eventos pendientes
+quedarán bloqueados hasta conciliación explícita; no cambie GID ni reutilice
+claves. El inventario de lectura puede seguir disponible sin política de
+escritura.
 Las sesiones MCP autenticadas de Metis (`metis` y `metis-chatgpt`) ofrecen
 `metis_asana_create_task` cuando
 están configuradas la política y la conexión saliente. Esa herramienta usa

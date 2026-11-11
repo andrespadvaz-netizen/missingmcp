@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import httpx
 from .base import LoginError, LoginOk, SessionExpired
 from ..metis.queue import Queue, RequestError, TERMINAL, MAX_REQUEST_BYTES, MAX_ENVELOPE_BYTES, validate
 from ..metis.transport import Bridge, Worker
@@ -12,6 +13,7 @@ from ..metis.direct_audit import DirectAudit
 from ..metis.asana_agents import AsanaAgents, AsanaError
 from ..metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
 from ..metis.asana_dot_events import DotEvents, DotEventError
+from ..metis.asana_dot_policy import load_dot_policy, select_scope
 
 POLL_WAIT_SECONDS = 20
 
@@ -92,7 +94,7 @@ TOOLS = [
 ASANA_CREATE_TOOL = {
     "name": "metis_asana_create_task",
     "description": "Create one human-owned Asana task through the authenticated Metis Gateway path, "
-                   "then evaluate a separate AI handoff. Requires the configured private project, "
+                   "then evaluate a separate AI handoff. Requires an explicitly registered project, "
                    "audience and sources. Agent dispatch stays blocked while the shared quota is unavailable. "
                    "Keep one idempotency_key for retries; an uncertain creation requires reconciliation.",
     "inputSchema": {"type": "object", "additionalProperties": False,
@@ -101,6 +103,16 @@ ASANA_CREATE_TOOL = {
                                    "brief": {"type": "object"}},
                     "required": ["idempotency_key", "name", "brief"]},
     "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                    "idempotentHint": True, "openWorldHint": True},
+}
+
+ASANA_INVENTORY_TOOL = {
+    "name": "metis_asana_workspace_inventory",
+    "description": "Discover workspace-visible Asana projects without granting write access. "
+                   "Private projects are counted only unless individually authorized by server policy. "
+                   "Discovery never authorizes task creation or agent dispatch.",
+    "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False,
                     "idempotentHint": True, "openWorldHint": True},
 }
 
@@ -130,40 +142,96 @@ class MetisAdapter:
                     self.config.asana_dispatch_client_id)
 
     def asana_create_tool(self):
-        policy = json.loads(self.asana_dot_policy_raw)
-        if (not isinstance(policy, dict) or
-                any(not isinstance(policy.get(field), str) or
-                    not policy[field].isdigit()
-                    for field in ("workspace_gid", "project_gid", "owner_gid", "creator_gid")) or
-                not isinstance(policy.get("context"), str) or not policy["context"] or
-                any(not isinstance(policy.get(field), list) or not policy[field] or
-                    any(not isinstance(value, str) or not value
-                        for value in policy[field])
-                    for field in ("audiences", "sources")) or
-                policy.get("privacy_setting", "private") not in
-                    {"private", "public_to_workspace"} or
-                (policy.get("privacy_setting") == "public_to_workspace" and
-                 policy.get("audiences") != ["workspace"]) or
-                not isinstance(policy.get("eligible_task_names"), list) or
-                not isinstance(policy.get("routing"), dict) or
-                not isinstance(policy.get("specialties"), list)):
-            raise ValueError("invalid_asana_dot_policy")
+        _, _, scopes, _ = load_dot_policy(self.asana_dot_policy_raw,
+                                          self.asana_profiles_raw)
         tool = copy.deepcopy(ASANA_CREATE_TOOL)
-        tool["inputSchema"]["properties"]["brief"] = {
-            "type": "object", "additionalProperties": False,
-            "properties": {
-                "context": {"type": "string", "const": policy["context"]},
-                "project_gid": {"type": "string", "const": policy["project_gid"]},
-                "audience": {"type": "string", "enum": policy["audiences"]},
-                "authorized_sources": {"type": "array", "minItems": 1,
-                                       "items": {"type": "string", "enum": policy["sources"]}},
-                "deliverable": {"type": "string", "minLength": 1},
-                "request": {"type": "string", "minLength": 1},
-            },
-            "required": ["context", "project_gid", "audience",
-                         "authorized_sources", "deliverable", "request"],
-        }
+        branches = []
+        for policy in scopes.values():
+            branches.append({
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "context": {"type": "string", "const": policy["context"]},
+                    "project_gid": {"type": "string", "const": policy["project_gid"]},
+                    "audience": {"type": "string", "enum": policy["audiences"]},
+                    "authorized_sources": {"type": "array", "minItems": 1,
+                                           "items": {"type": "string", "enum": policy["sources"]}},
+                    "deliverable": {"type": "string", "minLength": 1},
+                    "request": {"type": "string", "minLength": 1},
+                },
+                "required": ["context", "project_gid", "audience",
+                             "authorized_sources", "deliverable", "request"],
+            })
+        tool["inputSchema"]["properties"]["brief"] = (
+            branches[0] if len(branches) == 1 else {"oneOf": branches})
         return tool
+
+    async def asana_workspace_inventory(self):
+        if not self.config.asana_dispatch_client_id:
+            raise RequestError("asana_discovery_not_configured")
+        workspace = os.environ.get("ASANA_WORKSPACE_GID", "")
+        if not workspace.isdigit():
+            raise RequestError("asana_workspace_not_configured")
+        scopes = {}
+        if self.asana_dot_policy_raw and self.asana_profiles_raw:
+            configured_workspace, _, scopes, _ = load_dot_policy(
+                self.asana_dot_policy_raw, self.asana_profiles_raw)
+            if configured_workspace != workspace:
+                raise RequestError("asana_workspace_policy_mismatch")
+        oauth = AsanaDispatchOAuth(self.config)
+        try:
+            bearer = await oauth.access_token()
+        finally:
+            oauth.db.close()
+        projects = []
+        private_count = 0
+        offset = None
+        seen_offsets = set()
+        async with httpx.AsyncClient(timeout=20) as http:
+            for _ in range(10):
+                params = {"limit": 100, "opt_fields": "gid,name,privacy_setting"}
+                if offset:
+                    params["offset"] = offset
+                response = await http.get(
+                    f"https://app.asana.com/api/1.0/workspaces/{workspace}/projects",
+                    headers={"Authorization": "Bearer " + bearer}, params=params)
+                if response.status_code != 200:
+                    raise RequestError("asana_discovery_unavailable")
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    raise RequestError("asana_discovery_invalid_response") from exc
+                if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                    raise RequestError("asana_discovery_invalid_response")
+                for item in data["data"]:
+                    if not isinstance(item, dict):
+                        continue
+                    gid = str(item.get("gid", ""))
+                    privacy = item.get("privacy_setting")
+                    if not gid.isdigit():
+                        continue
+                    if privacy == "public_to_workspace":
+                        projects.append({"gid": gid, "name": item.get("name", ""),
+                                         "privacy_setting": privacy,
+                                         "authorized": gid in scopes and
+                                         scopes[gid].get("privacy_setting") == privacy})
+                    elif privacy == "private":
+                        if gid in scopes and scopes[gid].get("privacy_setting", "private") == privacy:
+                            projects.append({"gid": gid, "name": item.get("name", ""),
+                                             "privacy_setting": privacy,
+                                             "authorized": True})
+                        else:
+                            private_count += 1
+                next_page = data.get("next_page")
+                offset = next_page.get("offset") if isinstance(next_page, dict) else None
+                if not offset:
+                    return {"workspace_gid": workspace, "projects": projects,
+                            "other_private_project_count": private_count,
+                            "complete": True}
+                if offset in seen_offsets:
+                    raise RequestError("asana_discovery_pagination_loop")
+                seen_offsets.add(offset)
+        return {"workspace_gid": workspace, "projects": projects,
+                "other_private_project_count": private_count, "complete": False}
 
     async def create_asana_dot_task(self, args):
         if not self.asana_dot_enabled:
@@ -171,11 +239,12 @@ class MetisAdapter:
         if not isinstance(args, dict) or set(args) != {"idempotency_key", "name", "brief"}:
             raise RequestError("invalid_asana_dot_arguments")
         try:
-            policy = json.loads(self.asana_dot_policy_raw)
-            profiles = json.loads(self.asana_profiles_raw)
-            if not isinstance(policy, dict) or not isinstance(profiles, dict):
-                raise ValueError("invalid_asana_dot_policy")
-            self.asana_create_tool()  # Validate the server policy before any Asana write.
+            _, _, scopes, profiles = load_dot_policy(self.asana_dot_policy_raw,
+                                                      self.asana_profiles_raw)
+            brief = args.get("brief")
+            if not isinstance(brief, dict):
+                raise ValueError("invalid_asana_dot_brief")
+            policy = select_scope(scopes, brief.get("project_gid"))
             oauth = AsanaDispatchOAuth(self.config)
             try:
                 bearer = await oauth.access_token()
@@ -184,7 +253,8 @@ class MetisAdapter:
             project = policy["project_gid"]
             client = AsanaAgents(
                 bearer, policy["workspace_gid"], {project: policy["context"]},
-                allowed_agent_gids={project: list(profiles)} if profiles else {},
+                allowed_agent_gids={project: policy["agent_gids"]}
+                if policy["agent_gids"] else {},
                 expected_project_owner_gids=({project: policy["project_owner_gid"]}
                                              if policy.get("project_owner_gid") else {}),
                 ledger_path=self.config.db_path, handoff_ledger_path=self.config.db_path)
@@ -255,9 +325,11 @@ class MetisAdapter:
             return result({})
         if method == "tools/list":
             asana_tools = []
+            if self.config.asana_dispatch_client_id and os.environ.get("ASANA_WORKSPACE_GID", "").isdigit():
+                asana_tools.append(ASANA_INVENTORY_TOOL)
             if self.asana_dot_enabled:
                 try:
-                    asana_tools = [self.asana_create_tool()]
+                    asana_tools.append(self.asana_create_tool())
                 except (ValueError, KeyError, TypeError):
                     pass
             return result({"tools": TOOLS + asana_tools})
@@ -281,6 +353,13 @@ class MetisAdapter:
                 value = self.queue.create(account_key, args, self.origin_model)
             elif params.get("name") == "metis_asana_create_task":
                 value = await self.create_asana_dot_task(args)
+            elif params.get("name") == "metis_asana_workspace_inventory":
+                if args not in ({}, None):
+                    raise RequestError("invalid_inventory_arguments")
+                try:
+                    value = await self.asana_workspace_inventory()
+                except (DispatchAuthError, httpx.HTTPError, ValueError) as exc:
+                    raise RequestError("asana_discovery_unavailable") from exc
             elif params.get("name") == "metis_list_direct_audits":
                 if not isinstance(args, dict) or not set(args).issubset({"context", "start_date", "end_date", "limit"}) \
                         or not {"context", "start_date", "end_date"}.issubset(args):

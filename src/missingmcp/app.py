@@ -99,16 +99,29 @@ def build_app(config: Config) -> Starlette:
         try:
             dot_events = DotEvents(config.db_path)
             body = json.loads(raw)
-            policy = json.loads(dot_policy_raw)
-            profiles = json.loads(agent_profiles_raw)
-            if (not isinstance(body, dict) or not isinstance(policy, dict) or
-                    not isinstance(profiles, dict)):
-                raise ValueError("invalid_policy")
+            from .metis.asana_dot_policy import load_dot_policy, select_scope
+            _, _, scopes, profiles = load_dot_policy(dot_policy_raw, agent_profiles_raw)
+            if not isinstance(body, dict):
+                raise ValueError("invalid_event")
+            event_type = body.get("type")
+            if event_type == "task.create":
+                brief = body.get("brief")
+                project_gid = brief.get("project_gid") if isinstance(brief, dict) else None
+            elif event_type == "task.source_reconcile":
+                project_gid = dot_events.source_project(
+                    idempotency_key=body.get("idempotency_key"))
+            else:
+                project_gid = dot_events.source_project(task_gid=body.get("task_gid"))
+            if project_gid is None and len(scopes) == 1:
+                # Legacy ledger entries predate the project_gid column.
+                project_gid = next(iter(scopes))
+            policy = select_scope(scopes, project_gid)
             project = policy["project_gid"]
             client = AsanaAgents(
                 await asana_dispatch.access_token(), policy["workspace_gid"],
                 {project: policy["context"]},
-                allowed_agent_gids={project: list(profiles)} if profiles else {},
+                allowed_agent_gids={project: policy["agent_gids"]}
+                if policy["agent_gids"] else {},
                 expected_project_owner_gids=({project: policy["project_owner_gid"]}
                                              if policy.get("project_owner_gid") else {}),
                 ledger_path=config.db_path, handoff_ledger_path=config.db_path)

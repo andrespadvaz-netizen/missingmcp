@@ -424,3 +424,66 @@ def test_http_create_is_authenticated_durable_and_quota_blocked(tmp_path, monkey
     assert second.status_code == 200 and second.json()["source_task_gid"] == "300"
     assert len(posts) == 1 and posts[0]["assignee"] == "44"
     assert "Solicitud: Summarize the permitted evidence" in posts[0]["notes"]
+
+
+def test_http_multiscope_requires_registered_project_and_preserves_owner(tmp_path, monkeypatch):
+    import json
+    import missingmcp.app as app_module
+    from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth
+
+    policy = {"workspace_gid": "100", "creator_gid": "55", "projects": {
+        "200": {"context": "SHOKKO", "owner_gid": "44", "privacy_setting": "private",
+                "audiences": ["project_members"], "sources": ["current_request"],
+                "eligible_task_names": [], "routing": {}, "specialties": [], "agent_gids": []},
+        "201": {"context": "ANDREA", "owner_gid": "46",
+                "privacy_setting": "public_to_workspace", "audiences": ["workspace"],
+                "sources": ["current_request"], "eligible_task_names": [],
+                "routing": {}, "specialties": [], "agent_gids": []}}}
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps(policy))
+    monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", "{}")
+    cfg = load_config({"GATEWAY_SECRET": "g" * 40, "DATA_DIR": str(tmp_path),
+                       "DB_PATH": str(tmp_path / "gateway.db"),
+                       "PUBLIC_URL": "https://gateway.example.com",
+                       "METIS_BRIDGE_URL": "https://script.google.com/macros/s/synthetic/exec",
+                       "METIS_BRIDGE_SECRET": "b" * 40, "METIS_OPERATOR_KEY": "m" * 40,
+                       "ASANA_DISPATCH_CLIENT_ID": "1220338382227997",
+                       "ASANA_DISPATCH_CLIENT_SECRET": "c" * 40,
+                       "ASANA_DISPATCH_SETUP_KEY": "s" * 40})
+    posts = []
+    def upstream(request):
+        if request.url.path.endswith("/projects/201"):
+            return httpx.Response(200, json={"data": {"gid": "201",
+                "workspace": {"gid": "100"}, "privacy_setting": "public_to_workspace"}})
+        if request.method == "POST":
+            posts.append(json.loads(request.content)["data"])
+            return httpx.Response(201, json={"data": {"gid": "301"}})
+        return httpx.Response(200, json={"data": {
+            "gid": "301", "name": "Synthetic work", "workspace": {"gid": "100"},
+            "created_by": {"gid": "55"}, "projects": [{"gid": "201"}],
+            "assignee": {"gid": "46"}, "completed": False}})
+    original = AsanaAgents
+    monkeypatch.setattr(app_module, "AsanaAgents", lambda *args, **kwargs:
+                        original(*args, **kwargs, transport=httpx.MockTransport(upstream)))
+    async def token(_self):
+        return "synthetic-token"
+    monkeypatch.setattr(AsanaDispatchOAuth, "access_token", token)
+    app = TestClient(build_app(cfg))
+    headers = {"Authorization": "Bearer " + "m" * 40}
+    brief = {"context": "ANDREA", "project_gid": "201", "audience": "workspace",
+             "authorized_sources": ["current_request"], "deliverable": "Draft",
+             "request": "Synthetic task"}
+    event = {"type": "task.create", "idempotency_key": "multiscope-create-0001",
+             "name": "Synthetic work", "brief": brief}
+    assert app.post("/asana-dot/event", json=event).status_code == 401
+    malformed = app.post("/asana-dot/event", json={"type": "task.review",
+                         "task_gid": ["301"], "story_gid": "400"}, headers=headers)
+    assert malformed.status_code == 409 and malformed.json()["reason"] == "invalid_task_gid"
+    forbidden = app.post("/asana-dot/event", json=event | {"brief": brief | {"project_gid": "202"}},
+                         headers=headers)
+    assert forbidden.status_code == 409 and forbidden.json()["reason"] == "project_not_authorized"
+    created = app.post("/asana-dot/event", json=event, headers=headers)
+    assert created.status_code == 200, created.text
+    assert created.json()["evaluation"] == {"action": "skip", "reason": "task_not_eligible"}
+    assert app.post("/asana-dot/event", json=event, headers=headers).status_code == 200
+    assert len(posts) == 1 and posts[0]["projects"] == ["201"]
+    assert posts[0]["assignee"] == "46"

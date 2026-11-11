@@ -34,9 +34,9 @@ class DotEvents:
         self.db.execute("""CREATE TABLE IF NOT EXISTS asana_dot_sources (
             idem TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
             brief_fingerprint TEXT, source_name TEXT,
-            state TEXT NOT NULL, task_gid TEXT,
+            state TEXT NOT NULL, task_gid TEXT, project_gid TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
-        for column in ("brief_fingerprint", "source_name"):
+        for column in ("brief_fingerprint", "source_name", "project_gid"):
             if column not in {r[1] for r in self.db.execute("PRAGMA table_info(asana_dot_sources)")}:
                 self.db.execute(f"ALTER TABLE asana_dot_sources ADD COLUMN {column} TEXT")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS asana_dot_source_task "
@@ -46,6 +46,26 @@ class DotEvents:
         return self.db.execute(
             "SELECT 1 FROM asana_dot_sources WHERE task_gid=? AND state='CREATED'",
             (task_gid,)).fetchone() is not None
+
+    def source_project(self, *, task_gid: str | None = None,
+                       idempotency_key: str | None = None) -> str | None:
+        if task_gid is not None:
+            if not isinstance(task_gid, str) or not re.fullmatch(r"[0-9]+", task_gid):
+                raise DotEventError("invalid_task_gid")
+            row = self.db.execute("SELECT project_gid FROM asana_dot_sources "
+                                  "WHERE task_gid=? AND state='CREATED'",
+                                  (task_gid,)).fetchone()
+        elif idempotency_key is not None:
+            if (not isinstance(idempotency_key, str) or
+                    not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", idempotency_key)):
+                raise DotEventError("invalid_create_key")
+            row = self.db.execute("SELECT project_gid FROM asana_dot_sources "
+                                  "WHERE idem=?", (idempotency_key,)).fetchone()
+        else:
+            raise ValueError("source_lookup_required")
+        if row is None:
+            raise DotEventError("source_not_created_by_integration")
+        return row["project_gid"]
 
     async def create_source(self, client, event: Mapping, policy: Mapping):
         """Reserve before Asana POST; duplicate or uncertain calls never repost."""
@@ -97,9 +117,10 @@ class DotEvents:
             row = self.db.execute("SELECT * FROM asana_dot_sources WHERE idem=?", (key,)).fetchone()
             if row is None:
                 self.db.execute("INSERT INTO asana_dot_sources"
-                                "(idem,fingerprint,brief_fingerprint,source_name,state) "
-                                "VALUES (?,?,?,?,'POST_SENT')", (key, fingerprint,
-                                                                 brief_fingerprint, name))
+                                "(idem,fingerprint,brief_fingerprint,source_name,state,project_gid) "
+                                "VALUES (?,?,?,?,'POST_SENT',?)", (key, fingerprint,
+                                                                    brief_fingerprint, name,
+                                                                    project))
             elif row["fingerprint"] != fingerprint:
                 raise DotEventError("source_idempotency_conflict")
             self.db.execute("COMMIT")
@@ -155,6 +176,8 @@ class DotEvents:
         if row is None or row["state"] != "POST_SENT":
             raise DotEventError("source_reconciliation_not_pending")
         project, owner = policy["project_gid"], policy["owner_gid"]
+        if row["project_gid"] not in (None, project):
+            raise DotEventError("source_project_policy_changed")
         await self._verify_project(client, project, policy)
         matches = [t async for t in client._pages(
             f"/projects/{project}/tasks",
@@ -207,10 +230,12 @@ class DotEvents:
         if not isinstance(source_gid, str) or not source_gid.isdigit():
             raise DotEventError("invalid_task_gid")
         source_row = self.db.execute(
-            "SELECT brief_fingerprint FROM asana_dot_sources "
+            "SELECT brief_fingerprint,project_gid FROM asana_dot_sources "
             "WHERE task_gid=? AND state='CREATED'", (source_gid,)).fetchone()
         if source_row is None:
             raise DotEventError("source_not_created_by_integration")
+        if source_row["project_gid"] not in (None, policy.get("project_gid")):
+            raise DotEventError("source_project_policy_changed")
         brief_hash = hashlib.sha256(json.dumps(
             event.get("brief"), sort_keys=True).encode()).hexdigest()
         if source_row["brief_fingerprint"] != brief_hash:
@@ -235,7 +260,7 @@ class DotEvents:
             return {"action": "skip", "reason": "creator_not_authorized"}
         project_gid = policy.get("project_gid")
         if (not isinstance(project_gid, str) or
-                project_gid not in {str(p.get("gid")) for p in source.get("projects", [])}):
+                {str(p.get("gid")) for p in source.get("projects", [])} != {project_gid}):
             self.record(source_gid, fingerprint, "skip", "project_scope_mismatch")
             return {"action": "skip", "reason": "project_scope_mismatch"}
         if str((source.get("assignee") or {}).get("gid", "")) != str(policy.get("owner_gid", "")):

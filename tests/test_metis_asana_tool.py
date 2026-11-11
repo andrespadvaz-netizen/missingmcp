@@ -109,7 +109,7 @@ async def test_metis_tool_uses_server_identity_and_durable_creation(tmp_path, mo
     monkeypatch.setattr("missingmcp.adapters.metis.DotEvents", Events)
     adapter = adapter_type(config(tmp_path))
     args = {"idempotency_key": "source-event-000001", "name": "Research task",
-            "brief": {"context": "SHOKKO"}}
+            "brief": {"context": "SHOKKO", "project_gid": "200"}}
     _, _, raw = await adapter.handle(None, "metis-operator",
                                      adapter.credential_version,
                                      request("tools/call", "metis_asana_create_task", args))
