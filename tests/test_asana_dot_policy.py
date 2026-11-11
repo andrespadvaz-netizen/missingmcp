@@ -78,6 +78,7 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
     assert calls == ["GET"]
     assert result["complete"] is True
     assert result["other_private_project_count"] == 1
+    assert result["other_restricted_project_count"] == 0
     assert {p["gid"] for p in result["projects"]} == {"200", "201", "203"}
     assert next(p for p in result["projects"] if p["gid"] == "203")["authorized"] is False
     _, _, listed = await adapter.handle(None, "metis-operator",

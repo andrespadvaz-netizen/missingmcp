@@ -17,7 +17,9 @@ La sesión MCP autenticada de Metis expone `metis_asana_workspace_inventory`
 cuando hay OAuth saliente y `ASANA_WORKSPACE_GID`. Recorre proyectos visibles
 mediante la API de Asana, sin escribir ni leer tareas. Devuelve nombre, GID y
 privacidad de proyectos `public_to_workspace`; de privados no registrados
-devuelve solo un conteo. Un privado registrado puede mostrar sus metadatos.
+devuelve solo un conteo. Otras clases de privacidad restringida también se
+cuentan sin exponer sus metadatos. Si Asana no informa la privacidad, la
+consulta falla cerrada. Un privado registrado puede mostrar sus metadatos.
 `authorized` indica una autorización de servidor: descubrir un proyecto jamás
 lo agrega a la política. Más de diez páginas dan `complete: false`. El OAuth
 solo descubre lo accesible a la cuenta conectada, no cuentas ni memorias

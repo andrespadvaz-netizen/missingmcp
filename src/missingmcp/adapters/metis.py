@@ -184,6 +184,7 @@ class MetisAdapter:
             oauth.db.close()
         projects = []
         private_count = 0
+        restricted_count = 0
         offset = None
         seen_offsets = set()
         async with httpx.AsyncClient(timeout=20) as http:
@@ -209,6 +210,8 @@ class MetisAdapter:
                     privacy = item.get("privacy_setting")
                     if not gid.isdigit():
                         continue
+                    if not isinstance(privacy, str):
+                        raise RequestError("asana_discovery_privacy_unverified")
                     if privacy == "public_to_workspace":
                         projects.append({"gid": gid, "name": item.get("name", ""),
                                          "privacy_setting": privacy,
@@ -221,17 +224,21 @@ class MetisAdapter:
                                              "authorized": True})
                         else:
                             private_count += 1
+                    else:
+                        restricted_count += 1
                 next_page = data.get("next_page")
                 offset = next_page.get("offset") if isinstance(next_page, dict) else None
                 if not offset:
                     return {"workspace_gid": workspace, "projects": projects,
                             "other_private_project_count": private_count,
+                            "other_restricted_project_count": restricted_count,
                             "complete": True}
                 if offset in seen_offsets:
                     raise RequestError("asana_discovery_pagination_loop")
                 seen_offsets.add(offset)
         return {"workspace_gid": workspace, "projects": projects,
-                "other_private_project_count": private_count, "complete": False}
+                "other_private_project_count": private_count,
+                "other_restricted_project_count": restricted_count, "complete": False}
 
     async def create_asana_dot_task(self, args):
         if not self.asana_dot_enabled:
