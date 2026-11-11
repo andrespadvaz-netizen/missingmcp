@@ -3,6 +3,7 @@ import asyncio
 import copy
 import hashlib
 import hmac
+import html
 import json
 import os
 import httpx
@@ -216,8 +217,10 @@ class MetisAdapter:
                     owner = item.get("owner")
                     project_owner = str(owner.get("gid", "")) if isinstance(owner, dict) else ""
                     owner_candidate = project_owner if project_owner.isdigit() else None
+                    display_name = html.unescape(item.get("name", "")) if isinstance(
+                        item.get("name"), str) else ""
                     if privacy == "public_to_workspace":
-                        projects.append({"gid": gid, "name": item.get("name", ""),
+                        projects.append({"gid": gid, "name": display_name,
                                          "privacy_setting": privacy,
                                          "project_owner_candidate_gid": owner_candidate,
                                          "authorized": gid in scopes and
@@ -226,7 +229,7 @@ class MetisAdapter:
                         if ((gid in scopes and
                              scopes[gid].get("privacy_setting", "private") == privacy) or
                                 os.environ.get("ASANA_WORKSPACE_ADMIN_DISCOVERY") == "true"):
-                            projects.append({"gid": gid, "name": item.get("name", ""),
+                            projects.append({"gid": gid, "name": display_name,
                                              "privacy_setting": privacy,
                                              "project_owner_candidate_gid": owner_candidate,
                                              "authorized": gid in scopes and

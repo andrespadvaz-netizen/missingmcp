@@ -67,7 +67,7 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
             {"gid": "200", "name": "Approved private", "privacy_setting": "private"},
             {"gid": "202", "name": "Other private", "privacy_setting": "private"},
             {"gid": "201", "name": "Workspace project", "privacy_setting": "public_to_workspace"},
-            {"gid": "203", "name": "Unapproved workspace", "privacy_setting": "public_to_workspace",
+            {"gid": "203", "name": "Sales &amp; Channels", "privacy_setting": "public_to_workspace",
              "owner": {"gid": "66"}},
         ], "next_page": None})
 
@@ -84,6 +84,8 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
     assert next(p for p in result["projects"] if p["gid"] == "203")["authorized"] is False
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "project_owner_candidate_gid"] == "66"
+    assert next(p for p in result["projects"] if p["gid"] == "203")[
+        "name"] == "Sales & Channels"
     monkeypatch.setenv("ASANA_WORKSPACE_ADMIN_DISCOVERY", "true")
     full_result = await adapter.asana_workspace_inventory()
     assert full_result["other_private_project_count"] == 0

@@ -27,6 +27,9 @@ ajenas.
 `project_owner_candidate_gid` es solo un dato de Asana para preparar la
 revisión del responsable humano; nunca asigna tareas ni autoriza acciones por
 sí mismo. El `owner_gid` aprobado en la política sigue mandando.
+Los nombres del inventario se decodifican para mostrarlos; toda decisión de
+autorización y correlación usa el GID, incluso cuando dos proyectos comparten
+nombre.
 El administrador puede fijar `ASANA_WORKSPACE_ADMIN_DISCOVERY=true` en el
 servicio para incluir también metadatos de proyectos privados accesibles a su
 OAuth. Esta opción **solo amplía el inventario de lectura**: `authorized`
