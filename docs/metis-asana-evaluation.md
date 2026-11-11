@@ -24,6 +24,9 @@ consulta falla cerrada. Un privado registrado puede mostrar sus metadatos.
 lo agrega a la política. Más de diez páginas dan `complete: false`. El OAuth
 solo descubre lo accesible a la cuenta conectada, no cuentas ni memorias
 ajenas.
+`project_owner_candidate_gid` es solo un dato de Asana para preparar la
+revisión del responsable humano; nunca asigna tareas ni autoriza acciones por
+sí mismo. El `owner_gid` aprobado en la política sigue mandando.
 
 Para operar varios proyectos, `ASANA_METIS_DOT_POLICY_JSON` acepta un registro
 con `workspace_gid`, `creator_gid` y `projects`. Cada clave de `projects` es un
@@ -101,7 +104,7 @@ y la especialidad salen de `routing` y del nombre comprobado en Asana, no
 de afirmaciones del evento. El servidor se abstiene ante datos insuficientes,
 una ruta ausente o una elección ambigua de agente.
 
-## Costo compartido: despacho bloqueado
+## Costo compartido y admisión de encargos
 
 La consola real de Venture Quest informa **50 solicitudes adicionales por
 ciclo, MXN 11 cada una, máximo MXN 550**, compartidas entre Dash y los
@@ -113,12 +116,36 @@ tope aplicado por Asana a la cuenta, no una lectura automática disponible
 para el Gateway; puede cambiarse en la consola. Las solicitudes bajo demanda
 empiezan después de agotar las incluidas y prepagadas.
 
-Por ello el flujo automático registra `shared_quota_unavailable` y **no
-despacha agentes pagados**. Un importe, un saldo declarado en el evento o
-una bandera de política no elimina este bloqueo. `scripts/asana_agents.py
-evaluate` permite una evaluación local sin escritura; `--dispatch` está
-bloqueado. La creación de la tarea humana en Asana sigue siendo una operación
-distinta del despacho pagado del agente.
+El administrador aprobó conservar el límite global de Asana de 50 solicitudes
+y MXN 550 por ciclo, compartido con Dash, y aceptar que Asana rechace
+encargos cuando se agote. El Gateway **no conoce el saldo restante** ni puede
+contar las solicitudes internas que un solo encargo de agente consumirá. Por
+ello no traduce encargos a pesos ni presenta un contador local como saldo
+global. Asana aplica el límite monetario; el Gateway solo admite un número
+acotado de intentos de encargo durante el ciclo.
+
+Para habilitar esa admisión, el administrador debe comprobar que el límite
+en Asana sigue activo y configurar `ASANA_AI_SHARED_LIMIT_JSON` fuera del
+repositorio. La declaración incluye workspace, GID del administrador,
+fechas del ciclo, 50 solicitudes, MXN 11 por solicitud, MXN 550, confirmación
+de aplicación por Asana y un `gateway_handoff_limit` de 1 a 50 para **todos**
+los agentes del Gateway, no un presupuesto individual. Ejemplo sintético:
+
+```json
+{"workspace_gid":"100","operator_gid":"55","cycle_start":"2026-11-05","cycle_end":"2026-12-05","provider_cap_requests":50,"provider_cap_mxn":550,"price_per_request_mxn":11,"provider_cap_enforced":true,"gateway_handoff_limit":10}
+```
+
+Si falta la declaración, no corresponde al workspace o administrador, el
+ciclo terminó o los importes exceden los aprobados, el despacho queda
+bloqueado. La reserva SQLite de cada encargo ocurre antes del POST y es
+atómica ante concurrencia; una respuesta incierta conserva el cupo y exige
+conciliación sin repetir el POST. Los cupos no se reembolsan automáticamente.
+La declaración del administrador no sustituye una API de saldo: si Dash gasta
+entre la comprobación y el despacho, Asana puede rechazarlo. Ante cambios del
+límite en la consola, retire o actualice la declaración antes de continuar.
+La creación de la tarea humana es independiente del despacho pagado. La
+evaluación local sin escritura sigue disponible; el comando aislado
+`scripts/asana_agents.py --dispatch` continúa bloqueado.
 
 La [especificación pública de Asana](https://github.com/Asana/openapi/blob/e5c7dec74dcea63207156a7cc96d06f82075a1d3/defs/asana_sdk_oas.yaml)
 documenta `GET /workspaces/{workspace_gid}/ai_studio/runs`, restringido a
@@ -127,14 +154,10 @@ ejecuciones de reglas de AI Studio. No demuestra el saldo de solicitudes
 adicionales de AI Teammates compartido con Dash; no se usa para levantar el
 bloqueo.
 
-Para levantar el bloqueo se necesita una lectura autorizada y vigente del
-saldo global **y** una reserva atómica compartida con Dash y los agentes,
-incluida conciliación de solicitudes inciertas. Una opción es un servicio
-único que contabilice todas las solicitudes de Dash y agentes y consulte la
-consola oficial al iniciar cada ciclo; otra es una API oficial de cuota si
-Venture Quest la ofrece. Una captura o un contador solo del Gateway no basta.
-El cambio de código que use ese control requiere pruebas de concurrencia y
-no está activado aquí.
+Una API oficial de saldo o un contador compartido con Dash permitirían decidir
+antes de cada encargo si queda cuota. El mecanismo actual acepta explícitamente
+la posibilidad de rechazo por Asana y depende de que su límite global permanezca
+activo. No se ha realizado ningún despacho pagado de prueba.
 
 ## Propuesta y revisión
 

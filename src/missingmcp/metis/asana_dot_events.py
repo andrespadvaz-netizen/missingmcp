@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import re
 from datetime import datetime
 from collections.abc import Mapping
 
 from .asana_evaluation import evaluate_and_dispatch
+from .asana_spend_gate import SpendGateError, load_attestation, reserve_handoff
 
 
 class DotEventError(RuntimeError):
@@ -298,12 +300,43 @@ class DotEvents:
             return {"action": "skip", "reason": decision.reason}
         if not dispatch:
             return {"action": "eligible", "reason": decision.reason}
-        # Venture Quest's 50 additional requests (MXN 11 each, MXN 550 max)
-        # are shared with Dash. This connector cannot read or reserve that
-        # global balance. No event field or operator assertion can substitute
-        # for an atomic, authoritative shared-quota check.
-        self.record(source_gid, fingerprint, "blocked", "shared_quota_unavailable")
-        return {"action": "blocked", "reason": "shared_quota_unavailable"}
+        # An administrator attests Asana's provider-enforced shared cap for
+        # this billing cycle. The Gateway separately bounds its handoffs;
+        # it does not pretend to know Dash's remaining balance. Asana may
+        # reject an agent task after the shared cap is reached.
+        try:
+            attestation = load_attestation(
+                os.environ.get("ASANA_AI_SHARED_LIMIT_JSON", ""),
+                workspace_gid=policy["workspace_gid"],
+                operator_gid=policy["creator_gid"])
+            fresh = reserve_handoff(
+                self.db, key=decision.idempotency_key,
+                attestation=attestation)
+        except SpendGateError as exc:
+            self.record(source_gid, fingerprint, "blocked", str(exc))
+            return {"action": "blocked", "reason": str(exc)}
+        if not fresh:
+            self.record(source_gid, fingerprint, "UNCERTAIN",
+                        "dispatch_uncertain_check_required")
+            return {"action": "blocked", "reason": "dispatch_uncertain_check_required"}
+        try:
+            dispatched, target = await evaluate_and_dispatch(
+                client, source_task_gid=source_gid, project_gid=project_gid,
+                brief=brief, agents=profiles, dispatch=True)
+        except Exception:
+            # A lost response may conceal a successful task or paid use.
+            # Keep the admission and require read-only reconciliation.
+            self.record(source_gid, fingerprint, "UNCERTAIN",
+                        "dispatch_uncertain_check_required")
+            return {"action": "blocked", "reason": "dispatch_uncertain_check_required"}
+        if dispatched.action != "handoff" or target is None:
+            self.record(source_gid, fingerprint, "UNCERTAIN",
+                        "dispatch_uncertain_check_required")
+            return {"action": "blocked", "reason": "dispatch_uncertain_check_required"}
+        self.record(source_gid, fingerprint, "created", "review_pending",
+                    str(target["gid"]), dispatched.agent_gid)
+        return {"action": "created", "reason": "review_pending",
+                "target_gid": str(target["gid"])}
 
     async def propose(self, client, source_gid: str, story_gid: str):
         row = self.db.execute("SELECT * FROM asana_dot_decisions WHERE source_gid=?",

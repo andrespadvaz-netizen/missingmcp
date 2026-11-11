@@ -95,7 +95,8 @@ ASANA_CREATE_TOOL = {
     "name": "metis_asana_create_task",
     "description": "Create one human-owned Asana task through the authenticated Metis Gateway path, "
                    "then evaluate a separate AI handoff. Requires an explicitly registered project, "
-                   "audience and sources. Agent dispatch stays blocked while the shared quota is unavailable. "
+                   "audience and sources. Agent dispatch needs a current administrator attestation "
+                   "of Asana's shared provider cap and a durable Gateway admission. "
                    "Keep one idempotency_key for retries; an uncertain creation requires reconciliation.",
     "inputSchema": {"type": "object", "additionalProperties": False,
                     "properties": {"idempotency_key": {"type": "string", "minLength": 16, "maxLength": 128},
@@ -189,7 +190,7 @@ class MetisAdapter:
         seen_offsets = set()
         async with httpx.AsyncClient(timeout=20) as http:
             for _ in range(10):
-                params = {"limit": 100, "opt_fields": "gid,name,privacy_setting"}
+                params = {"limit": 100, "opt_fields": "gid,name,privacy_setting,owner.gid"}
                 if offset:
                     params["offset"] = offset
                 response = await http.get(
@@ -212,15 +213,20 @@ class MetisAdapter:
                         continue
                     if not isinstance(privacy, str):
                         raise RequestError("asana_discovery_privacy_unverified")
+                    owner = item.get("owner")
+                    project_owner = str(owner.get("gid", "")) if isinstance(owner, dict) else ""
+                    owner_candidate = project_owner if project_owner.isdigit() else None
                     if privacy == "public_to_workspace":
                         projects.append({"gid": gid, "name": item.get("name", ""),
                                          "privacy_setting": privacy,
+                                         "project_owner_candidate_gid": owner_candidate,
                                          "authorized": gid in scopes and
                                          scopes[gid].get("privacy_setting") == privacy})
                     elif privacy == "private":
                         if gid in scopes and scopes[gid].get("privacy_setting", "private") == privacy:
                             projects.append({"gid": gid, "name": item.get("name", ""),
                                              "privacy_setting": privacy,
+                                             "project_owner_candidate_gid": owner_candidate,
                                              "authorized": True})
                         else:
                             private_count += 1
