@@ -191,7 +191,8 @@ class MetisAdapter:
         seen_offsets = set()
         async with httpx.AsyncClient(timeout=20) as http:
             for _ in range(10):
-                params = {"limit": 100, "opt_fields": "gid,name,privacy_setting,owner.gid"}
+                params = {"limit": 100, "opt_fields":
+                          "gid,name,privacy_setting,owner.gid,team.gid,team.name"}
                 if offset:
                     params["offset"] = offset
                 response = await http.get(
@@ -217,12 +218,20 @@ class MetisAdapter:
                     owner = item.get("owner")
                     project_owner = str(owner.get("gid", "")) if isinstance(owner, dict) else ""
                     owner_candidate = project_owner if project_owner.isdigit() else None
+                    team = item.get("team")
+                    team_gid = str(team.get("gid", "")) if isinstance(team, dict) else ""
+                    team_candidate = team_gid if team_gid.isdigit() else None
+                    team_name = (html.unescape(team.get("name", ""))
+                                 if isinstance(team, dict) and
+                                 isinstance(team.get("name"), str) else "")
                     display_name = html.unescape(item.get("name", "")) if isinstance(
                         item.get("name"), str) else ""
                     if privacy == "public_to_workspace":
                         projects.append({"gid": gid, "name": display_name,
                                          "privacy_setting": privacy,
                                          "project_owner_candidate_gid": owner_candidate,
+                                         "team_candidate_gid": team_candidate,
+                                         "team_candidate_name": team_name,
                                          "authorized": gid in scopes and
                                          scopes[gid].get("privacy_setting") == privacy})
                     elif privacy == "private":
@@ -232,6 +241,8 @@ class MetisAdapter:
                             projects.append({"gid": gid, "name": display_name,
                                              "privacy_setting": privacy,
                                              "project_owner_candidate_gid": owner_candidate,
+                                             "team_candidate_gid": team_candidate,
+                                             "team_candidate_name": team_name,
                                              "authorized": gid in scopes and
                                              scopes[gid].get("privacy_setting", "private") == privacy})
                         else:

@@ -27,6 +27,9 @@ ajenas.
 `project_owner_candidate_gid` es solo un dato de Asana para preparar la
 revisión del responsable humano; nunca asigna tareas ni autoriza acciones por
 sí mismo. El `owner_gid` aprobado en la política sigue mandando.
+`team_candidate_gid` y `team_candidate_name` ayudan a proponer el contexto
+en lote; tampoco lo fijan automáticamente. Si falta equipo o la relación
+equipo-contexto no está aprobada, el proyecto permanece sin acciones.
 Los nombres del inventario se decodifican para mostrarlos; toda decisión de
 autorización y correlación usa el GID, incluso cuando dos proyectos comparten
 nombre.

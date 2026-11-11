@@ -68,7 +68,7 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
             {"gid": "202", "name": "Other private", "privacy_setting": "private"},
             {"gid": "201", "name": "Workspace project", "privacy_setting": "public_to_workspace"},
             {"gid": "203", "name": "Sales &amp; Channels", "privacy_setting": "public_to_workspace",
-             "owner": {"gid": "66"}},
+             "owner": {"gid": "66"}, "team": {"gid": "77", "name": "Growth &amp; Marketing"}},
         ], "next_page": None})
 
     real_client = httpx.AsyncClient
@@ -86,6 +86,10 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
         "project_owner_candidate_gid"] == "66"
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "name"] == "Sales & Channels"
+    assert next(p for p in result["projects"] if p["gid"] == "203")[
+        "team_candidate_gid"] == "77"
+    assert next(p for p in result["projects"] if p["gid"] == "203")[
+        "team_candidate_name"] == "Growth & Marketing"
     monkeypatch.setenv("ASANA_WORKSPACE_ADMIN_DISCOVERY", "true")
     full_result = await adapter.asana_workspace_inventory()
     assert full_result["other_private_project_count"] == 0
