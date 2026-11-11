@@ -223,11 +223,14 @@ class MetisAdapter:
                                          "authorized": gid in scopes and
                                          scopes[gid].get("privacy_setting") == privacy})
                     elif privacy == "private":
-                        if gid in scopes and scopes[gid].get("privacy_setting", "private") == privacy:
+                        if ((gid in scopes and
+                             scopes[gid].get("privacy_setting", "private") == privacy) or
+                                os.environ.get("ASANA_WORKSPACE_ADMIN_DISCOVERY") == "true"):
                             projects.append({"gid": gid, "name": item.get("name", ""),
                                              "privacy_setting": privacy,
                                              "project_owner_candidate_gid": owner_candidate,
-                                             "authorized": True})
+                                             "authorized": gid in scopes and
+                                             scopes[gid].get("privacy_setting", "private") == privacy})
                         else:
                             private_count += 1
                     else:

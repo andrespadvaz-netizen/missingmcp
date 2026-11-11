@@ -27,6 +27,12 @@ ajenas.
 `project_owner_candidate_gid` es solo un dato de Asana para preparar la
 revisión del responsable humano; nunca asigna tareas ni autoriza acciones por
 sí mismo. El `owner_gid` aprobado en la política sigue mandando.
+El administrador puede fijar `ASANA_WORKSPACE_ADMIN_DISCOVERY=true` en el
+servicio para incluir también metadatos de proyectos privados accesibles a su
+OAuth. Esta opción **solo amplía el inventario de lectura**: `authorized`
+permanece falso hasta que una entrada de proyecto fije contexto, audiencia,
+fuentes y responsable humano. No lee tareas, cuentas ni memorias privadas de
+Meli o Val ni habilita sus Dots.
 
 Para operar varios proyectos, `ASANA_METIS_DOT_POLICY_JSON` acepta un registro
 con `workspace_gid`, `creator_gid` y `projects`. Cada clave de `projects` es un

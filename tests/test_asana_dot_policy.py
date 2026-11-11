@@ -84,6 +84,12 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
     assert next(p for p in result["projects"] if p["gid"] == "203")["authorized"] is False
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "project_owner_candidate_gid"] == "66"
+    monkeypatch.setenv("ASANA_WORKSPACE_ADMIN_DISCOVERY", "true")
+    full_result = await adapter.asana_workspace_inventory()
+    assert full_result["other_private_project_count"] == 0
+    assert next(p for p in full_result["projects"] if p["gid"] == "202")[
+        "authorized"] is False
+    monkeypatch.delenv("ASANA_WORKSPACE_ADMIN_DISCOVERY")
     _, _, listed = await adapter.handle(None, "metis-operator",
                                          adapter.credential_version, request("tools/list"))
     assert "metis_asana_workspace_inventory" in [
