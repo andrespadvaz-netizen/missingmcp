@@ -18,7 +18,8 @@ def _gid(value):
     return value
 
 
-def load_dot_policy(raw: str, profiles_raw: str):
+def load_dot_policy(raw: str, profiles_raw: str,
+                    legacy_projects_raw: str = ""):
     """Return exact project scopes and profiles from trusted server variables.
 
     The old single-project shape remains supported. A workspace-wide discovery
@@ -30,6 +31,12 @@ def load_dot_policy(raw: str, profiles_raw: str):
         raise DotPolicyError("invalid_dot_policy_json") from exc
     if not isinstance(config, Mapping) or not isinstance(profiles, Mapping):
         raise DotPolicyError("invalid_dot_policy_shape")
+    try:
+        legacy_projects = json.loads(legacy_projects_raw) if legacy_projects_raw else {}
+    except (TypeError, ValueError) as exc:
+        raise DotPolicyError("invalid_legacy_project_contexts") from exc
+    if not isinstance(legacy_projects, Mapping):
+        raise DotPolicyError("invalid_legacy_project_contexts")
     workspace_gid = _gid(config.get("workspace_gid"))
     creator_gid = _gid(config.get("creator_gid"))
     projects = config.get("projects")
@@ -89,6 +96,9 @@ def load_dot_policy(raw: str, profiles_raw: str):
                 any(_gid(gid) not in profiles for gid in agent_gids)):
             raise DotPolicyError("invalid_agent_allowlist")
         scope["agent_gids"] = agent_gids
+        if (project_gid in legacy_projects and
+                legacy_projects[project_gid] != context):
+            scope["action_blocked_reason"] = "project_context_conflict"
         scopes[project_gid] = scope
     return workspace_gid, creator_gid, scopes, dict(profiles)
 
@@ -97,4 +107,6 @@ def select_scope(scopes: Mapping, project_gid: str):
     scope = scopes.get(project_gid)
     if scope is None:
         raise DotPolicyError("project_not_authorized")
+    if scope.get("action_blocked_reason"):
+        raise DotPolicyError(scope["action_blocked_reason"])
     return scope

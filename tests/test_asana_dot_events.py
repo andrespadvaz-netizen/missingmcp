@@ -487,3 +487,9 @@ def test_http_multiscope_requires_registered_project_and_preserves_owner(tmp_pat
     assert app.post("/asana-dot/event", json=event, headers=headers).status_code == 200
     assert len(posts) == 1 and posts[0]["projects"] == ["201"]
     assert posts[0]["assignee"] == "46"
+    monkeypatch.setenv("ASANA_AGENT_PROJECTS_JSON", json.dumps({"201": "SHOKKO"}))
+    blocked = app.post("/asana-dot/event", json=event | {
+        "idempotency_key": "multiscope-create-0002"}, headers=headers)
+    assert blocked.status_code == 409
+    assert blocked.json()["reason"] == "project_context_conflict"
+    assert len(posts) == 1

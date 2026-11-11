@@ -100,7 +100,9 @@ def build_app(config: Config) -> Starlette:
             dot_events = DotEvents(config.db_path)
             body = json.loads(raw)
             from .metis.asana_dot_policy import load_dot_policy, select_scope
-            _, _, scopes, profiles = load_dot_policy(dot_policy_raw, agent_profiles_raw)
+            _, _, scopes, profiles = load_dot_policy(
+                dot_policy_raw, agent_profiles_raw,
+                os.environ.get("ASANA_AGENT_PROJECTS_JSON", ""))
             if not isinstance(body, dict):
                 raise ValueError("invalid_event")
             event_type = body.get("type")

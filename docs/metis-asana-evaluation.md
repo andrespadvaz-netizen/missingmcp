@@ -75,6 +75,9 @@ Gateway compara la privacidad real en Asana. Un proyecto descubierto pero no
 registrado responde `project_not_authorized`. `agent_gids: []` deja únicamente
 tareas humanas. No se incorpora automáticamente .Final_Final ni se activan
 Dots, cuentas o memorias de Meli y Val por pertenecer al workspace.
+Si `ASANA_AGENT_PROJECTS_JSON` aún declara otro contexto para el mismo GID,
+ese proyecto responde `project_context_conflict` y se oculta de la herramienta
+de creación hasta resolver la discrepancia. Los demás proyectos no se bloquean.
 
 `owner_gid` es el responsable humano de la tarea; no tiene que ser el dueño
 del proyecto. Por defecto, el proyecto debe ser privado y pertenecer al

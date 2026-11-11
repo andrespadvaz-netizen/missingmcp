@@ -145,10 +145,13 @@ class MetisAdapter:
 
     def asana_create_tool(self):
         _, _, scopes, _ = load_dot_policy(self.asana_dot_policy_raw,
-                                          self.asana_profiles_raw)
+                                          self.asana_profiles_raw,
+                                          os.environ.get("ASANA_AGENT_PROJECTS_JSON", ""))
         tool = copy.deepcopy(ASANA_CREATE_TOOL)
         branches = []
         for policy in scopes.values():
+            if policy.get("action_blocked_reason"):
+                continue
             branches.append({
                 "type": "object", "additionalProperties": False,
                 "properties": {
@@ -163,6 +166,8 @@ class MetisAdapter:
                 "required": ["context", "project_gid", "audience",
                              "authorized_sources", "deliverable", "request"],
             })
+        if not branches:
+            raise ValueError("no_authorized_projects")
         tool["inputSchema"]["properties"]["brief"] = (
             branches[0] if len(branches) == 1 else {"oneOf": branches})
         return tool
@@ -176,7 +181,8 @@ class MetisAdapter:
         scopes = {}
         if self.asana_dot_policy_raw and self.asana_profiles_raw:
             configured_workspace, _, scopes, _ = load_dot_policy(
-                self.asana_dot_policy_raw, self.asana_profiles_raw)
+                self.asana_dot_policy_raw, self.asana_profiles_raw,
+                os.environ.get("ASANA_AGENT_PROJECTS_JSON", ""))
             if configured_workspace != workspace:
                 raise RequestError("asana_workspace_policy_mismatch")
         oauth = AsanaDispatchOAuth(self.config)
@@ -233,6 +239,7 @@ class MetisAdapter:
                                          "team_candidate_gid": team_candidate,
                                          "team_candidate_name": team_name,
                                          "authorized": gid in scopes and
+                                         not scopes[gid].get("action_blocked_reason") and
                                          scopes[gid].get("privacy_setting") == privacy})
                     elif privacy == "private":
                         if ((gid in scopes and
@@ -244,6 +251,7 @@ class MetisAdapter:
                                              "team_candidate_gid": team_candidate,
                                              "team_candidate_name": team_name,
                                              "authorized": gid in scopes and
+                                             not scopes[gid].get("action_blocked_reason") and
                                              scopes[gid].get("privacy_setting", "private") == privacy})
                         else:
                             private_count += 1
@@ -270,7 +278,8 @@ class MetisAdapter:
             raise RequestError("invalid_asana_dot_arguments")
         try:
             _, _, scopes, profiles = load_dot_policy(self.asana_dot_policy_raw,
-                                                      self.asana_profiles_raw)
+                                                      self.asana_profiles_raw,
+                                                      os.environ.get("ASANA_AGENT_PROJECTS_JSON", ""))
             brief = args.get("brief")
             if not isinstance(brief, dict):
                 raise ValueError("invalid_asana_dot_brief")

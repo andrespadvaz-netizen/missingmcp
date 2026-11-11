@@ -65,6 +65,14 @@ def test_registry_rejects_broadened_audience_and_unapproved_agents():
         load_dot_policy(json.dumps(policy), "{}")
 
 
+def test_conflicting_existing_project_context_blocks_only_that_project():
+    _, _, scopes, _ = load_dot_policy(
+        json.dumps(registry()), "{}", json.dumps({"201": "SHOKKO"}))
+    assert select_scope(scopes, "200")["context"] == "SHOKKO"
+    with pytest.raises(DotPolicyError, match="project_context_conflict"):
+        select_scope(scopes, "201")
+
+
 @pytest.mark.asyncio
 async def test_discovery_filters_private_projects_and_never_writes(tmp_path, monkeypatch):
     import missingmcp.adapters.metis as module
@@ -112,6 +120,11 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
         "team_candidate_gid"] == "77"
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "team_candidate_name"] == "Growth & Marketing"
+    monkeypatch.setenv("ASANA_AGENT_PROJECTS_JSON", json.dumps({"201": "SHOKKO"}))
+    conflicted = await adapter.asana_workspace_inventory()
+    assert next(p for p in conflicted["projects"] if p["gid"] == "201")[
+        "authorized"] is False
+    monkeypatch.delenv("ASANA_AGENT_PROJECTS_JSON")
     monkeypatch.setenv("ASANA_WORKSPACE_ADMIN_DISCOVERY", "true")
     full_result = await adapter.asana_workspace_inventory()
     assert full_result["other_private_project_count"] == 0
