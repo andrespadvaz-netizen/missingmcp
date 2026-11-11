@@ -61,6 +61,13 @@ proyecto sigue funcionando. Ejemplo sintético, sin datos reales:
 }
 ```
 
+Para aprobar muchos proyectos con las mismas restricciones, `project_defaults`
+puede fijar responsable humano, privacidad, audiencia, fuentes y listas vacías
+de agentes una sola vez. Cada entrada en `projects` **debe** seguir declarando
+su contexto; el contexto nunca se hereda ni se adivina por equipo o nombre.
+Una entrada puede sobrescribir los valores comunes cuando hay una excepción
+aprobada. Solo se admiten proyectos enumerados por GID.
+
 Cada entrada necesita autorización verificable del contexto, audiencia,
 fuentes y responsable humano. Un privado solo admite `project_members`; un
 proyecto visible al workspace solo admite `workspace`. Antes del POST el

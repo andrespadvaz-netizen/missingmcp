@@ -41,12 +41,18 @@ def load_dot_policy(raw: str, profiles_raw: str):
         raise DotPolicyError("invalid_project_registry")
     else:
         multi = True
+    defaults = config.get("project_defaults", {})
+    if (not isinstance(defaults, Mapping) or
+            set(defaults) - {"owner_gid", "project_owner_gid", "privacy_setting",
+                             "audiences", "sources", "eligible_task_names",
+                             "routing", "specialties", "agent_gids"}):
+        raise DotPolicyError("invalid_project_defaults")
     scopes = {}
     for project_gid, entry in projects.items():
         project_gid = _gid(project_gid)
         if not isinstance(entry, Mapping):
             raise DotPolicyError("invalid_project_scope")
-        scope = dict(entry) | {"workspace_gid": workspace_gid,
+        scope = dict(defaults) | dict(entry) | {"workspace_gid": workspace_gid,
                                "creator_gid": creator_gid,
                                "project_gid": project_gid}
         context = scope.get("context")

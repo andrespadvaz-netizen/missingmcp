@@ -32,6 +32,28 @@ def test_registry_selects_only_explicit_scopes():
         select_scope(scopes, "202")
 
 
+def test_server_defaults_reduce_batch_config_without_inventing_context():
+    policy = {"workspace_gid": "100", "creator_gid": "55",
+              "project_defaults": {
+                  "owner_gid": "55", "privacy_setting": "private",
+                  "audiences": ["project_members"], "sources": ["current_request"],
+                  "eligible_task_names": [], "routing": {}, "specialties": [],
+                  "agent_gids": []},
+              "projects": {"200": {"context": "METIS"},
+                           "201": {"context": "ANDREA"}}}
+    _, _, scopes, _ = load_dot_policy(json.dumps(policy), "{}")
+    assert scopes["200"]["owner_gid"] == scopes["201"]["owner_gid"] == "55"
+    assert scopes["200"]["context"] == "METIS"
+    assert scopes["201"]["context"] == "ANDREA"
+    policy["project_defaults"]["context"] = "METIS"
+    with pytest.raises(DotPolicyError, match="invalid_project_defaults"):
+        load_dot_policy(json.dumps(policy), "{}")
+    del policy["project_defaults"]["context"]
+    policy["projects"]["201"] = {}
+    with pytest.raises(DotPolicyError, match="invalid_project_context"):
+        load_dot_policy(json.dumps(policy), "{}")
+
+
 def test_registry_rejects_broadened_audience_and_unapproved_agents():
     policy = registry()
     policy["projects"]["200"]["audiences"] = ["workspace"]
