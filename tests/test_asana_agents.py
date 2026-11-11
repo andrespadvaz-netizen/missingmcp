@@ -38,6 +38,27 @@ async def test_discovery_pages_and_early_access_header():
 
 
 @pytest.mark.asyncio
+async def test_explicit_workspace_visibility_can_be_verified_for_agent_target():
+    def handler(request):
+        meta = dispatch_metadata(request, privacy="public_to_workspace")
+        if meta is not None:
+            return meta
+        if request.url.path.endswith("/agents"):
+            return httpx.Response(200, json={"data": [{"gid": "11"}]})
+        pytest.fail("unexpected request")
+
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        allowed_agent_gids={"200": "11"},
+                        expected_project_owner_gids={"200": "44"},
+                        expected_project_privacies={"200": "public_to_workspace"},
+                        transport=httpx.MockTransport(handler))
+    await asana._verify_dispatch_target("200", "11")
+    with pytest.raises(ValueError, match="Invalid project privacy mapping"):
+        AsanaAgents("token", "100", {"200": "SHOKKO"},
+                    expected_project_privacies={"200": "public"})
+
+
+@pytest.mark.asyncio
 async def test_assignment_rejects_human_owner_without_write():
     writes = []
 

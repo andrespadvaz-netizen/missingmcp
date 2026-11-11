@@ -276,6 +276,7 @@ class MetisAdapter:
                 if policy["agent_gids"] else {},
                 expected_project_owner_gids=({project: policy["project_owner_gid"]}
                                              if policy.get("project_owner_gid") else {}),
+                expected_project_privacies={project: policy.get("privacy_setting", "private")},
                 ledger_path=self.config.db_path, handoff_ledger_path=self.config.db_path)
             events = DotEvents(self.config.db_path)
             try:

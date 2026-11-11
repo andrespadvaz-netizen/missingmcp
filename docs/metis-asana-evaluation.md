@@ -74,8 +74,11 @@ de despachos; si falta, el control de destino también bloquea ese despacho.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
-La política actual que espera `private` no puede usar un proyecto público por
-accidente. Un proyecto público no autoriza fuentes privadas ni agentes.
+Una política que espera `private` no puede usar un proyecto público por
+accidente. Un proyecto público no autoriza por sí solo fuentes privadas ni
+agentes: el destino del agente se vuelve a verificar contra la privacidad
+`public_to_workspace`, el propietario del proyecto aprobado, la audiencia
+`workspace` y la lista explícita de GID de agentes.
 
 ## Crear y evaluar
 

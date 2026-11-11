@@ -39,6 +39,7 @@ class AsanaAgents:
                  allowed_project_gids: Mapping[str, str], *,
                  allowed_agent_gids: Mapping[str, str | Sequence[str]] | None = None,
                  expected_project_owner_gids: Mapping[str, str] | None = None,
+                 expected_project_privacies: Mapping[str, str] | None = None,
                  cross_context_agent_gids: Collection[str] = (),
                  transport: httpx.AsyncBaseTransport | None = None,
                  ledger_path: str | None = None,
@@ -75,6 +76,11 @@ class AsanaAgents:
             for project, owner in (expected_project_owner_gids or {}).items()}
         if self.expected_project_owners.keys() - self.allowed_projects.keys():
             raise ValueError("Owner mapping contains a forbidden project")
+        self.expected_project_privacies = dict(expected_project_privacies or {})
+        if (self.expected_project_privacies.keys() - self.allowed_projects.keys() or
+                any(value not in {"private", "public_to_workspace"}
+                    for value in self.expected_project_privacies.values())):
+            raise ValueError("Invalid project privacy mapping")
         self.transport = transport
         self.handoffs = TeamHandoffs(handoff_ledger_path) if handoff_ledger_path else None
         self.ledger = None
@@ -156,7 +162,8 @@ class AsanaAgents:
         project = body.get("data")
         if (not isinstance(project, dict) or str(project.get("gid")) != project_gid or
                 str((project.get("workspace") or {}).get("gid")) != self.workspace_gid or
-                project.get("privacy_setting") != "private" or
+                project.get("privacy_setting") !=
+                self.expected_project_privacies.get(project_gid, "private") or
                 str((project.get("owner") or {}).get("gid")) !=
                 self.expected_project_owners[project_gid]):
             raise AsanaError("dispatch_project_not_private_or_owned")
