@@ -73,7 +73,7 @@ async def test_direct_audit_requires_andres_is_terminal(monkeypatch):
     direct = DirectAudit(cfg)
 
     async def fake_openai(request, context):
-        return 'REQUIRES_ANDRES: elige A o B', {'input_tokens': 2}, 'gpt-5', 'resp-1'
+        return 'REQUIRES_ANDRES: elige A o B', {'input_tokens': 2}, 'gpt-6.1-sol', 'resp-1'
 
     monkeypatch.setattr(direct, '_openai', fake_openai)
     result = await direct.run('ANTHROPIC', 'Decide', 'PERSONAL/HEALTH_OS')
@@ -90,7 +90,7 @@ async def test_direct_audit_openai_reserves_visible_output_and_reports_exhaustio
 
     async def exhausted(url, body, headers):
         calls.append(body)
-        return ({'id': 'resp-exhausted', 'model': 'gpt-5-2025-08-07',
+        return ({'id': 'resp-exhausted', 'model': 'gpt-6.1-sol',
                  'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'},
                  'output': [{'type': 'reasoning'}],
                  'usage': {'input_tokens': 12000, 'output_tokens': 8192,
@@ -101,13 +101,111 @@ async def test_direct_audit_openai_reserves_visible_output_and_reports_exhaustio
     assert len(calls) == 1
     assert calls[0]['max_output_tokens'] == 8192
     assert calls[0]['reasoning'] == {'effort': 'low'}
+    assert calls[0]['model'] == 'gpt-6.1-sol'
+    assert calls[0]['prompt_cache_options'] == {'mode': 'explicit'}
     assert result['status'] == 'FAILED'
     assert result['error_code'] == 'OUTPUT_TOKEN_LIMIT'
     assert result['provider_request_id'] == 'resp-exhausted'
-    assert result['model'] == 'gpt-5-2025-08-07'
+    assert result['model'] == 'gpt-6.1-sol'
     assert result['cost_known'] is True
-    assert result['cost_usd'] == .09692
+    assert result['cost_usd'] == .10592
     assert result['writes_attempted'] == 0
+
+
+@pytest.mark.asyncio
+async def test_retired_or_unpriced_openai_override_fails_before_dispatch(monkeypatch):
+    for model in ('gpt-5', 'gpt-5-2025-08-07', 'unknown-model'):
+        cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'test-key',
+                           'METIS_OPENAI_MODEL': model})
+        direct = DirectAudit(cfg)
+
+        async def no_dispatch(*args, **kwargs):
+            pytest.fail('unpriced model dispatched')
+
+        monkeypatch.setattr(direct, '_post', no_dispatch)
+        result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+        assert result['status'] == 'FAILED'
+        assert result['error_code'] == 'MODEL_PRICE_UNVERIFIED'
+
+
+@pytest.mark.asyncio
+async def test_openai_refusal_and_wrong_model_do_not_claim_priced_completion(monkeypatch):
+    direct = DirectAudit(load_config({'GATEWAY_SECRET': SECRET,
+                                      'METIS_OPENAI_API_KEY': 'test-key'}))
+
+    async def refusal(url, body, headers):
+        return ({'id': 'resp-refusal', 'status': 'completed', 'model': 'gpt-6.1-sol',
+                 'output': [{'type': 'message', 'content': [
+                     {'type': 'refusal', 'refusal': 'Cannot help'},
+                     {'type': 'output_text', 'text': 'Partial text'}]}],
+                 'usage': {'input_tokens': 100, 'output_tokens': 25}}, 'req-refusal')
+
+    monkeypatch.setattr(direct, '_post', refusal)
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert result['status'] == 'FAILED'
+    assert result['error_code'] == 'PROVIDER_REFUSAL'
+    assert 'final_answer' not in result
+
+    async def wrong_model(url, body, headers):
+        return ({'id': 'resp-other', 'status': 'completed', 'model': 'other-model',
+                 'output_text': 'Dictamen',
+                 'usage': {'input_tokens': 100, 'output_tokens': 25}}, 'req-other')
+
+    monkeypatch.setattr(direct, '_post', wrong_model)
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert result['status'] == 'COMPLETED'
+    assert result['cost_known'] is False
+    assert result['cost_usd'] is None
+
+
+@pytest.mark.asyncio
+async def test_openai_mock_http_error_preserves_request_contract(monkeypatch):
+    cfg = load_config({'GATEWAY_SECRET': SECRET, 'METIS_OPENAI_API_KEY': 'test-key'})
+    direct = DirectAudit(cfg)
+    seen = []
+    real_client = httpx.AsyncClient
+
+    def mock_response(request):
+        seen.append(json.loads(request.content))
+        assert request.url.path == '/v1/responses'
+        return httpx.Response(429, headers={'x-request-id': 'rate-limit-1'},
+                              json={'error': {'message': 'fixture only'}})
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real_client(
+        transport=httpx.MockTransport(mock_response), **kwargs))
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert len(seen) == 1
+    assert seen[0]['model'] == 'gpt-6.1-sol'
+    assert seen[0]['reasoning'] == {'effort': 'low'}
+    assert seen[0]['prompt_cache_options'] == {'mode': 'explicit'}
+    assert result['status'] == 'FAILED'
+    assert result['error_code'] == 'PROVIDER_HTTP_429'
+    assert result['retryable'] is True
+    assert result['provider_request_id'] == 'rate-limit-1'
+    assert 'fixture only' not in str(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['queued', 'in_progress', 'failed', None])
+async def test_openai_nonterminal_status_never_completes(monkeypatch, status):
+    direct = DirectAudit(load_config({'GATEWAY_SECRET': SECRET,
+                                      'METIS_OPENAI_API_KEY': 'test-key'}))
+
+    async def response(url, body, headers):
+        payload = {'id': 'resp-nonterminal', 'model': 'gpt-6.1-sol',
+                   'output_text': 'Text that must not be released',
+                   'usage': {'input_tokens': 100, 'output_tokens': 20}}
+        if status is not None:
+            payload['status'] = status
+        return payload, 'request-nonterminal'
+
+    monkeypatch.setattr(direct, '_post', response)
+    result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
+    assert result['status'] == 'FAILED'
+    assert result['error_code'] == ('PROVIDER_FAILED' if status == 'failed'
+                                    else 'PROVIDER_NONTERMINAL')
+    assert result['provider_status'] == status
+    assert 'final_answer' not in result
 
 
 @pytest.mark.asyncio
@@ -120,7 +218,7 @@ async def test_direct_audit_openai_completed_text_is_terminal(monkeypatch):
         assert url.endswith('/v1/responses')
         assert body['max_output_tokens'] == 8192
         assert body['reasoning'] == {'effort': 'low'}
-        return ({'id': 'resp-complete', 'status': 'completed', 'model': 'gpt-5-2025-08-07',
+        return ({'id': 'resp-complete', 'status': 'completed', 'model': 'gpt-6.1-sol',
                  'output': [{'type': 'message', 'content': [
                      {'type': 'output_text', 'text': 'Dictamen completo'}]}],
                  'usage': {'input_tokens': 100, 'output_tokens': 25}}, 'request-3')
@@ -129,7 +227,7 @@ async def test_direct_audit_openai_completed_text_is_terminal(monkeypatch):
     result = await direct.run('ANTHROPIC', 'Audita', 'METIS')
     assert result['status'] == 'COMPLETED'
     assert result['final_answer'] == 'Dictamen completo'
-    assert result['model'] == 'gpt-5-2025-08-07'
+    assert result['model'] == 'gpt-6.1-sol'
     assert result['writes_attempted'] == 0
 
 

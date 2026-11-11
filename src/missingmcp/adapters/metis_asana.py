@@ -15,9 +15,10 @@ from ..store import encrypt, decrypt
 ACCOUNT = "asana-andres-1211117380475084"
 CONTEXTS = frozenset({"SHOKKO", "FINAL_FINAL", "VENTURE_QUEST"})
 # Reservations are never refunded after dispatch, including failed or
-# uncertain outcomes. The 20-call monthly ceiling reserves at most USD 1.10.
-# Units are micro-USD at GPT-5's published rate.
-PROBE_BUDGET_MICRO_USD = 55_000
+# uncertain outcomes. The monthly ceiling remains USD 1.10; a larger per-call
+# reserve can reduce the number of calls below the separate 20-call limit.
+# Units are micro-USD at GPT-6.1 Sol's standard uncached text rate.
+PROBE_BUDGET_MICRO_USD = 65_000
 PROBE_MAX_CALLS = 20
 PROBE_TOTAL_BUDGET_MICRO_USD = 1_100_000
 PROBE_MAX_REQUEST_BYTES = 8_192
@@ -31,7 +32,7 @@ def probe_reservation_micro_usd(request: str, context: str) -> int:
     input_bound = (len(SYSTEM.encode()) +
                    len(f"Contexto: {context}\n\n{request}".encode()) +
                    PROBE_INPUT_OVERHEAD_TOKENS)
-    return (input_bound * 5 + 3) // 4 + PROBE_MAX_OUTPUT_TOKENS * 10
+    return input_bound * 2 + PROBE_MAX_OUTPUT_TOKENS * 10
 
 TOOLS = [{
     "name": "metis_cross_audit",
@@ -177,7 +178,7 @@ class MetisAsanaAdapter:
                 raise RequestError("probe_request_too_large")
             if not self.config.metis_openai_api_key:
                 raise RequestError("direct_audit_not_configured")
-            if self.config.metis_openai_model != "gpt-5":
+            if self.config.metis_openai_model != "gpt-6.1-sol":
                 raise RequestError("probe_model_price_unverified")
             db = self.queue.db
             fingerprint = hashlib.sha256(text.encode()).hexdigest()

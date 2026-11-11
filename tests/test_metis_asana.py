@@ -15,6 +15,7 @@ from missingmcp.adapters.metis_asana import (
     probe_reservation_micro_usd,
 )
 from missingmcp.adapters.base import LoginError
+from missingmcp.metis.queue import validate
 from missingmcp import store
 
 
@@ -32,6 +33,43 @@ def config(tmp_path):
 def test_probe_worst_case_reservation_is_below_authorized_budget():
     assert probe_reservation_micro_usd("x" * 8192, "VENTURE_QUEST") < \
         PROBE_BUDGET_MICRO_USD
+
+
+@pytest.mark.asyncio
+async def test_eighteen_maximum_probes_fit_monthly_budget_and_nineteenth_is_blocked(tmp_path, monkeypatch):
+    adapter = MetisAsanaAdapter(config(tmp_path))
+    blob = adapter.start_login({'metis_key': 'a' * 40}).blob
+    context = {'project': 'VENTURE_QUEST', 'source': 'current_request'}
+    prefix_length = len(validate({'request': 'x', 'idempotency_key': 'prefix-check-key-01',
+                                  'context': context})[0].encode()) - 1
+    request = 'x' * (8192 - prefix_length)
+    forwarded, _, project = validate({'request': request,
+                                      'idempotency_key': 'prefix-check-key-02',
+                                      'context': context})
+    assert len(forwarded.encode()) == 8192
+    reservation = probe_reservation_micro_usd(forwarded, project)
+    assert 18 * reservation <= PROBE_TOTAL_BUDGET_MICRO_USD
+    assert 19 * reservation > PROBE_TOTAL_BUDGET_MICRO_USD
+    dispatches = []
+
+    async def fake_run(*args, **kwargs):
+        dispatches.append(1)
+        return {'status': 'COMPLETED', 'receipt_id': f'receipt-{len(dispatches)}'}
+
+    monkeypatch.setattr(adapter.direct_audit, 'run', fake_run)
+    for number in range(1, 20):
+        body = {'jsonrpc': '2.0', 'id': number, 'method': 'tools/call',
+                'params': {'name': 'metis_cross_audit', 'arguments': {
+                    'request': request, 'idempotency_key': f'max-probe-key-{number:04d}',
+                    'context': context}}}
+        _, _, payload = await adapter.handle(None, ACCOUNT, blob, json.dumps(body).encode())
+        result = json.loads(payload)['result']
+        assert result['isError'] is (number == 19)
+    assert len(dispatches) == 18
+    budget = adapter.queue.db.execute(
+        'SELECT reserved_micro_usd,call_count FROM metis_asana_monthly_budget '
+        'WHERE owner=?', (ACCOUNT,)).fetchone()
+    assert tuple(budget) == (18 * reservation, 18)
 
 
 def test_static_confidential_oauth_requires_pkce_and_exposes_one_tool(tmp_path):

@@ -16,7 +16,7 @@ Otherwise answer in Spanish and use the shortest complete response that satisfie
 the request. Do not invent objections when the request is a simple receipt check."""
 
 PRICE_USD_PER_1K = {
-    "OPENAI": {"input": 0.00125, "output": 0.010},
+    "OPENAI": {"input": 0.002, "output": 0.010},
     "ANTHROPIC": {"input": 0.002, "output": 0.010},
 }
 
@@ -61,7 +61,7 @@ class DirectAudit:
                     answer, usage, model, provider_id = await self._openai(
                         request, context_project, max_output_tokens=max_output_tokens)
         except DirectAuditError as exc:
-            cost = self._cost(target, exc.usage)
+            cost = self._cost(target, exc.usage, exc.model)
             return {
                 "status": "FAILED", "stage": f"{target}_REQUEST", "error_code": exc.code,
                 "retryable": exc.retryable, "provider_request_id": exc.provider_request_id,
@@ -75,7 +75,7 @@ class DirectAudit:
                 "writes_attempted": 0,
             }
         status = "REQUIRES_ANDRES" if answer.lstrip().upper().startswith("REQUIRES_ANDRES:") else "COMPLETED"
-        cost = self._cost(target, usage)
+        cost = self._cost(target, usage, model)
         return {
             "status": status, "final_answer": answer, "model": model,
             "provider_request_id": provider_id, "usage": usage,
@@ -104,6 +104,9 @@ class DirectAudit:
         return answer, data.get("usage", {}), data.get("model", body["model"]), data.get("id") or request_id
 
     async def _openai(self, request, context, *, max_output_tokens=8192):
+        if self.config.metis_openai_model != "gpt-6.1-sol":
+            raise DirectAuditError("MODEL_PRICE_UNVERIFIED", False,
+                                   model=self.config.metis_openai_model)
         body = {
             "model": self.config.metis_openai_model,
             "input": [{"role": "system", "content": SYSTEM},
@@ -112,6 +115,9 @@ class DirectAudit:
             # exhausted on a substantive audit before any visible text appeared.
             "max_output_tokens": max_output_tokens,
             "reasoning": {"effort": "low"},
+            # Unique audits do not reuse a long prompt prefix. Explicit mode
+            # with no breakpoints avoids unaccounted cache-write charges.
+            "prompt_cache_options": {"mode": "explicit"},
         }
         data, request_id = await self._post("https://api.openai.com/v1/responses", body, {
             "Authorization": f"Bearer {self.config.metis_openai_api_key}",
@@ -125,11 +131,20 @@ class DirectAudit:
             ).strip()
         status = data.get("status")
         reason = (data.get("incomplete_details") or {}).get("reason")
-        if not answer or status in {"incomplete", "failed"}:
+        refused = any(
+            isinstance(item, dict) and isinstance(content, dict)
+            and content.get("type") == "refusal"
+            for item in data.get("output", []) if isinstance(item, dict)
+            for content in item.get("content", [])
+        )
+        if not answer or status != "completed" or refused:
             raise DirectAuditError(
                 "OUTPUT_TOKEN_LIMIT" if reason == "max_output_tokens" else
+                "PROVIDER_REFUSAL" if refused else
                 "PROVIDER_INCOMPLETE" if status == "incomplete" else
-                "PROVIDER_FAILED" if status == "failed" else "EMPTY_PROVIDER_RESPONSE",
+                "PROVIDER_FAILED" if status == "failed" else
+                "PROVIDER_NONTERMINAL" if status != "completed" else
+                "EMPTY_PROVIDER_RESPONSE",
                 False, data.get("id") or request_id,
                 usage=data.get("usage") if isinstance(data.get("usage"), dict) else None,
                 model=data.get("model"), provider_status=status,
@@ -157,7 +172,11 @@ class DirectAudit:
             raise DirectAuditError("PROVIDER_INVALID_JSON", False, request_id) from exc
 
     @staticmethod
-    def _cost(provider, usage):
+    def _cost(provider, usage, model):
+        # A provider can return a different model than requested. Its price is
+        # unknown until explicitly reviewed; never label that cost as known.
+        if provider == "OPENAI" and model != "gpt-6.1-sol":
+            return None
         if not isinstance(usage, dict):
             return None
         input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")

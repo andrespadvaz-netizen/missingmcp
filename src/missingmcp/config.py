@@ -53,7 +53,7 @@ class Config:
     metis_lens_context_key: str = ""
     metis_openai_api_key: str = ""
     metis_anthropic_api_key: str = ""
-    metis_openai_model: str = "gpt-5"
+    metis_openai_model: str = "gpt-6.1-sol"
     metis_anthropic_model: str = "claude-sonnet-5"
     metis_direct_audit_timeout: int = 180
     health_os_ingest_key: str = ""
@@ -114,6 +114,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
                            if item):
         raise ValueError("Asana dispatch secrets must be distinct from existing secrets")
     metis_openai_api_key = env.get("METIS_OPENAI_API_KEY", "")
+    metis_openai_model = env.get("METIS_OPENAI_MODEL", "gpt-6.1-sol")
     metis_anthropic_api_key = env.get("METIS_ANTHROPIC_API_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
     if health_os_ingest_key and asana_mcp_client_id and health_os_ingest_key in {asana_mcp_client_secret, asana_mcp_andres_key}:
@@ -157,7 +158,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         asana_dispatch_full_permissions=env.get("ASANA_DISPATCH_FULL_PERMISSIONS", "").lower() == "true",
         metis_openai_api_key=metis_openai_api_key,
         metis_anthropic_api_key=metis_anthropic_api_key,
-        metis_openai_model=env.get("METIS_OPENAI_MODEL", "gpt-5"),
+        metis_openai_model=metis_openai_model,
         metis_anthropic_model=env.get("METIS_ANTHROPIC_MODEL", "claude-sonnet-5"),
         metis_direct_audit_timeout=max(30, min(300, int(env.get("METIS_DIRECT_AUDIT_TIMEOUT", "180")))),
         health_os_ingest_key=health_os_ingest_key,
