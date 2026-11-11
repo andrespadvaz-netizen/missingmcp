@@ -48,7 +48,18 @@ class AsanaDispatchOAuth:
             created_at INTEGER NOT NULL)""")
         self.db.execute("""CREATE TABLE IF NOT EXISTS asana_dispatch_oauth_tokens (
             owner_gid TEXT PRIMARY KEY, access_enc TEXT NOT NULL,
-            refresh_enc TEXT NOT NULL, expires_at INTEGER NOT NULL)""")
+            refresh_enc TEXT NOT NULL, expires_at INTEGER NOT NULL,
+            refresh_state TEXT NOT NULL DEFAULT 'READY')""")
+        columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(asana_dispatch_oauth_tokens)")}
+        if "refresh_state" not in columns:
+            self.db.execute("ALTER TABLE asana_dispatch_oauth_tokens ADD COLUMN "
+                            "refresh_state TEXT NOT NULL DEFAULT 'READY'")
+            # Earlier code could retry a refresh after receiving a malformed
+            # response. An expiring legacy row may already have been used.
+            self.db.execute("UPDATE asana_dispatch_oauth_tokens SET "
+                            "refresh_state='UNCERTAIN' WHERE expires_at<=?",
+                            (int(self.clock()) + 120,))
 
     @property
     def redirect_uri(self):
@@ -137,39 +148,59 @@ class AsanaDispatchOAuth:
             "code_verifier": verifier,
         })
         access, refresh, ttl = self._parse_token(value, require_owner=True)
-        self.db.execute("INSERT INTO asana_dispatch_oauth_tokens VALUES (?,?,?,?) "
+        self.db.execute("INSERT INTO asana_dispatch_oauth_tokens"
+                        "(owner_gid,access_enc,refresh_enc,expires_at,refresh_state) "
+                        "VALUES (?,?,?,?,'READY') "
                         "ON CONFLICT(owner_gid) DO UPDATE SET access_enc=excluded.access_enc, "
-                        "refresh_enc=excluded.refresh_enc, expires_at=excluded.expires_at",
+                        "refresh_enc=excluded.refresh_enc, expires_at=excluded.expires_at, "
+                        "refresh_state='READY'",
                         (OWNER_GID, store.encrypt(self.config.gateway_secret, access),
                          store.encrypt(self.config.gateway_secret, refresh),
                          int(self.clock()) + ttl))
 
     async def access_token(self) -> str:
-        """Refresh under a database write lock; do not retry uncertain refreshes."""
+        """Reserve a refresh durably before the network call; never retry uncertainty."""
         self.db.execute("BEGIN IMMEDIATE")
         try:
             row = self.db.execute("SELECT * FROM asana_dispatch_oauth_tokens WHERE owner_gid=?",
                                   (OWNER_GID,)).fetchone()
             if row is None:
                 raise DispatchAuthError("dispatch_not_connected")
+            if row["refresh_state"] != "READY":
+                raise DispatchAuthError("dispatch_refresh_requires_reauth")
             if row["expires_at"] > int(self.clock()) + 120:
                 access = store.decrypt(self.config.gateway_secret, row["access_enc"])
+                self.db.execute("COMMIT")
+                return access
             else:
                 refresh = store.decrypt(self.config.gateway_secret, row["refresh_enc"])
-                value = await self._token({
-                    "grant_type": "refresh_token",
-                    "client_id": self.config.asana_dispatch_client_id,
-                    "client_secret": self.config.asana_dispatch_client_secret,
-                    "refresh_token": refresh,
-                })
-                access, new_refresh, ttl = self._parse_token(value, require_owner=False)
                 self.db.execute("UPDATE asana_dispatch_oauth_tokens SET "
-                                "access_enc=?,refresh_enc=?,expires_at=? WHERE owner_gid=?",
-                                (store.encrypt(self.config.gateway_secret, access),
-                                 store.encrypt(self.config.gateway_secret, new_refresh),
-                                 int(self.clock()) + ttl, OWNER_GID))
+                                "refresh_state='UNCERTAIN' WHERE owner_gid=?", (OWNER_GID,))
             self.db.execute("COMMIT")
-            return access
         except BaseException:
             self.db.execute("ROLLBACK")
             raise
+        # A network failure, malformed response or process crash leaves the
+        # durable barrier in place. Only a new approved OAuth grant clears it.
+        value = await self._token({
+            "grant_type": "refresh_token",
+            "client_id": self.config.asana_dispatch_client_id,
+            "client_secret": self.config.asana_dispatch_client_secret,
+            "refresh_token": refresh,
+        })
+        access, new_refresh, ttl = self._parse_token(value, require_owner=False)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self.db.execute("UPDATE asana_dispatch_oauth_tokens SET "
+                            "access_enc=?,refresh_enc=?,expires_at=?,refresh_state='READY' "
+                            "WHERE owner_gid=? AND refresh_state='UNCERTAIN'",
+                            (store.encrypt(self.config.gateway_secret, access),
+                             store.encrypt(self.config.gateway_secret, new_refresh),
+                             int(self.clock()) + ttl, OWNER_GID))
+            if not self.db.execute("SELECT changes()").fetchone()[0]:
+                raise DispatchAuthError("dispatch_refresh_superseded")
+            self.db.execute("COMMIT")
+        except BaseException:
+            self.db.execute("ROLLBACK")
+            raise
+        return access

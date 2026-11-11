@@ -110,6 +110,16 @@ Meli y Val necesitan sus propios consentimientos, identidades,
 proyectos, audiencias, fuentes y límites aprobados. No se accede a sus
 cuentas ni memorias.
 
+Si la renovación del OAuth saliente de Asana devuelve una respuesta inválida
+o incierta, el Gateway deja una barrera durable `UNCERTAIN` antes de intentar
+otra operación. No se vuelve a usar el refresh token anterior: la persona
+titular debe reconectar el mismo grant mediante
+`/asana-dispatch/oauth/setup`, con la clave ya guardada fuera del repositorio.
+No se copia la clave, el token ni la respuesta del proveedor a chats o logs.
+El nuevo grant reemplaza el par cifrado y limpia la barrera. En una migración
+desde versiones anteriores, cualquier token ya próximo a vencer también
+queda bloqueado hasta reconexión, pues un intento previo pudo haberlo rotado.
+
 El actuador productivo actual de Metis (`metis-gateway-bridge/WriteBridge.gs`
 y `metis-orchestrator-prototype/src/ProductiveAdapter.gs`) sigue disponible
 para tareas no incluidas en `routing`. Para las tareas elegibles, Metis debe
