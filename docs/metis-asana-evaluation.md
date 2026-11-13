@@ -79,6 +79,11 @@ El mismo GID de agente no puede figurar en proyectos de contextos distintos,
 salvo que el administrador lo enumere explícitamente en
 `cross_context_agent_gids` y lo autorice por separado en cada proyecto y perfil.
 Esa excepción no hereda audiencias ni fuentes entre contextos.
+La excepción tampoco demuestra que Asana aísle la memoria o las instrucciones
+internas de ese agente entre contextos. Para exigir aislamiento de memoria,
+se necesitan identidades de agente distintas por contexto o una garantía
+verificable del proveedor. Hasta entonces, el Gateway solo puede aislar el
+contenido que envía en cada encargo, no la memoria del agente.
 Si `ASANA_AGENT_PROJECTS_JSON` aún declara otro contexto para el mismo GID,
 ese proyecto responde `project_context_conflict` y se oculta de la herramienta
 de creación hasta resolver la discrepancia. Los demás proyectos no se bloquean.
@@ -116,6 +121,10 @@ origen es la reserva previa, el POST del servidor y la lectura posterior.
 Un evento `task.created` externo solo puede evaluar un GID registrado por
 esa secuencia. Una repetición con la misma clave no hace otro POST; un
 cambio de contenido causa conflicto.
+La ruta antigua de planes de escritura de Metis rechaza nuevas tareas de
+Asana en cualquiera de los contextos del registro multiproyecto: esas tareas
+deben entrar por `task.create` para quedar vinculadas al evento durable y
+pasar por evaluación. La restricción no afecta escrituras en otros proveedores.
 Un nombre fuera de `eligible_task_names` todavía puede crear la tarea humana,
 pero la evaluación se abstiene de encargarla a un agente. Una lista vacía
 permite activar solo la creación y la abstención, sin habilitar especialidades.

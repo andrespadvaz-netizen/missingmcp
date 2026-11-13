@@ -35,6 +35,21 @@ def test_routed_asana_creation_cannot_use_old_productive_path(monkeypatch):
     assert len(validate_plan(value, "SHOKKO")) == 1
 
 
+def test_registered_multi_project_context_cannot_bypass_dot_creation(monkeypatch):
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps({
+        "projects": {"200": {"context": "SHOKKO"},
+                     "201": {"context": "ANDREA"}}}))
+    value = plan()
+    value["resolved_context"] = "ANDREA"
+    action = value["write_plan"][0]["action"]
+    action.update(context="ANDREA", provider="ASANA",
+                  payload={"title": "Any new human task"})
+    with pytest.raises(ValueError, match="use_metis_asana_create_task"):
+        validate_plan(value, "ANDREA")
+    action["context"] = value["resolved_context"] = "METIS"
+    assert len(validate_plan(value, "METIS")) == 1
+
+
 @pytest.fixture
 def q(tmp_path):
     queue = Queue(str(tmp_path/'db.sqlite'), SECRET)
