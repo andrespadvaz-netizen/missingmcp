@@ -18,7 +18,7 @@ from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth
 from missingmcp.metis.asana_dot_policy import load_dot_policy
 
 
-async def main(probe_gids=()):
+async def main(probe_gids=(), scan_teams=False):
     workspace, _, scopes, _ = load_dot_policy(
         os.environ["ASANA_METIS_DOT_POLICY_JSON"],
         os.environ["ASANA_AGENT_PROFILES_JSON"],
@@ -65,6 +65,57 @@ async def main(probe_gids=()):
             if offset in seen_offsets:
                 raise RuntimeError("project_inventory_pagination_loop")
             seen_offsets.add(offset)
+        if scan_teams:
+            async def pages(path, fields):
+                page_offset = None
+                visited = set()
+                for _ in range(20):
+                    query = {"limit": 100, "opt_fields": fields}
+                    if page_offset:
+                        query["offset"] = page_offset
+                    reply = await http.get(
+                        "https://app.asana.com/api/1.0" + path,
+                        headers={"Authorization": "Bearer " + token},
+                        params=query)
+                    reply.raise_for_status()
+                    page = reply.json()
+                    if not isinstance(page, dict) or not isinstance(page.get("data"), list):
+                        raise RuntimeError("invalid_team_inventory")
+                    for item in page["data"]:
+                        yield item
+                    page_offset = (page.get("next_page") or {}).get("offset")
+                    if not page_offset:
+                        return
+                    if page_offset in visited:
+                        raise RuntimeError("team_inventory_pagination_loop")
+                    visited.add(page_offset)
+                raise RuntimeError("team_inventory_page_limit")
+
+            found = set()
+            try:
+                async for team in pages(f"/organizations/{workspace}/teams", "gid,name"):
+                    team_gid = str(team.get("gid", ""))
+                    if not team_gid.isdigit():
+                        raise RuntimeError("team_identity_unverified")
+                    async for project in pages(
+                            f"/teams/{team_gid}/projects",
+                            "gid,name,archived,privacy_setting,workspace.gid,owner.gid"):
+                        gid = str(project.get("gid", ""))
+                        if not gid.isdigit() or gid in active or gid in found:
+                            continue
+                        found.add(gid)
+                        print("TEAM_PROBE", json.dumps({
+                            "gid": gid, "name": project.get("name"),
+                            "team_gid": team_gid, "team_name": team.get("name"),
+                            "workspace_match": str((project.get("workspace") or {}).get("gid")) == workspace,
+                            "archived": project.get("archived"),
+                            "privacy": project.get("privacy_setting"),
+                            "owner_gid": (project.get("owner") or {}).get("gid")},
+                            ensure_ascii=False))
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in (403, 404):
+                    raise
+                print("TEAM_DISCOVERY_INACCESSIBLE", exc.response.status_code)
         for gid in probe_gids:
             if not re.fullmatch(r"[0-9]+", gid):
                 raise ValueError("probe_gid_must_be_numeric")
@@ -110,7 +161,9 @@ async def main(probe_gids=()):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", nargs="*", default=[], metavar="PROJECT_GID")
+    parser.add_argument("--teams", action="store_true",
+                        help="read visible teams for projects missing from the workspace listing")
     args = parser.parse_args()
     if len(args.probe) > 20 or len(args.probe) != len(set(args.probe)):
         parser.error("1-20 distinct project GIDs are allowed")
-    asyncio.run(main(args.probe))
+    asyncio.run(main(args.probe, args.teams))
