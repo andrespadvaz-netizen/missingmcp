@@ -17,6 +17,20 @@ POLICY = {"workspace_gid": "100", "creator_gid": "55", "project_gid": "200", "co
 EVENT = {"type": "task.created", "task_gid": "300", "brief": BRIEF}
 
 
+@pytest.mark.asyncio
+async def test_source_creation_rechecks_project_owner_when_configured():
+    def handler(request):
+        assert request.method == "GET"
+        return httpx.Response(200, json={"data": {
+            "gid": "200", "workspace": {"gid": "100"},
+            "privacy_setting": "private", "owner": {"gid": "99"}}})
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    with pytest.raises(DotEventError, match="source_project_owner_mismatch"):
+        await DotEvents._verify_project(
+            asana, "200", POLICY | {"project_owner_gid": "44"})
+
+
 def registered(events):
     import hashlib
     import json

@@ -159,12 +159,17 @@ class DotEvents:
                  policy.get("audiences") != ["workspace"])):
             raise DotEventError("source_audience_policy_invalid")
         project_body = await client._request("GET", f"/projects/{project}",
-                                             params={"opt_fields": "gid,workspace.gid,privacy_setting"})
+                                             params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting"})
         observed_project = project_body.get("data") or {}
         if (str(observed_project.get("gid")) != project or
                 str((observed_project.get("workspace") or {}).get("gid")) != client.workspace_gid or
                 observed_project.get("privacy_setting") != expected_privacy):
             raise DotEventError("source_project_privacy_mismatch")
+        expected_project_owner = policy.get("project_owner_gid")
+        if (expected_project_owner is not None and
+                str((observed_project.get("owner") or {}).get("gid")) !=
+                str(expected_project_owner)):
+            raise DotEventError("source_project_owner_mismatch")
 
     @staticmethod
     def _verify_source(task, project, owner, name, creator):

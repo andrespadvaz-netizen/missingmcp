@@ -91,8 +91,10 @@ de creación hasta resolver la discrepancia. Los demás proyectos no se bloquean
 `owner_gid` es el responsable humano de la tarea; no tiene que ser el dueño
 del proyecto. Por defecto, el proyecto debe ser privado y pertenecer al
 workspace fijado.
-`project_owner_gid` puede fijarse por separado para una futura autorización
-de despachos; si falta, el control de destino también bloquea ese despacho.
+`project_owner_gid` se fija por separado para autorizar despachos; si falta,
+el control de destino bloquea ese despacho.
+Cuando está configurado, el Gateway vuelve a comprobar el Owner real antes
+de crear la tarea humana y antes de despachar al agente.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
