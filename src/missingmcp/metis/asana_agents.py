@@ -338,7 +338,20 @@ class AsanaAgents:
         await self.task(task_gid)
         return [story async for story in self._pages(
             f"/tasks/{_gid(task_gid)}/stories",
-            params={"opt_fields": "gid,created_at,resource_subtype,text,created_by.gid"})]
+            params={"opt_fields": "gid,created_at,resource_subtype,text,created_by.gid,is_edited"})]
+
+    async def subtasks(self, task_gid: str):
+        """Read direct child identifiers; do not infer their creator from UI text."""
+        await self.task(task_gid)
+        return [child async for child in self._pages(
+            f"/tasks/{_gid(task_gid)}/subtasks",
+            params={"opt_fields": "gid,parent.gid"})]
+
+    async def subtask_detail(self, task_gid: str):
+        body = await self._request("GET", f"/tasks/{_gid(task_gid)}", params={
+            "opt_fields": "gid,name,notes,workspace.gid,parent.gid,assignee.gid,"
+                          "created_by.gid,created_at,modified_at,completed"})
+        return body.get("data")
 
     async def reconcile_handoff(self, key: str, project_gid: str, agent_gid: str):
         """Check Asana after an uncertain POST; never issue another POST."""

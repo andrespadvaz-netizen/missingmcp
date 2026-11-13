@@ -195,11 +195,28 @@ activo. No se ha realizado ningún despacho pagado de prueba.
 ## Propuesta y revisión
 
 Si ya existe un encargo autorizado, `task.proposal` registra el GID de un
-comentario no vacío de su agente en Asana como propuesta pendiente. Luego
-una persona con `owner_gid` deja un comentario exactamente `METIS_APPROVE`
-o `METIS_REJECT` después de la propuesta; `task.review` verifica su autor,
-fecha y secuencia y registra el comentario,
-la decisión y el revisor. La propuesta no aprueba ni cierra la tarea humana.
+comentario no vacío de su agente en Asana como propuesta pendiente. También
+acepta `subtask_gid` para un único borrador en una subtarea directa del
+encargo: verifica el vínculo, workspace, responsable humano, estado abierto,
+contenido no vacío y huella del contenido. Si Asana devuelve `created_by`
+nulo para esa subtarea, el registro dice `actor_unavailable`: **no afirma que
+la API haya probado la autoría del agente**. Un creador distinto del agente
+se rechaza. La subtarea debe permanecer sin cambios desde antes del comentario
+humano de revisión.
+
+Una persona con `owner_gid` deja en el encargo un comentario exactamente
+`METIS_APPROVE` o `METIS_REJECT` después de la propuesta. `task.review`
+verifica autor, fecha, orden, tarea humana todavía abierta y asignada a esa
+persona, y registra GID de borrador, huella, GID de comentario, decisión y
+revisor. Un actor anónimo solo admite una aprobación **humana del artefacto
+vinculado**, nunca una atribución verificada al agente. La propuesta y la
+finalización del encargo del agente no aprueban ni cierran la tarea humana.
+Con GID sintéticos, los eventos de registro son
+`{"type":"task.proposal","task_gid":"300","subtask_gid":"302"}` y después
+`{"type":"task.review","task_gid":"300","story_gid":"400"}`. Si el
+borrador cambia después del comentario humano, la revisión queda pendiente:
+el responsable debe revisar de nuevo y dejar un comentario posterior. Un
+reintento de estos eventos no vuelve a despachar ni consume otra solicitud.
 
 Para revertir la entrada, retire la política o desconecte el emisor. Conserve
 los libros SQLite y los GID para no perder deduplicación ni trazabilidad.

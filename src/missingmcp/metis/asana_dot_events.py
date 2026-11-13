@@ -30,7 +30,8 @@ class DotEvents:
             agent_gid TEXT, proposal_gid TEXT,
             review_state TEXT NOT NULL DEFAULT 'NONE', evidence_gid TEXT,
             reviewer_gid TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
-        for column in ("agent_gid", "proposal_gid"):
+        for column in ("agent_gid", "proposal_gid", "proposal_kind",
+                       "proposal_fingerprint", "proposal_provenance"):
             if column not in {r[1] for r in self.db.execute("PRAGMA table_info(asana_dot_decisions)")}:
                 self.db.execute(f"ALTER TABLE asana_dot_decisions ADD COLUMN {column} TEXT")
         self.db.execute("""CREATE TABLE IF NOT EXISTS asana_dot_sources (
@@ -338,50 +339,153 @@ class DotEvents:
         return {"action": "created", "reason": "review_pending",
                 "target_gid": str(target["gid"])}
 
-    async def propose(self, client, source_gid: str, story_gid: str):
+    @staticmethod
+    def _story_time(value):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise DotEventError("review_chronology_unverified") from exc
+        if parsed.tzinfo is None:
+            raise DotEventError("review_chronology_unverified")
+        return parsed
+
+    @staticmethod
+    async def _subtask_evidence(client, target_gid: str, agent_gid: str,
+                                owner_gid: str, subtask_gid: str):
+        target = await client.task(target_gid)
+        if (str((target.get("assignee") or {}).get("gid")) != agent_gid or
+                {str(p.get("gid")) for p in target.get("projects", ())} !=
+                set(client.allowed_projects)):
+            raise DotEventError("proposal_target_agent_changed")
+        children = await client.subtasks(target_gid)
+        if (len(children) != 1 or
+                str(children[0].get("gid")) != subtask_gid):
+            raise DotEventError("proposal_subtask_ambiguous")
+        task = await client.subtask_detail(subtask_gid)
+        if (not isinstance(task, Mapping) or
+                str(task.get("gid")) != subtask_gid or
+                str((task.get("workspace") or {}).get("gid")) != client.workspace_gid or
+                str((task.get("parent") or {}).get("gid")) != target_gid or
+                str((task.get("assignee") or {}).get("gid")) != owner_gid or
+                task.get("completed") is not False or
+                not isinstance(task.get("name"), str) or
+                not task["name"].strip() or
+                not isinstance(task.get("notes"), str) or
+                not task["notes"].strip()):
+            raise DotEventError("proposal_subtask_invalid")
+        creator = str((task.get("created_by") or {}).get("gid") or "")
+        if creator and creator != agent_gid:
+            raise DotEventError("proposal_creator_mismatch")
+        created = DotEvents._story_time(task.get("created_at"))
+        modified = DotEvents._story_time(task.get("modified_at"))
+        if modified < created:
+            raise DotEventError("proposal_chronology_invalid")
+        fingerprint = hashlib.sha256(json.dumps(
+            {"gid": subtask_gid, "name": task["name"], "notes": task["notes"]},
+            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        return created, modified, fingerprint, ("agent_gid" if creator else
+                                                "actor_unavailable")
+
+    async def propose(self, client, source_gid: str, story_gid: str | None = None,
+                      *, subtask_gid: str | None = None, owner_gid: str | None = None):
         row = self.db.execute("SELECT * FROM asana_dot_decisions WHERE source_gid=?",
                               (source_gid,)).fetchone()
         if row is None or row["review_state"] != "PENDING" or not row["agent_gid"]:
             raise DotEventError("proposal_not_pending")
-        stories = await client.stories(row["target_gid"])
-        matches = [s for s in stories if str(s.get("gid")) == story_gid]
-        if (len(matches) != 1 or
-                str((matches[0].get("created_by") or {}).get("gid")) != row["agent_gid"] or
-                not (matches[0].get("text") or "").strip()):
-            raise DotEventError("proposal_evidence_invalid")
-        if row["proposal_gid"] not in (None, story_gid):
+        if (story_gid is None) == (subtask_gid is None):
+            raise DotEventError("proposal_evidence_type_invalid")
+        if subtask_gid is not None:
+            if (not isinstance(owner_gid, str) or not owner_gid.isdigit() or
+                    not isinstance(subtask_gid, str) or not subtask_gid.isdigit()):
+                raise DotEventError("proposal_evidence_type_invalid")
+            _, _, fingerprint, provenance = await self._subtask_evidence(
+                client, row["target_gid"], row["agent_gid"], owner_gid,
+                subtask_gid)
+            evidence_gid, kind = subtask_gid, "subtask"
+        else:
+            stories = await client.stories(row["target_gid"])
+            matches = [s for s in stories if str(s.get("gid")) == story_gid]
+            if (len(matches) != 1 or
+                    str((matches[0].get("created_by") or {}).get("gid")) != row["agent_gid"] or
+                    not (matches[0].get("text") or "").strip() or
+                    matches[0].get("resource_subtype") not in (None, "comment_added") or
+                    matches[0].get("is_edited") is True):
+                raise DotEventError("proposal_evidence_invalid")
+            fingerprint = hashlib.sha256(matches[0]["text"].encode()).hexdigest()
+            provenance = "agent_gid"
+            evidence_gid, kind = story_gid, "story"
+        if row["proposal_gid"] not in (None, evidence_gid):
             raise DotEventError("proposal_conflict")
-        self.db.execute("UPDATE asana_dot_decisions SET proposal_gid=? "
-                        "WHERE source_gid=? AND proposal_gid IS NULL", (story_gid, source_gid))
-        return {"review_state": "PENDING", "proposal_gid": story_gid}
+        if row["proposal_gid"] is not None:
+            if ((row["proposal_kind"] or "story") != kind or
+                    row["proposal_fingerprint"] not in (None, fingerprint)):
+                raise DotEventError("proposal_conflict")
+        else:
+            changed = self.db.execute(
+                "UPDATE asana_dot_decisions SET proposal_gid=?,proposal_kind=?,"
+                "proposal_fingerprint=?,proposal_provenance=? "
+                "WHERE source_gid=? AND proposal_gid IS NULL AND review_state='PENDING'",
+                (evidence_gid, kind, fingerprint, provenance, source_gid)).rowcount
+            if not changed:
+                raise DotEventError("proposal_race")
+        return {"review_state": "PENDING", "proposal_gid": evidence_gid,
+                "proposal_kind": kind, "proposal_provenance": provenance}
 
     async def review(self, client, source_gid: str, story_gid: str, reviewer_gid: str):
         row = self.db.execute("SELECT * FROM asana_dot_decisions WHERE source_gid=?",
                               (source_gid,)).fetchone()
         if row is None or row["review_state"] != "PENDING" or not row["proposal_gid"]:
             raise DotEventError("review_not_pending")
+        human = await client.task(source_gid)
+        if (str((human.get("assignee") or {}).get("gid")) != reviewer_gid or
+                human.get("completed") is not False or
+                {str(p.get("gid")) for p in human.get("projects", ())} !=
+                set(client.allowed_projects)):
+            raise DotEventError("human_source_changed")
         stories = await client.stories(row["target_gid"])
         matches = [s for s in stories if str(s.get("gid")) == story_gid]
-        if len(matches) != 1 or str((matches[0].get("created_by") or {}).get("gid")) != reviewer_gid:
+        if (len(matches) != 1 or
+                str((matches[0].get("created_by") or {}).get("gid")) != reviewer_gid or
+                matches[0].get("resource_subtype") not in (None, "comment_added") or
+                matches[0].get("is_edited") is True):
             raise DotEventError("reviewer_or_evidence_invalid")
         text = (matches[0].get("text") or "").strip()
         if text not in ("METIS_APPROVE", "METIS_REJECT"):
             raise DotEventError("review_decision_invalid")
-        proposals = [s for s in stories if str(s.get("gid")) == row["proposal_gid"]]
-        try:
-            proposal_at = datetime.fromisoformat(proposals[0]["created_at"].replace("Z", "+00:00"))
-            review_at = datetime.fromisoformat(matches[0]["created_at"].replace("Z", "+00:00"))
-            if review_at <= proposal_at:
-                raise DotEventError("review_precedes_proposal")
-        except (IndexError, KeyError, TypeError, ValueError) as exc:
-            raise DotEventError("review_chronology_unverified") from exc
+        review_at = self._story_time(matches[0].get("created_at"))
+        if row["proposal_kind"] == "subtask":
+            created, modified, fingerprint, provenance = await self._subtask_evidence(
+                client, row["target_gid"], row["agent_gid"], reviewer_gid,
+                row["proposal_gid"])
+            if (fingerprint != row["proposal_fingerprint"] or
+                    provenance != row["proposal_provenance"] or
+                    modified > review_at):
+                raise DotEventError("proposal_changed_after_review")
+            proposal_at = created
+        else:
+            proposals = [s for s in stories if str(s.get("gid")) == row["proposal_gid"]]
+            if (len(proposals) != 1 or
+                    str((proposals[0].get("created_by") or {}).get("gid")) != row["agent_gid"] or
+                    proposals[0].get("resource_subtype") not in (None, "comment_added") or
+                    proposals[0].get("is_edited") is True):
+                raise DotEventError("proposal_evidence_invalid")
+            if (row["proposal_fingerprint"] and
+                    hashlib.sha256((proposals[0].get("text") or "").encode()).hexdigest()
+                    != row["proposal_fingerprint"]):
+                raise DotEventError("proposal_changed_after_review")
+            proposal_at = self._story_time(proposals[0].get("created_at"))
+        if review_at <= proposal_at:
+            raise DotEventError("review_precedes_proposal")
         state = "APPROVED" if text == "METIS_APPROVE" else "REJECTED"
         self.db.execute("UPDATE asana_dot_decisions SET review_state=?,evidence_gid=?,"
                         "reviewer_gid=? WHERE source_gid=? AND review_state='PENDING'",
                         (state, story_gid, reviewer_gid, source_gid))
         if not self.db.execute("SELECT changes()").fetchone()[0]:
             raise DotEventError("review_race")
-        return {"review_state": state, "evidence_gid": story_gid}
+        return {"review_state": state, "evidence_gid": story_gid,
+                "proposal_gid": row["proposal_gid"],
+                "proposal_kind": row["proposal_kind"] or "story",
+                "proposal_provenance": row["proposal_provenance"] or "agent_gid"}
 
     async def reconcile(self, client, source_gid: str, project_gid: str, context: str):
         """Resolve an uncertain event only from a uniquely observed Asana task."""

@@ -147,7 +147,9 @@ def build_app(config: Config) -> Starlette:
                     policy["owner_gid"])
             elif body.get("type") == "task.proposal":
                 result = await dot_events.propose(
-                    client, body["task_gid"], body["story_gid"])
+                    client, body["task_gid"], body.get("story_gid"),
+                    subtask_gid=body.get("subtask_gid"),
+                    owner_gid=policy["owner_gid"])
             elif body.get("type") == "task.reconcile":
                 result = await dot_events.reconcile(
                     client, body["task_gid"], project, policy["context"])

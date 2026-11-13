@@ -28,14 +28,15 @@ def registered(events):
     return events
 
 
-def client(creator="55", project="200", assignee="44", stories=None):
+def client(creator="55", project="200", assignee="44", stories=None,
+           completed=False):
     def handler(request):
         if request.url.path.endswith("/stories"):
             return httpx.Response(200, json={"data": stories or []})
         return httpx.Response(200, json={"data": {
             "gid": "300", "name": "Research task", "workspace": {"gid": "100"},
             "created_by": {"gid": creator}, "projects": [{"gid": project}],
-            "assignee": {"gid": assignee}, "completed": False}})
+            "assignee": {"gid": assignee}, "completed": completed}})
     return AsanaAgents("token", "100", {"200": "SHOKKO"},
                        allowed_agent_gids={"200": "11"},
                        transport=httpx.MockTransport(handler))
@@ -324,6 +325,9 @@ async def test_human_story_controls_review(tmp_path):
                            "text": "METIS_APPROVE"}, proposal])
     with pytest.raises(DotEventError, match="review_not_pending"):
         await events.review(bad, "300", "400", "44")
+    with pytest.raises(DotEventError, match="proposal_evidence_invalid"):
+        await events.propose(client(stories=[proposal | {"created_by": None}]),
+                             "300", "399")
     assert (await events.propose(bad, "300", "399"))["review_state"] == "PENDING"
     with pytest.raises(DotEventError, match="reviewer_or_evidence_invalid"):
         await events.review(bad, "300", "400", "44")
@@ -332,12 +336,198 @@ async def test_human_story_controls_review(tmp_path):
                              "text": "METIS_APPROVE"}, proposal])
     with pytest.raises(DotEventError, match="review_precedes_proposal"):
         await events.review(early, "300", "400", "44")
-    good = client(stories=[{"gid": "400", "created_by": {"gid": "44"},
-                            "created_at": "2026-11-09T12:01:00Z",
-                            "text": "METIS_REJECT"}, proposal])
+    good_stories = [{"gid": "400", "created_by": {"gid": "44"},
+                     "created_at": "2026-11-09T12:01:00Z",
+                     "text": "METIS_REJECT"}, proposal]
+    good = client(stories=good_stories)
+    with pytest.raises(DotEventError, match="human_source_changed"):
+        await events.review(client(stories=good_stories, completed=True),
+                            "300", "400", "44")
     assert (await events.review(good, "300", "400", "44"))["review_state"] == "REJECTED"
     with pytest.raises(DotEventError, match="review_not_pending"):
         await events.review(good, "300", "400", "44")
+
+
+@pytest.mark.asyncio
+async def test_anonymous_agent_subtask_requires_human_review_without_claiming_authorship(tmp_path):
+    events = DotEvents(str(tmp_path / "events.db"))
+    events.record("300", "a" * 64, "created", "review_pending", "301", "11")
+    subtask = {"gid": "302", "name": "Draft for review", "notes": "Three synthetic hypotheses",
+               "workspace": {"gid": "100"}, "parent": {"gid": "301"},
+               "assignee": {"gid": "44"}, "created_by": None,
+               "completed": False, "created_at": "2026-11-09T12:00:00Z",
+               "modified_at": "2026-11-09T12:01:00Z"}
+    stories = [{"gid": "400", "created_by": {"gid": "44"},
+                "resource_subtype": "comment_added", "is_edited": False,
+                "created_at": "2026-11-09T12:02:00Z", "text": "METIS_APPROVE"}]
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/tasks/301/subtasks"):
+            return httpx.Response(200, json={"data": [{"gid": "302", "parent": {"gid": "301"}}]})
+        if path.endswith("/tasks/302"):
+            return httpx.Response(200, json={"data": subtask})
+        if path.endswith("/tasks/301/stories"):
+            return httpx.Response(200, json={"data": stories})
+        return httpx.Response(200, json={"data": {
+            "gid": path.rsplit("/", 1)[-1], "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}], "assignee": {"gid": "11" if path.endswith("/301") else "44"},
+            "completed": path.endswith("/301")}})
+
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    proposal = await events.propose(asana, "300", subtask_gid="302", owner_gid="44")
+    assert proposal == {"review_state": "PENDING", "proposal_gid": "302",
+                        "proposal_kind": "subtask", "proposal_provenance": "actor_unavailable"}
+    assert await events.propose(asana, "300", subtask_gid="302", owner_gid="44") == proposal
+    decision = await events.review(asana, "300", "400", "44")
+    assert decision == {"review_state": "APPROVED", "evidence_gid": "400",
+                        "proposal_gid": "302", "proposal_kind": "subtask",
+                        "proposal_provenance": "actor_unavailable"}
+    assert tuple(events.db.execute(
+        "SELECT proposal_gid,evidence_gid,reviewer_gid,review_state FROM asana_dot_decisions"
+    ).fetchone()) == ("302", "400", "44", "APPROVED")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed,reason", [
+    ({"parent": {"gid": "999"}}, "proposal_subtask_invalid"),
+    ({"assignee": {"gid": "99"}}, "proposal_subtask_invalid"),
+    ({"notes": ""}, "proposal_subtask_invalid"),
+    ({"created_by": {"gid": "44"}}, "proposal_creator_mismatch"),
+])
+async def test_subtask_proposal_rejects_wrong_scope_or_empty_artifact(tmp_path, changed, reason):
+    events = DotEvents(str(tmp_path / "events.db"))
+    events.record("300", "a" * 64, "created", "review_pending", "301", "11")
+    subtask = {"gid": "302", "name": "Draft", "notes": "Evidence",
+               "workspace": {"gid": "100"}, "parent": {"gid": "301"},
+               "assignee": {"gid": "44"}, "created_by": None,
+               "completed": False, "created_at": "2026-11-09T12:00:00Z",
+               "modified_at": "2026-11-09T12:01:00Z"} | changed
+
+    def handler(request):
+        if request.url.path.endswith("/tasks/301/subtasks"):
+            return httpx.Response(200, json={"data": [{"gid": "302"}]})
+        if request.url.path.endswith("/tasks/302"):
+            return httpx.Response(200, json={"data": subtask})
+        return httpx.Response(200, json={"data": {
+            "gid": "301", "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}], "assignee": {"gid": "11"}}})
+
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    with pytest.raises(DotEventError, match=reason):
+        await events.propose(asana, "300", subtask_gid="302", owner_gid="44")
+    assert events.db.execute(
+        "SELECT proposal_gid FROM asana_dot_decisions").fetchone()[0] is None
+
+
+@pytest.mark.asyncio
+async def test_subtask_modified_after_approval_comment_remains_pending(tmp_path):
+    events = DotEvents(str(tmp_path / "events.db"))
+    events.record("300", "a" * 64, "created", "review_pending", "301", "11")
+    subtask = {"gid": "302", "name": "Draft", "notes": "Evidence",
+               "workspace": {"gid": "100"}, "parent": {"gid": "301"},
+               "assignee": {"gid": "44"}, "created_by": None,
+               "completed": False, "created_at": "2026-11-09T12:00:00Z",
+               "modified_at": "2026-11-09T12:01:00Z"}
+    stories = [{"gid": "400", "created_by": {"gid": "44"},
+                "resource_subtype": "comment_added", "is_edited": False,
+                "created_at": "2026-11-09T12:02:00Z", "text": "METIS_APPROVE"}]
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/tasks/301/subtasks"):
+            return httpx.Response(200, json={"data": [{"gid": "302"}]})
+        if path.endswith("/tasks/302"):
+            return httpx.Response(200, json={"data": subtask})
+        if path.endswith("/tasks/301/stories"):
+            return httpx.Response(200, json={"data": stories})
+        return httpx.Response(200, json={"data": {
+            "gid": path.rsplit("/", 1)[-1], "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}],
+            "assignee": {"gid": "11" if path.endswith("/301") else "44"},
+            "completed": False}})
+
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        transport=httpx.MockTransport(handler))
+    await events.propose(asana, "300", subtask_gid="302", owner_gid="44")
+    subtask["modified_at"] = "2026-11-09T12:03:00Z"
+    with pytest.raises(DotEventError, match="proposal_changed_after_review"):
+        await events.review(asana, "300", "400", "44")
+    assert events.db.execute(
+        "SELECT review_state FROM asana_dot_decisions").fetchone()[0] == "PENDING"
+
+
+def test_authenticated_review_accepts_verified_subtask_and_human_comment(tmp_path, monkeypatch):
+    import json
+    import missingmcp.app as app_module
+    from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth
+
+    monkeypatch.setenv("ASANA_METIS_DOT_POLICY_JSON", json.dumps(POLICY))
+    monkeypatch.setenv("ASANA_AGENT_PROFILES_JSON", json.dumps(PROFILES))
+    cfg = load_config({"GATEWAY_SECRET": "g" * 40, "DATA_DIR": str(tmp_path),
+                       "DB_PATH": str(tmp_path / "gateway.db"),
+                       "PUBLIC_URL": "https://gateway.example.com",
+                       "METIS_BRIDGE_URL": "https://script.google.com/macros/s/synthetic/exec",
+                       "METIS_BRIDGE_SECRET": "b" * 40, "METIS_OPERATOR_KEY": "m" * 40,
+                       "ASANA_DISPATCH_CLIENT_ID": "123456789",
+                       "ASANA_DISPATCH_CLIENT_SECRET": "c" * 40,
+                       "ASANA_DISPATCH_SETUP_KEY": "s" * 40})
+    events = DotEvents(cfg.db_path)
+    events.db.execute("INSERT INTO asana_dot_sources"
+                      "(idem,fingerprint,state,task_gid,project_gid) "
+                      "VALUES ('synthetic-source-0001',?,'CREATED','300','200')",
+                      ("a" * 64,))
+    events.record("300", "a" * 64, "created", "review_pending", "301", "11")
+    events.db.close()
+    methods = []
+
+    def upstream(request):
+        methods.append(request.method)
+        path = request.url.path
+        if path.endswith("/tasks/301/subtasks"):
+            return httpx.Response(200, json={"data": [{"gid": "302"}]})
+        if path.endswith("/tasks/302"):
+            return httpx.Response(200, json={"data": {
+                "gid": "302", "name": "Draft", "notes": "Synthetic evidence",
+                "workspace": {"gid": "100"}, "parent": {"gid": "301"},
+                "assignee": {"gid": "44"}, "created_by": None,
+                "completed": False, "created_at": "2026-11-09T12:00:00Z",
+                "modified_at": "2026-11-09T12:01:00Z"}})
+        if path.endswith("/tasks/301/stories"):
+            return httpx.Response(200, json={"data": [{
+                "gid": "400", "created_by": {"gid": "44"},
+                "resource_subtype": "comment_added", "is_edited": False,
+                "created_at": "2026-11-09T12:02:00Z", "text": "METIS_APPROVE"}]})
+        return httpx.Response(200, json={"data": {
+            "gid": path.rsplit("/", 1)[-1], "workspace": {"gid": "100"},
+            "projects": [{"gid": "200"}],
+            "assignee": {"gid": "11" if path.endswith("/301") else "44"},
+            "completed": path.endswith("/301")}})
+
+    original = AsanaAgents
+    monkeypatch.setattr(app_module, "AsanaAgents", lambda *args, **kwargs:
+                        original(*args, **kwargs, transport=httpx.MockTransport(upstream)))
+
+    async def access_token(_self):
+        return "synthetic-token"
+
+    monkeypatch.setattr(AsanaDispatchOAuth, "access_token", access_token)
+    api = TestClient(build_app(cfg))
+    headers = {"Authorization": "Bearer " + "m" * 40}
+    assert api.post("/asana-dot/event", json={"type": "task.proposal",
+                    "task_gid": "300", "subtask_gid": "302"}).status_code == 401
+    proposed = api.post("/asana-dot/event", json={"type": "task.proposal",
+                        "task_gid": "300", "subtask_gid": "302"}, headers=headers)
+    assert proposed.status_code == 200, proposed.text
+    assert proposed.json()["proposal_provenance"] == "actor_unavailable"
+    reviewed = api.post("/asana-dot/event", json={"type": "task.review",
+                        "task_gid": "300", "story_gid": "400"}, headers=headers)
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()["review_state"] == "APPROVED"
+    assert reviewed.json()["proposal_kind"] == "subtask"
+    assert set(methods) == {"GET"}
 
 
 def test_event_endpoint_requires_existing_metis_credential(tmp_path, monkeypatch):
