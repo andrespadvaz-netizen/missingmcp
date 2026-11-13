@@ -104,6 +104,10 @@ del Gateway. Solo hace GET de proyectos y muestra GID, nombre, privacidad,
 Owner y equipo de los activos pendientes, más los GID registrados que ya no
 aparecen activos. Esos datos son candidatos para revisión, nunca autorización
 automática. No lee tareas, secretos, memorias ni cuentas ajenas.
+Si un proyecto que el administrador ve en Asana no aparece en el listado del
+workspace, `--probe GID` hace un GET directo y muestra si el OAuth puede
+leerlo y si pertenece al workspace configurado. Un `403` o `404` no autoriza
+ampliar el acceso: el proyecto sigue sin acciones.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
