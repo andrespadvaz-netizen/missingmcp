@@ -112,6 +112,17 @@ ampliar el acceso: el proyecto sigue sin acciones.
 salieron en la lista del workspace. También es lectura; si un equipo no es
 accesible o la API no ofrece ese inventario, indica el bloqueo sin agregarlo
 a la política.
+Para preparar una actualización en lote, `scripts/asana_prepare_scope_policy.py`
+acepta contextos y GID explícitos con `--add CONTEXT:GID[,GID]` y GID
+archivados con `--retire GID ...`. Antes de producir un JSON candidato,
+consulta cada proyecto por GID y verifica workspace, estado activo o archivado,
+privacidad y Owner. Todo proyecto nuevo queda **solo con tareas humanas**:
+`agent_gids`, `routing`, `specialties` y `eligible_task_names` vacíos. El
+candidato se guarda con permisos de archivo restringidos en
+`/tmp/asana_policy_candidate.json`; el script no edita Railway ni Asana.
+Se debe revisar el resumen y el JSON antes de reemplazar la variable del
+servicio. Si la política o el proyecto cambian mientras tanto, volver a
+generar y revisar el candidato.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
