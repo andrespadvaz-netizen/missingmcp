@@ -23,16 +23,18 @@ def _login_failed(adapter, reason: str) -> None:
 
 def metadata(config, adapter) -> dict:
     base = f"{config.public_url}/{adapter.name}"
-    return {
+    value = {
         "issuer": base,
         "authorization_endpoint": f"{base}/oauth/authorize",
         "token_endpoint": f"{base}/oauth/token",
-        "registration_endpoint": f"{base}/oauth/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["client_secret_post"],
     }
+    if not getattr(adapter, "static_oauth_client", False):
+        value["registration_endpoint"] = f"{base}/oauth/register"
+    return value
 
 
 def protected_resource_metadata(config, adapter) -> dict:
@@ -45,6 +47,8 @@ def protected_resource_metadata(config, adapter) -> dict:
 
 
 async def register_client(request, conn, adapter) -> JSONResponse:
+    if getattr(adapter, "static_oauth_client", False):
+        return JSONResponse({"error": "registration_not_supported"}, status_code=403)
     body = await security.read_body_limited(request)
     if body is None:
         return JSONResponse({"error": "request too large"}, status_code=413)
@@ -178,10 +182,14 @@ def _oauth_params_from(source) -> dict:
     }
 
 
+def _authorization_proof_valid(params: dict, adapter) -> bool:
+    return params["code_challenge_method"] == "S256" and bool(params["code_challenge"])
+
+
 async def authorize_get(request, adapter, state, conn, config) -> HTMLResponse | RedirectResponse:
     params = _oauth_params_from(request.query_params)
     client = store.get_client(conn, params["client_id"])
-    if client is None:
+    if client is None or client["adapter"] != adapter.name:
         # Claude/ChatGPT cache their DCR registration per org — when it's gone
         # (orphan sweep, DB reset), every retry dead-ends here until the user
         # re-adds the connector (which re-registers). Say so, and log it:
@@ -196,7 +204,7 @@ async def authorize_get(request, adapter, state, conn, config) -> HTMLResponse |
             status_code=400)
     if not security.validate_redirect_uri(params["redirect_uri"], client["redirect_uris"]):
         return HTMLResponse("invalid redirect_uri", status_code=400)
-    if params["code_challenge_method"] != "S256" or not params["code_challenge"]:
+    if not _authorization_proof_valid(params, adapter):
         return HTMLResponse("PKCE S256 required", status_code=400)
     if is_upstream_oauth(adapter):
         # No form of ours: stash Claude's OAuth params (same one-time TTL stash
@@ -271,7 +279,7 @@ async def authorize_post(request, adapter, state, conn, config) -> HTMLResponse 
             return HTMLResponse("MFA session expired, please start over", status_code=400)
         pending, params = popped
         client = store.get_client(conn, params["client_id"])
-        if client is None or not security.validate_redirect_uri(params["redirect_uri"], client["redirect_uris"]):
+        if client is None or client["adapter"] != adapter.name or not security.validate_redirect_uri(params["redirect_uri"], client["redirect_uris"]):
             return HTMLResponse("invalid client/redirect_uri", status_code=400)
         try:
             log("mfa-resume-start", mfa_len=len(form.get("mfa_code", "")))
@@ -321,7 +329,9 @@ async def authorize_post(request, adapter, state, conn, config) -> HTMLResponse 
     # login step
     params = _oauth_params_from(form)
     client = store.get_client(conn, params["client_id"])
-    if client is None or not security.validate_redirect_uri(params["redirect_uri"], client["redirect_uris"]):
+    if (client is None or client["adapter"] != adapter.name
+            or not security.validate_redirect_uri(params["redirect_uri"], client["redirect_uris"])
+            or not _authorization_proof_valid(params, adapter)):
         return HTMLResponse("invalid client/redirect_uri", status_code=400)
     try:
         log("login-start", email=adapter.login_hint(form))
@@ -387,23 +397,28 @@ async def token_exchange(request, conn, config) -> JSONResponse:
     ):
         log_error("token-invalid-client", client_known=client is not None)
         return JSONResponse({"error": "invalid_client"}, status_code=401)
+    if client["adapter"] == "metis-asana" and form.get("client_id") != config.asana_mcp_client_id:
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
     row = store.consume_code(conn, store.hash_token(form.get("code", "")))
     if row is None:
         log_error("token-invalid-grant", reason="code_not_found_or_expired")
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
-    if row["client_id"] != form.get("client_id") or row["redirect_uri"] != form.get("redirect_uri"):
+    if (row["client_id"] != form.get("client_id") or row["redirect_uri"] != form.get("redirect_uri")
+            or row["adapter"] != client["adapter"]):
         log_error("token-invalid-grant", reason="client_or_redirect_mismatch")
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
-    if not security.verify_pkce(form.get("code_verifier", ""), row["code_challenge"], row["code_challenge_method"]):
+    pkce_valid = security.verify_pkce(form.get("code_verifier", ""), row["code_challenge"], row["code_challenge_method"])
+    if not pkce_valid:
         log_error("token-invalid-grant", reason="pkce_mismatch")
         return JSONResponse({"error": "invalid_grant"}, status_code=400)
     token = security.new_secret(32)
+    ttl = 30 * 86400 if row["adapter"] == "metis-asana" else config.access_token_ttl
     store.create_access_token(conn, store.hash_token(token), row["adapter"], row["account_key"],
-                              form.get("client_id"), ttl=config.access_token_ttl)
+                              form.get("client_id"), ttl=ttl)
     log("token-issued", account_key=row["account_key"])
     resp = {"access_token": token, "token_type": "Bearer"}
-    if config.access_token_ttl:
-        resp["expires_in"] = config.access_token_ttl
+    if ttl:
+        resp["expires_in"] = ttl
     return JSONResponse(resp)
 
 
@@ -431,7 +446,7 @@ async def authorize_callback(request, adapter, state, conn, config) -> HTMLRespo
                                "This sign-in link expired — go back to Claude and try connecting again.")
     _pending, params = popped
     client = store.get_client(conn, params["client_id"])
-    if client is None or not security.validate_redirect_uri(params["redirect_uri"],
+    if client is None or client["adapter"] != adapter.name or not security.validate_redirect_uri(params["redirect_uri"],
                                                             client["redirect_uris"]):
         return HTMLResponse("invalid client/redirect_uri", status_code=400)
     if q.get("error") or not q.get("code"):

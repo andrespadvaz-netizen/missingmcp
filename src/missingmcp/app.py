@@ -8,7 +8,7 @@ import re
 import urllib.parse
 from pathlib import Path
 from starlette.applications import Starlette
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 from starlette.middleware.base import BaseHTTPMiddleware
 from . import backup, report, store, oauth, pages, proxy, security, telemetry
@@ -18,6 +18,9 @@ from .adapters import build_adapters, RETIRED_ADAPTERS
 from .adapters.base import is_remote, is_local, is_upstream_oauth
 from .log import log
 from .metis.transport import LensContextBridgeError
+from .metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
+from .metis.asana_agents import AsanaAgents, AsanaError
+from .metis.asana_dot_events import DotEvents, DotEventError
 from .health_os.persistence import HealthOSRepository
 from datetime import datetime, timezone
 
@@ -56,6 +59,11 @@ def build_app(config: Config) -> Starlette:
     conn = store.init_db(config.db_path)
     telemetry.init(config)   # no-op without POSTHOG_API_KEY
     adapters = build_adapters(config)
+    if "metis-asana" in adapters:
+        store.provision_static_client(
+            conn, config.asana_mcp_client_id,
+            store.hash_token(config.asana_mcp_client_secret),
+            "https://app.asana.com/-/integrations/oauth/callback", "metis-asana")
     # One WorkerManager per worker-based adapter; remote and local adapters need none.
     # NOTE: managers share one port range, one DATA_DIR/users/<key> namespace and
     # one workers.json snapshot — safe while garmin is the only worker-based
@@ -70,6 +78,151 @@ def build_app(config: Config) -> Starlette:
     bk = backup.Backup(config)
     dr = report.DailyReport(config)
     health_os = HealthOSRepository(conn, config.gateway_secret, config.health_os_timezone) if config.health_os_ingest_key else None
+    asana_dispatch = (AsanaDispatchOAuth(config)
+                      if config.asana_dispatch_client_id else None)
+    # Explicitly disabled until an operator supplies the Metis-only policy.
+    dot_policy_raw = os.environ.get("ASANA_METIS_DOT_POLICY_JSON", "")
+    agent_profiles_raw = os.environ.get("ASANA_AGENT_PROFILES_JSON", "")
+    dot_events_enabled = bool(dot_policy_raw and agent_profiles_raw)
+
+    async def asana_dot_event(request):
+        if not dot_events_enabled or not asana_dispatch or not config.metis_operator_key:
+            return JSONResponse({"status": "UNAVAILABLE"}, status_code=404)
+        supplied = request.headers.get("authorization", "")
+        if not hmac.compare_digest(supplied, "Bearer " + config.metis_operator_key):
+            return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
+        raw = await security.read_body_limited(request, max_bytes=12_000)
+        if raw is None:
+            return JSONResponse({"status": "INVALID"}, status_code=413)
+        dot_events = None
+        client = None
+        try:
+            dot_events = DotEvents(config.db_path)
+            body = json.loads(raw)
+            from .metis.asana_dot_policy import load_dot_policy, select_scope
+            _, _, scopes, profiles = load_dot_policy(
+                dot_policy_raw, agent_profiles_raw,
+                os.environ.get("ASANA_AGENT_PROJECTS_JSON", ""))
+            if not isinstance(body, dict):
+                raise ValueError("invalid_event")
+            event_type = body.get("type")
+            if event_type == "task.create":
+                brief = body.get("brief")
+                project_gid = brief.get("project_gid") if isinstance(brief, dict) else None
+            elif event_type == "task.source_reconcile":
+                project_gid = dot_events.source_project(
+                    idempotency_key=body.get("idempotency_key"))
+            else:
+                project_gid = dot_events.source_project(task_gid=body.get("task_gid"))
+            if project_gid is None and len(scopes) == 1:
+                # Legacy ledger entries predate the project_gid column.
+                project_gid = next(iter(scopes))
+            policy = select_scope(scopes, project_gid)
+            project = policy["project_gid"]
+            client = AsanaAgents(
+                await asana_dispatch.access_token(), policy["workspace_gid"],
+                {project: policy["context"]},
+                allowed_agent_gids={project: policy["agent_gids"]}
+                if policy["agent_gids"] else {},
+                expected_project_owner_gids=({project: policy["project_owner_gid"]}
+                                             if policy.get("project_owner_gid") else {}),
+                expected_project_privacies={project: policy.get("privacy_setting", "private")},
+                ledger_path=config.db_path, handoff_ledger_path=config.db_path)
+            if body.get("type") == "task.create":
+                task = await dot_events.create_source(client, body, policy)
+                decision = await dot_events.created(
+                    client, {"type": "task.created", "task_gid": str(task["gid"]),
+                             "brief": body.get("brief")}, policy, profiles, dispatch=True)
+                result = {"source_task_gid": str(task["gid"]), "evaluation": decision}
+            elif body.get("type") == "task.source_reconcile":
+                task = await dot_events.reconcile_source(
+                    client, body["idempotency_key"], policy)
+                result = {"source_task_gid": str(task["gid"]), "state": "CREATED"}
+            elif body.get("type") == "task.created":
+                result = await dot_events.created(client, body, policy, profiles,
+                                                  dispatch=True)
+            elif body.get("type") == "task.review":
+                result = await dot_events.review(
+                    client, body["task_gid"], body["story_gid"],
+                    policy["owner_gid"])
+            elif body.get("type") == "task.proposal":
+                result = await dot_events.propose(
+                    client, body["task_gid"], body.get("story_gid"),
+                    subtask_gid=body.get("subtask_gid"),
+                    owner_gid=policy["owner_gid"])
+            elif body.get("type") == "task.reconcile":
+                result = await dot_events.reconcile(
+                    client, body["task_gid"], project, policy["context"])
+            else:
+                return JSONResponse({"status": "INVALID"}, status_code=400)
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
+        except (ValueError, KeyError, TypeError, AsanaError, DotEventError,
+                DispatchAuthError, json.JSONDecodeError) as exc:
+            # Codes only; no event body, token, source text or upstream response.
+            return JSONResponse({"status": "BLOCKED", "reason": str(exc)[:80]},
+                                status_code=409)
+        finally:
+            if client is not None:
+                if client.ledger is not None:
+                    client.ledger.close()
+                if client.handoffs is not None:
+                    client.handoffs.close()
+            if dot_events is not None:
+                dot_events.db.close()
+
+    async def asana_dispatch_setup(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        return HTMLResponse(
+            '<!doctype html><html lang="es"><meta charset="utf-8">'
+            '<title>Conectar despacho Asana</title><body>'
+            '<h1>Conectar despacho Asana</h1>'
+            '<form method="post" action="/asana-dispatch/oauth/start">'
+            '<label>Clave de configuración <input type="password" name="setup_key" required></label>'
+            '<button type="submit">Conectar con Asana</button></form></body></html>',
+            headers={"Cache-Control": "no-store"})
+
+    async def asana_dispatch_start(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        ip = request.client.host if request.client else "unknown"
+        if not rate.check(f"asana-dispatch-start:{ip}", 5, 3600):
+            return PlainTextResponse("Too many attempts", status_code=429)
+        raw = await security.read_body_limited(request, max_bytes=2048)
+        if raw is None:
+            return PlainTextResponse("Too large", status_code=413)
+        form = urllib.parse.parse_qs(raw.decode("utf-8", "replace"))
+        try:
+            url = asana_dispatch.begin(form.get("setup_key", [""])[0])
+        except DispatchAuthError:
+            return PlainTextResponse("Unauthorized", status_code=403)
+        response = RedirectResponse(url, status_code=303,
+                                    headers={"Cache-Control": "no-store"})
+        state = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["state"][0]
+        response.set_cookie("asana_dispatch_state", store.hash_token(state),
+                            max_age=600, httponly=True, secure=True, samesite="lax")
+        return response
+
+    async def asana_dispatch_callback(request):
+        if asana_dispatch is None:
+            return PlainTextResponse("Not found", status_code=404)
+        if request.query_params.get("error"):
+            return PlainTextResponse("Asana authorization was declined", status_code=400)
+        state = request.query_params.get("state", "")
+        cookie = request.cookies.get("asana_dispatch_state", "")
+        if (not cookie or not hmac.compare_digest(cookie, store.hash_token(state))):
+            return PlainTextResponse("Asana authorization failed", status_code=400,
+                                     headers={"Cache-Control": "no-store"})
+        try:
+            await asana_dispatch.complete(state,
+                                          request.query_params.get("code", ""))
+        except DispatchAuthError:
+            return PlainTextResponse("Asana authorization failed", status_code=400,
+                                     headers={"Cache-Control": "no-store"})
+        response = PlainTextResponse("Asana dispatch connected for Andrés.",
+                                     headers={"Cache-Control": "no-store"})
+        response.delete_cookie("asana_dispatch_state", secure=True, samesite="lax")
+        return response
 
     def _health_os_authorized(request):
         return health_os is not None and hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + config.health_os_ingest_key)
@@ -475,6 +628,10 @@ def build_app(config: Config) -> Starlette:
         Route("/subscribe", subscribe, methods=["POST"]),
         Route("/suggest", suggest, methods=["POST"]),
         Route("/healthz", healthz, methods=["GET"]),
+        Route("/asana-dispatch/oauth/setup", asana_dispatch_setup, methods=["GET"]),
+        Route("/asana-dispatch/oauth/start", asana_dispatch_start, methods=["POST"]),
+        Route("/asana-dispatch/oauth/callback", asana_dispatch_callback, methods=["GET"]),
+        Route("/asana-dot/event", asana_dot_event, methods=["POST"]),
         Route("/metis/lens-context", metis_lens_context, methods=["POST"]),
         Route("/health-os/ingest", health_os_ingest, methods=["POST"]),
         Route("/health-os/quality", health_os_quality, methods=["GET"]),

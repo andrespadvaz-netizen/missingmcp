@@ -53,11 +53,20 @@ class Config:
     metis_lens_context_key: str = ""
     metis_openai_api_key: str = ""
     metis_anthropic_api_key: str = ""
-    metis_openai_model: str = "gpt-5"
+    metis_openai_model: str = "gpt-6.1-sol"
     metis_anthropic_model: str = "claude-sonnet-5"
     metis_direct_audit_timeout: int = 180
     health_os_ingest_key: str = ""
     health_os_timezone: str = "America/Mexico_City"
+    # Asana External MCP is a separate, single-person OAuth resource.
+    asana_mcp_client_id: str = ""
+    asana_mcp_client_secret: str = ""
+    asana_mcp_andres_key: str = ""
+    # Outbound Asana OAuth is separate from the inbound External MCP client.
+    asana_dispatch_client_id: str = ""
+    asana_dispatch_client_secret: str = ""
+    asana_dispatch_setup_key: str = ""
+    asana_dispatch_full_permissions: bool = False
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -76,9 +85,40 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     metis = [env.get(name, "") for name in
              ("METIS_BRIDGE_URL", "METIS_BRIDGE_SECRET", "METIS_OPERATOR_KEY")]
     metis_lens_context_key = env.get("METIS_LENS_CONTEXT_KEY", "")
+    asana_mcp_client_id = env.get("ASANA_MCP_CLIENT_ID", "")
+    asana_mcp_client_secret = env.get("ASANA_MCP_CLIENT_SECRET", "")
+    asana_mcp_andres_key = env.get("ASANA_MCP_ANDRES_KEY", "")
+    dispatch_id = env.get("ASANA_DISPATCH_CLIENT_ID", "")
+    dispatch_secret = env.get("ASANA_DISPATCH_CLIENT_SECRET", "")
+    dispatch_setup = env.get("ASANA_DISPATCH_SETUP_KEY", "")
+    if any((dispatch_id, dispatch_secret, dispatch_setup)):
+        if (not public_url.startswith("https://") or
+                not dispatch_id.isdigit() or len(dispatch_secret) < 32 or
+                len(dispatch_setup) < 32 or
+                len({dispatch_secret, dispatch_setup, secret}) != 3):
+            raise ValueError("Asana dispatch requires HTTPS and three distinct credentials")
+    if any((asana_mcp_client_id, asana_mcp_client_secret, asana_mcp_andres_key)):
+        import re
+        if not public_url.startswith("https://"):
+            raise ValueError("Asana MCP requires a public HTTPS URL")
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", asana_mcp_client_id)
+                or len(asana_mcp_client_secret) < 32 or len(asana_mcp_andres_key) < 32):
+            raise ValueError("Asana MCP requires a client ID and two secrets of at least 32 characters")
+        other_secrets = [secret, *[m for m in metis[1:] if m],
+                         *([metis_lens_context_key] if metis_lens_context_key else [])]
+        if len(set([asana_mcp_client_secret, asana_mcp_andres_key, *other_secrets])) != 2 + len(other_secrets):
+            raise ValueError("Asana MCP secrets must be distinct from Gateway and Metis secrets")
+    if dispatch_id and any(dispatch_secret == item or dispatch_setup == item for item in
+                           (asana_mcp_client_secret, asana_mcp_andres_key,
+                            metis[1], metis[2], metis_lens_context_key)
+                           if item):
+        raise ValueError("Asana dispatch secrets must be distinct from existing secrets")
     metis_openai_api_key = env.get("METIS_OPENAI_API_KEY", "")
+    metis_openai_model = env.get("METIS_OPENAI_MODEL", "gpt-6.1-sol")
     metis_anthropic_api_key = env.get("METIS_ANTHROPIC_API_KEY", "")
     health_os_ingest_key = env.get("HEALTH_OS_INGEST_KEY", "")
+    if health_os_ingest_key and asana_mcp_client_id and health_os_ingest_key in {asana_mcp_client_secret, asana_mcp_andres_key}:
+        raise ValueError("Asana MCP secrets must be distinct from Health OS secret")
     health_os_timezone = env.get("HEALTH_OS_TIMEZONE", "America/Mexico_City")
     try:
         ZoneInfo(health_os_timezone)
@@ -109,9 +149,16 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         metis_bridge_secret=metis[1],
         metis_operator_key=metis[2],
         metis_lens_context_key=metis_lens_context_key,
+        asana_mcp_client_id=asana_mcp_client_id,
+        asana_mcp_client_secret=asana_mcp_client_secret,
+        asana_mcp_andres_key=asana_mcp_andres_key,
+        asana_dispatch_client_id=dispatch_id,
+        asana_dispatch_client_secret=dispatch_secret,
+        asana_dispatch_setup_key=dispatch_setup,
+        asana_dispatch_full_permissions=env.get("ASANA_DISPATCH_FULL_PERMISSIONS", "").lower() == "true",
         metis_openai_api_key=metis_openai_api_key,
         metis_anthropic_api_key=metis_anthropic_api_key,
-        metis_openai_model=env.get("METIS_OPENAI_MODEL", "gpt-5"),
+        metis_openai_model=metis_openai_model,
         metis_anthropic_model=env.get("METIS_ANTHROPIC_MODEL", "claude-sonnet-5"),
         metis_direct_audit_timeout=max(30, min(300, int(env.get("METIS_DIRECT_AUDIT_TIMEOUT", "180")))),
         health_os_ingest_key=health_os_ingest_key,
