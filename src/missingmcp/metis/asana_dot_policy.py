@@ -54,7 +54,14 @@ def load_dot_policy(raw: str, profiles_raw: str,
                              "audiences", "sources", "eligible_task_names",
                              "routing", "specialties", "agent_gids"}):
         raise DotPolicyError("invalid_project_defaults")
+    cross_context = config.get("cross_context_agent_gids", [])
+    if (not isinstance(cross_context, list) or
+            any(_gid(gid) not in profiles for gid in cross_context) or
+            len(cross_context) != len(set(cross_context))):
+        raise DotPolicyError("invalid_cross_context_agents")
+    cross_context = set(cross_context)
     scopes = {}
+    agent_contexts = {}
     for project_gid, entry in projects.items():
         project_gid = _gid(project_gid)
         if not isinstance(entry, Mapping):
@@ -93,9 +100,15 @@ def load_dot_policy(raw: str, profiles_raw: str,
             raise DotPolicyError("invalid_agent_routing")
         agent_gids = scope.get("agent_gids", list(profiles) if not multi else [])
         if (not isinstance(agent_gids, list) or
-                any(_gid(gid) not in profiles for gid in agent_gids)):
+                any(_gid(gid) not in profiles for gid in agent_gids) or
+                len(agent_gids) != len(set(agent_gids))):
             raise DotPolicyError("invalid_agent_allowlist")
         scope["agent_gids"] = agent_gids
+        for agent_gid in agent_gids:
+            prior = agent_contexts.get(agent_gid)
+            if prior is not None and prior != context and agent_gid not in cross_context:
+                raise DotPolicyError("agent_cross_context_forbidden")
+            agent_contexts[agent_gid] = context
         if (project_gid in legacy_projects and
                 legacy_projects[project_gid] != context):
             scope["action_blocked_reason"] = "project_context_conflict"

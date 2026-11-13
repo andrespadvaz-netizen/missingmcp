@@ -65,6 +65,24 @@ def test_registry_rejects_broadened_audience_and_unapproved_agents():
         load_dot_policy(json.dumps(policy), "{}")
 
 
+def test_agent_requires_explicit_cross_context_exception():
+    profile = {"99": {"specialties": ["research"],
+                      "contexts": ["SHOKKO", "ANDREA"],
+                      "audiences": ["project_members", "workspace"],
+                      "dot_authorized": True}}
+    policy = registry()
+    policy["projects"]["200"]["agent_gids"] = ["99"]
+    policy["projects"]["201"]["agent_gids"] = ["99"]
+    with pytest.raises(DotPolicyError, match="agent_cross_context_forbidden"):
+        load_dot_policy(json.dumps(policy), json.dumps(profile))
+    policy["cross_context_agent_gids"] = ["99"]
+    _, _, scopes, _ = load_dot_policy(json.dumps(policy), json.dumps(profile))
+    assert scopes["200"]["agent_gids"] == scopes["201"]["agent_gids"] == ["99"]
+    policy["cross_context_agent_gids"] = ["99", "99"]
+    with pytest.raises(DotPolicyError, match="invalid_cross_context_agents"):
+        load_dot_policy(json.dumps(policy), json.dumps(profile))
+
+
 def test_conflicting_existing_project_context_blocks_only_that_project():
     _, _, scopes, _ = load_dot_policy(
         json.dumps(registry()), "{}", json.dumps({"201": "SHOKKO"}))
