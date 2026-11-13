@@ -131,9 +131,14 @@ una ruta ausente o una elección ambigua de agente.
 
 ## Costo compartido y admisión de encargos
 
-La consola real de Venture Quest informa **50 solicitudes adicionales por
-ciclo, MXN 11 cada una, máximo MXN 550**, compartidas entre Dash y los
-agentes. El conector disponible no permite leer ni reservar el saldo global.
+La consola de administración informa un cupo de solicitudes incluidas y,
+por separado, **50 solicitudes adicionales de pago por ciclo, MXN 11 cada
+una, máximo MXN 550**. Asana consume primero las incluidas. La cantidad
+incluida puede cambiar por plan o ciclo; no es el límite de gasto. La tabla
+por agente y el contador general pueden discrepar, por lo que ninguno se
+usa como saldo verificable. Tampoco se ha verificado desde el conector si
+Dash comparte exactamente ese contador. El conector disponible no permite
+leer ni reservar el saldo global.
 La pantalla de administración «Gestionar el uso bajo demanda» muestra que
 Asana tiene activo «Establece un límite de gasto» en 50 solicitudes por ciclo
 y afirma que dejará de ejecutar solicitudes al llegar a ese límite. Es un
@@ -141,8 +146,8 @@ tope aplicado por Asana a la cuenta, no una lectura automática disponible
 para el Gateway; puede cambiarse en la consola. Las solicitudes bajo demanda
 empiezan después de agotar las incluidas y prepagadas.
 
-El administrador aprobó conservar el límite global de Asana de 50 solicitudes
-y MXN 550 por ciclo, compartido con Dash, y aceptar que Asana rechace
+El administrador aprobó conservar el límite bajo demanda de Asana de 50
+solicitudes adicionales y MXN 550 por ciclo, y aceptar que Asana rechace
 encargos cuando se agote. El Gateway **no conoce el saldo restante** ni puede
 contar las solicitudes internas que un solo encargo de agente consumirá. Por
 ello no traduce encargos a pesos ni presenta un contador local como saldo
@@ -152,12 +157,13 @@ acotado de intentos de encargo durante el ciclo.
 Para habilitar esa admisión, el administrador debe comprobar que el límite
 en Asana sigue activo y configurar `ASANA_AI_SHARED_LIMIT_JSON` fuera del
 repositorio. La declaración incluye workspace, GID del administrador,
-fechas del ciclo, 50 solicitudes, MXN 11 por solicitud, MXN 550, confirmación
-de aplicación por Asana y un `gateway_handoff_limit` de 1 a 50 para **todos**
+fechas del ciclo, número de solicitudes incluidas, límite de **50 adicionales
+de pago**, MXN 11 por solicitud, MXN 550, confirmación de aplicación por
+Asana y un `gateway_handoff_limit` de 1 a 50 para **todos**
 los agentes del Gateway, no un presupuesto individual. Ejemplo sintético:
 
 ```json
-{"workspace_gid":"100","operator_gid":"55","cycle_start":"2026-11-05","cycle_end":"2026-12-05","provider_cap_requests":50,"provider_cap_mxn":550,"price_per_request_mxn":11,"provider_cap_enforced":true,"gateway_handoff_limit":10}
+{"workspace_gid":"100","operator_gid":"55","cycle_start":"2026-11-05","cycle_end":"2026-12-05","included_requests_per_cycle":100,"paid_additional_cap_requests":50,"paid_additional_cap_mxn":550,"paid_additional_price_per_request_mxn":11,"paid_additional_cap_enforced":true,"gateway_handoff_limit":10}
 ```
 
 Si falta la declaración, no corresponde al workspace o administrador, el
@@ -165,7 +171,9 @@ ciclo terminó o los importes exceden los aprobados, el despacho queda
 bloqueado. La reserva SQLite de cada encargo ocurre antes del POST y es
 atómica ante concurrencia; una respuesta incierta conserva el cupo y exige
 conciliación sin repetir el POST. Los cupos no se reembolsan automáticamente.
-La declaración del administrador no sustituye una API de saldo: si Dash gasta
+La declaración del administrador no sustituye una API de saldo: el cupo
+incluido es metadato y no se convierte en saldo disponible; el límite local
+cuenta intentos de encargo, no solicitudes consumidas. Si otros usos gastan
 entre la comprobación y el despacho, Asana puede rechazarlo. Ante cambios del
 límite en la consola, retire o actualice la declaración antes de continuar.
 La creación de la tarea humana es independiente del despacho pagado. La
@@ -176,10 +184,10 @@ La [especificación pública de Asana](https://github.com/Asana/openapi/blob/e5c
 documenta `GET /workspaces/{workspace_gid}/ai_studio/runs`, restringido a
 cuentas de servicio de organizaciones con AI Studio. Devuelve créditos de
 ejecuciones de reglas de AI Studio. No demuestra el saldo de solicitudes
-adicionales de AI Teammates compartido con Dash; no se usa para levantar el
-bloqueo.
+adicionales de AI Teammates ni si Dash comparte ese contador; no se usa para
+levantar el bloqueo.
 
-Una API oficial de saldo o un contador compartido con Dash permitirían decidir
+Una API oficial de saldo del mismo cupo que usa AI Teammates permitiría decidir
 antes de cada encargo si queda cuota. El mecanismo actual acepta explícitamente
 la posibilidad de rechazo por Asana y depende de que su límite global permanezca
 activo. No se ha realizado ningún despacho pagado de prueba.

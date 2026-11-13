@@ -20,8 +20,11 @@ def attestation():
     return {"workspace_gid": "100", "operator_gid": "55",
             "cycle_start": (today - timedelta(days=1)).isoformat(),
             "cycle_end": (today + timedelta(days=1)).isoformat(),
-            "provider_cap_requests": 50, "provider_cap_mxn": 550,
-            "price_per_request_mxn": 11, "provider_cap_enforced": True,
+            "included_requests_per_cycle": 100,
+            "paid_additional_cap_requests": 50,
+            "paid_additional_cap_mxn": 550,
+            "paid_additional_price_per_request_mxn": 11,
+            "paid_additional_cap_enforced": True,
             "gateway_handoff_limit": 1}
 
 
@@ -30,14 +33,26 @@ def test_attestation_is_server_scoped_and_cycle_bound():
     assert load_attestation(json.dumps(valid), workspace_gid="100",
                             operator_gid="55") == valid
     for changed in ({"workspace_gid": "101"}, {"operator_gid": "56"},
-                    {"provider_cap_requests": 51}, {"provider_cap_mxn": 551},
-                    {"provider_cap_enforced": False},
+                    {"included_requests_per_cycle": -1},
+                    {"included_requests_per_cycle": True},
+                    {"paid_additional_cap_requests": 51},
+                    {"paid_additional_cap_mxn": 551},
+                    {"paid_additional_cap_enforced": False},
                     {"gateway_handoff_limit": 51}):
         with pytest.raises(SpendGateError, match="shared_quota_attestation_invalid"):
             load_attestation(json.dumps(valid | changed), workspace_gid="100",
                              operator_gid="55")
     with pytest.raises(SpendGateError, match="shared_quota_unavailable"):
         load_attestation("", workspace_gid="100", operator_gid="55")
+    old_ambiguous = valid | {"provider_cap_requests": 50}
+    with pytest.raises(SpendGateError, match="shared_quota_attestation_invalid"):
+        load_attestation(json.dumps(old_ambiguous), workspace_gid="100",
+                         operator_gid="55")
+    without_included = {key: value for key, value in valid.items()
+                        if key != "included_requests_per_cycle"}
+    with pytest.raises(SpendGateError, match="shared_quota_attestation_invalid"):
+        load_attestation(json.dumps(without_included), workspace_gid="100",
+                         operator_gid="55")
     expired = valid | {"cycle_end": valid["cycle_start"]}
     with pytest.raises(SpendGateError, match="shared_quota_cycle_inactive"):
         load_attestation(json.dumps(expired), workspace_gid="100",

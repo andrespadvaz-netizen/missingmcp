@@ -1,8 +1,9 @@
-"""Operator-attested Asana provider cap and durable handoff admission.
+"""Operator-attested Asana paid-additional cap and durable handoff admission.
 
-Asana enforces the shared monetary ceiling. This ledger limits this Gateway's
-handoff attempts; it is deliberately not presented as a measurement of Dash's
-remaining requests or as a per-agent budget.
+Included requests are recorded as plan metadata, not spent or reserved here.
+Asana enforces the paid-additional monetary ceiling after included requests
+are used. This ledger limits this Gateway's handoff attempts; it is not a
+measurement of anyone's remaining requests or a per-agent budget.
 """
 from __future__ import annotations
 
@@ -26,15 +27,18 @@ def load_attestation(raw: str, *, workspace_gid: str,
         raise SpendGateError("shared_quota_attestation_invalid") from exc
     if not isinstance(value, dict) or set(value) != {
             "workspace_gid", "operator_gid", "cycle_start", "cycle_end",
-            "provider_cap_requests", "provider_cap_mxn", "price_per_request_mxn",
-            "provider_cap_enforced", "gateway_handoff_limit"}:
+            "included_requests_per_cycle", "paid_additional_cap_requests",
+            "paid_additional_cap_mxn", "paid_additional_price_per_request_mxn",
+            "paid_additional_cap_enforced", "gateway_handoff_limit"}:
         raise SpendGateError("shared_quota_attestation_invalid")
     if (value["workspace_gid"] != workspace_gid or
             value["operator_gid"] != operator_gid or
-            value["provider_cap_requests"] != 50 or
-            value["provider_cap_mxn"] != 550 or
-            value["price_per_request_mxn"] != 11 or
-            value["provider_cap_enforced"] is not True or
+            type(value["included_requests_per_cycle"]) is not int or
+            value["included_requests_per_cycle"] < 0 or
+            value["paid_additional_cap_requests"] != 50 or
+            value["paid_additional_cap_mxn"] != 550 or
+            value["paid_additional_price_per_request_mxn"] != 11 or
+            value["paid_additional_cap_enforced"] is not True or
             type(value["gateway_handoff_limit"]) is not int or
             not 1 <= value["gateway_handoff_limit"] <= 50):
         raise SpendGateError("shared_quota_attestation_invalid")
