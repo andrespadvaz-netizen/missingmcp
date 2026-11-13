@@ -98,6 +98,12 @@ de crear la tarea humana y antes de despachar al agente.
 Los proyectos archivados permanecen visibles en el inventario cuando Asana
 los devuelve, pero el Gateway bloquea tanto la creación como el despacho si
 Asana no confirma `archived: false` en el proyecto de destino.
+Para comparar el registro con los proyectos activos visibles al OAuth del
+servicio, ejecutar `python scripts/asana_active_scope_audit.py` en la consola
+del Gateway. Solo hace GET de proyectos y muestra GID, nombre, privacidad,
+Owner y equipo de los activos pendientes, más los GID registrados que ya no
+aparecen activos. Esos datos son candidatos para revisión, nunca autorización
+automática. No lee tareas, secretos, memorias ni cuentas ajenas.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.
