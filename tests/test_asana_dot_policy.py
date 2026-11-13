@@ -112,11 +112,12 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
     def handler(request):
         calls.append(request.method)
         return httpx.Response(200, json={"data": [
-            {"gid": "200", "name": "Approved private", "privacy_setting": "private"},
-            {"gid": "202", "name": "Other private", "privacy_setting": "private"},
-            {"gid": "201", "name": "Workspace project", "privacy_setting": "public_to_workspace"},
+            {"gid": "200", "name": "Approved private", "privacy_setting": "private", "archived": False},
+            {"gid": "202", "name": "Other private", "privacy_setting": "private", "archived": False},
+            {"gid": "201", "name": "Workspace project", "privacy_setting": "public_to_workspace", "archived": False},
             {"gid": "203", "name": "Sales &amp; Channels", "privacy_setting": "public_to_workspace",
-             "owner": {"gid": "66"}, "team": {"gid": "77", "name": "Growth &amp; Marketing"}},
+             "archived": True, "owner": {"gid": "66"},
+             "team": {"gid": "77", "name": "Growth &amp; Marketing"}},
         ], "next_page": None})
 
     real_client = httpx.AsyncClient
@@ -134,6 +135,7 @@ async def test_discovery_filters_private_projects_and_never_writes(tmp_path, mon
         "project_owner_candidate_gid"] == "66"
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "name"] == "Sales & Channels"
+    assert next(p for p in result["projects"] if p["gid"] == "203")["archived"] is True
     assert next(p for p in result["projects"] if p["gid"] == "203")[
         "team_candidate_gid"] == "77"
     assert next(p for p in result["projects"] if p["gid"] == "203")[

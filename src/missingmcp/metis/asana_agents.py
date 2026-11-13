@@ -158,12 +158,13 @@ class AsanaAgents:
         if project_gid not in self.expected_project_owners:
             raise AsanaError("dispatch_owner_not_configured")
         body = await self._request("GET", f"/projects/{project_gid}",
-                                   params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting"})
+                                   params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting,archived"})
         project = body.get("data")
         if (not isinstance(project, dict) or str(project.get("gid")) != project_gid or
                 str((project.get("workspace") or {}).get("gid")) != self.workspace_gid or
                 project.get("privacy_setting") !=
                 self.expected_project_privacies.get(project_gid, "private") or
+                project.get("archived") is not False or
                 str((project.get("owner") or {}).get("gid")) !=
                 self.expected_project_owners[project_gid]):
             raise AsanaError("dispatch_project_not_private_or_owned")

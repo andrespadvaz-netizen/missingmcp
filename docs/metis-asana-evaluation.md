@@ -95,6 +95,9 @@ workspace fijado.
 el control de destino bloquea ese despacho.
 Cuando está configurado, el Gateway vuelve a comprobar el Owner real antes
 de crear la tarea humana y antes de despachar al agente.
+Los proyectos archivados permanecen visibles en el inventario cuando Asana
+los devuelve, pero el Gateway bloquea tanto la creación como el despacho si
+Asana no confirma `archived: false` en el proyecto de destino.
 Para un proyecto visible a todo el workspace, la política debe declarar
 explícitamente `privacy_setting: public_to_workspace` y solo la audiencia
 `workspace`; el Gateway comprueba ese valor real antes de crear la tarea.

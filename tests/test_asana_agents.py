@@ -10,7 +10,8 @@ def dispatch_metadata(request, *, privacy="private"):
     if request.url.path.endswith("/projects/200"):
         return httpx.Response(200, json={"data": {
             "gid": "200", "workspace": {"gid": "100"},
-            "owner": {"gid": "44"}, "privacy_setting": privacy}})
+            "owner": {"gid": "44"}, "privacy_setting": privacy,
+            "archived": False}})
     if request.url.path.endswith("/agents/11"):
         return httpx.Response(200, json={"data": {
             "gid": "11", "workspace": {"gid": "100"},
@@ -56,6 +57,23 @@ async def test_explicit_workspace_visibility_can_be_verified_for_agent_target():
     with pytest.raises(ValueError, match="Invalid project privacy mapping"):
         AsanaAgents("token", "100", {"200": "SHOKKO"},
                     expected_project_privacies={"200": "public"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("archived", [True, None])
+async def test_archived_or_unverified_project_cannot_receive_agent(archived):
+    def handler(request):
+        assert request.url.path.endswith("/projects/200")
+        return httpx.Response(200, json={"data": {
+            "gid": "200", "workspace": {"gid": "100"},
+            "owner": {"gid": "44"}, "privacy_setting": "private",
+            "archived": archived}})
+    asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
+                        allowed_agent_gids={"200": "11"},
+                        expected_project_owner_gids={"200": "44"},
+                        transport=httpx.MockTransport(handler))
+    with pytest.raises(AsanaError, match="dispatch_project_not_private_or_owned"):
+        await asana._verify_dispatch_target("200", "11")
 
 
 @pytest.mark.asyncio
@@ -134,7 +152,7 @@ async def test_team_dispatch_allows_distinct_agents_and_project_owners():
             return httpx.Response(200, json={"data": {
                 "gid": project, "workspace": {"gid": "100"},
                 "owner": {"gid": "44" if project == "200" else "45"},
-                "privacy_setting": "private"}})
+                "privacy_setting": "private", "archived": False}})
         if path.endswith("/agents/11") or path.endswith("/agents/12"):
             agent = path.rsplit("/", 1)[-1]
             return httpx.Response(200, json={"data": {

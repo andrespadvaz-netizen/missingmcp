@@ -198,7 +198,7 @@ class MetisAdapter:
         async with httpx.AsyncClient(timeout=20) as http:
             for _ in range(10):
                 params = {"limit": 100, "opt_fields":
-                          "gid,name,privacy_setting,owner.gid,team.gid,team.name"}
+                          "gid,name,privacy_setting,archived,owner.gid,team.gid,team.name"}
                 if offset:
                     params["offset"] = offset
                 response = await http.get(
@@ -221,6 +221,9 @@ class MetisAdapter:
                         continue
                     if not isinstance(privacy, str):
                         raise RequestError("asana_discovery_privacy_unverified")
+                    archived = item.get("archived")
+                    if not isinstance(archived, bool):
+                        raise RequestError("asana_discovery_archive_state_unverified")
                     owner = item.get("owner")
                     project_owner = str(owner.get("gid", "")) if isinstance(owner, dict) else ""
                     owner_candidate = project_owner if project_owner.isdigit() else None
@@ -235,10 +238,11 @@ class MetisAdapter:
                     if privacy == "public_to_workspace":
                         projects.append({"gid": gid, "name": display_name,
                                          "privacy_setting": privacy,
+                                         "archived": archived,
                                          "project_owner_candidate_gid": owner_candidate,
                                          "team_candidate_gid": team_candidate,
                                          "team_candidate_name": team_name,
-                                         "authorized": gid in scopes and
+                                         "authorized": not archived and gid in scopes and
                                          not scopes[gid].get("action_blocked_reason") and
                                          scopes[gid].get("privacy_setting") == privacy})
                     elif privacy == "private":
@@ -247,10 +251,11 @@ class MetisAdapter:
                                 os.environ.get("ASANA_WORKSPACE_ADMIN_DISCOVERY") == "true"):
                             projects.append({"gid": gid, "name": display_name,
                                              "privacy_setting": privacy,
+                                             "archived": archived,
                                              "project_owner_candidate_gid": owner_candidate,
                                              "team_candidate_gid": team_candidate,
                                              "team_candidate_name": team_name,
-                                             "authorized": gid in scopes and
+                                             "authorized": not archived and gid in scopes and
                                              not scopes[gid].get("action_blocked_reason") and
                                              scopes[gid].get("privacy_setting", "private") == privacy})
                         else:
