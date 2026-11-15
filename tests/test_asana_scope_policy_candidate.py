@@ -1,9 +1,18 @@
 """Synthetic checks for preparing a project policy without changing Asana."""
+import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
-from scripts.asana_prepare_scope_policy import make_candidate, parse_additions
+# Operator scripts are not an installed package. Load by path, as in
+# test_scripts.py, so the pytest console entry point works without PYTHONPATH.
+_path = Path(__file__).resolve().parents[1] / "scripts" / "asana_prepare_scope_policy.py"
+_spec = importlib.util.spec_from_file_location("asana_prepare_scope_policy", _path)
+_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_module)
+make_candidate = _module.make_candidate
+parse_additions = _module.parse_additions
 
 
 PROFILE = json.dumps({"99": {"specialties": ["research"],
