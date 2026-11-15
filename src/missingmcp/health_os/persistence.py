@@ -372,6 +372,10 @@ class HealthOSRepository:
                     self._assert_sleep_series_mode_current()
                     self._assert_activity_series_mode_current()
                     return self._scan_cache
+                # Drop an obsolete graph before building its replacement.
+                # Releasing this reference does not invalidate any caller's
+                # own reference, or bypass the data-version checks below.
+                self._invalidate()
                 scan = self._scan_uncached()
                 # If an external writer committed during the multi-query scan,
                 # try again rather than cache a mixed or obsolete view.
@@ -381,6 +385,8 @@ class HealthOSRepository:
                     self._scan_cache = scan
                     self._scan_cache_version = version
                     return scan
+                # A mixed-version scan is discarded before the next attempt.
+                del scan
 
     def _scan_uncached(self) -> tuple[HealthOS, list[dict[str, str]]]:
         """Load valid evidence and list every stored row that cannot count.

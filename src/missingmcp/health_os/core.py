@@ -249,6 +249,10 @@ class HealthOS:
         # offline import tools deterministic even on hosts without a zoneinfo DB.
         self.timezone = ZoneInfo(timezone) if isinstance(timezone, str) else timezone
         self._observations: dict[str, MetricObservation] = {}
+        # A scan otherwise retains fresh JSON copies of the same labels for
+        # every historical observation. This small, instance-local pool holds
+        # labels only, never provenance IDs, values, dates, or payloads.
+        self._observation_labels: dict[str, str] = {}
         self._sleep_series_start = sleep_series_start
         self._sleep_series_keys: set[str] = set()
         self._activity_series_start = activity_series_start
@@ -308,16 +312,28 @@ class HealthOS:
             raw += "|activity_series_2026_10_16"
         return sha256(raw.encode()).hexdigest()
 
+    def _shared_observation_label(self, value: str | None) -> str | None:
+        # Do not intern globally or retain arbitrary long/unbounded input.
+        # A full pool is an optimization miss, never an acceptance decision.
+        if type(value) is not str or len(value) > 128:
+            return value
+        if len(self._observation_labels) < 256:
+            return self._observation_labels.setdefault(value, value)
+        return self._observation_labels.get(value, value)
+
     def ingest_observations(self, observations: Iterable[MetricObservation]) -> IngestResult:
         result = IngestResult()
         for original in observations:
             try:
                 value, unit = _canonical_unit(original.metric, original.value, original.unit)
                 item = MetricObservation(
-                    metric=original.metric, value=value, unit=unit,
-                    observed_at=original.observed_at, source=original.source,
-                    provenance_id=original.provenance_id, semantic=original.semantic,
-                    confidence=original.confidence, device_source=original.device_source,
+                    metric=self._shared_observation_label(original.metric), value=value,
+                    unit=self._shared_observation_label(unit), observed_at=original.observed_at,
+                    source=self._shared_observation_label(original.source),
+                    provenance_id=original.provenance_id,
+                    semantic=self._shared_observation_label(original.semantic),
+                    confidence=self._shared_observation_label(original.confidence),
+                    device_source=self._shared_observation_label(original.device_source),
                 )
             except ValueError as exc:
                 result.rejected.append(str(exc))
