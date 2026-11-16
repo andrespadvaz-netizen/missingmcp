@@ -78,3 +78,42 @@ def test_staging_to_private_report_across_firmware_is_not_empty_or_ambiguous():
         assert catalog[metric]["excluded_unverified_days_28"]==0
     assert len([x for x in report["analysis"]["observed_daily"]
                 if x["metric"] in {"heart_rate","steps"}])==2
+
+
+def test_held_review_uses_bounded_interval_index_and_no_unrelated_scan(monkeypatch):
+    import missingmcp.health_os.tuanhdo_staging as staging
+    conn=sqlite3.connect(":memory:");conn.row_factory=sqlite3.Row
+    repo=HealthOSRepository(conn,"synthetic-key"*4,
+        activity_series_mode="active",activity_watch_identity=OLD)
+    selection={m:OLD for m in ["steps","distance","active_energy","exercise_time"]}
+    records=[]
+    for i in range(25):
+        item=sample("stepCount",10,"count")
+        item["startDate"]=(NOW+timedelta(minutes=2*i)).isoformat()
+        item["endDate"]=(NOW+timedelta(minutes=2*i+1)).isoformat()
+        records.append(item)
+    args=dict(approved_types=frozenset({"stepCount"}),additive_watch_selection=selection)
+    assert ingest_tuanhdo(repo,export(records),frozenset({OLD}),**args)["accepted"]==0
+    key=conn.execute("select batch_key from health_os_tuanhdo_batches").fetchone()[0]
+    calls=[]
+    original=staging._unknown_interval_metrics
+    def guard(repo,*,required_metrics):
+        calls.append(required_metrics)
+        assert not required_metrics
+        return original(repo,required_metrics=required_metrics)
+    monkeypatch.setattr(staging,"_unknown_interval_metrics",guard)
+    index_creations=[]
+    original_index=staging._AcceptedIntervals
+    class CountedIndex(original_index):
+        def __init__(self,*a,**kw):
+            index_creations.append(1)
+            super().__init__(*a,**kw)
+    monkeypatch.setattr(staging,"_AcceptedIntervals",CountedIndex)
+    traces=[]
+    conn.set_trace_callback(traces.append)
+    result=review_held_tuanhdo(repo,frozenset({OLD,NEW}),batch_key=key,**args)
+    conn.set_trace_callback(None)
+    assert result["promoted"]==25 and calls==[frozenset()]
+    interval_reads=[q for q in traces if q.startswith("SELECT interval_enc")]
+    assert len(interval_reads)<=1
+    assert len(index_creations)==1

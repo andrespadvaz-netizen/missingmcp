@@ -950,7 +950,28 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
         candidates = conn.execute(query + " AND batch_key=? ORDER BY rowid",
                                   (batch_key,)).fetchall()
         operation_id = _start_promotion_op(conn, batch_key, "held_review", approved_types)
-        unknown_intervals = _unknown_interval_metrics(repo)
+        # Match ordinary ingest: parse the selected batch once and scan only
+        # legacy metrics that can reach the legacy-interval guard.
+        batch = conn.execute(
+            "SELECT payload_enc FROM health_os_tuanhdo_batches WHERE batch_key=?",
+            (batch_key,),
+        ).fetchone()
+        payload = json.loads(store.decrypt(repo.data_key, batch["payload_enc"]))
+        parsed_batches[batch_key] = {
+            sample.record_index: sample for sample in _select_additive_watch(
+                parse_health_export(payload).samples, additive_watch_selection, approved_watch)
+        }
+        required_legacy_metrics = frozenset(
+            sample.metric for sample in parsed_batches[batch_key].values()
+            if sample.hold_reason == "source_unverified"
+            and sample.exported_type in approved_types
+            and sample.metric in _ADDITIVE
+            and not (sample.metric == "sleep_duration" and repo.sleep_series_start is not None)
+            and not (sample.metric in HealthOS.ACTIVITY_SERIES_METRICS
+                     and repo.activity_series_start is not None)
+        )
+        unknown_intervals = _unknown_interval_metrics(repo, required_metrics=required_legacy_metrics)
+        accepted_intervals = _AcceptedIntervals(repo)
         for row in candidates:
             batch_key = row["batch_key"]
             if batch_key not in parsed_batches:
@@ -973,8 +994,10 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
             outcome["reviewed"] += 1
             disposition, reason, core_event_key = _promote(
                 repo, sample, approved_watch, unknown_intervals, review=True,
-                approved_types=approved_types, derived_watch=derived_watch)
+                approved_types=approved_types, derived_watch=derived_watch,
+                accepted_intervals=accepted_intervals)
             if disposition == "accepted":
+                accepted_intervals.add(sample)
                 outcome["promoted"] += 1
                 if core_event_key is None:
                     raise ValueError("accepted record has no core event key")
