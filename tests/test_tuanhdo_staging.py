@@ -747,11 +747,17 @@ def test_additive_intervals_across_batches_hold_in_both_orders():
                      start + timedelta(hours=3), unit=unit)
         for before, after in ((first, second), (second, first)):
             repo = local_repo()
-            assert ingest_tuanhdo(repo, export([before], date="A"), approved)["accepted"] == 1
-            receipt = ingest_tuanhdo(repo, export([after], date="B"), approved)
+            # Activity now requires an explicitly selected source. Keep this
+            # overlap test focused on intervals, not the independent source gate.
+            def ingest_selected(payload):
+                return _ingest_tuanhdo(repo, payload, approved,
+                    approved_types=TEST_TYPES,
+                    additive_watch_selection={"steps": tuple(WATCH)})
+            assert ingest_selected(export([before], date="A"))["accepted"] == 1
+            receipt = ingest_selected(export([after], date="B"))
             assert receipt["accepted"] == 0 and receipt["reasons"] == {"interval_overlap_existing": 1}
             assert core_count(repo) == 1
-            assert ingest_tuanhdo(repo, export([after], date="B"), approved)["replayed"] is True
+            assert ingest_selected(export([after], date="B"))["replayed"] is True
             assert core_count(repo) == 1
 
 

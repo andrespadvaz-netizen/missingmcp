@@ -109,8 +109,19 @@ def _watch_match(sample: Sample, approved: WatchProvenance,
     return None
 
 
+def _approved_watch_versions(identity: tuple[str, str, str, str],
+                             approved: WatchProvenance) -> WatchProvenance:
+    """Keep the anchored series identity; allow only explicitly approved firmware.
+
+    Source, bundle and hardware model remain exact. No wildcard versions,
+    inferred approvals, or changes to the persisted series policy are made.
+    """
+    return frozenset(watch for watch in approved if watch[:3] == identity[:3])
+
+
 def _select_additive_watch(samples: tuple[Sample, ...],
-                           selection: AdditiveWatchSelection) -> tuple[Sample, ...]:
+                           selection: AdditiveWatchSelection,
+                           approved_watch: WatchProvenance = frozenset()) -> tuple[Sample, ...]:
     """Opt-in single-source series for activity; preserve all other holds.
 
     This does not reconcile pre-existing core rows with unknown intervals.
@@ -126,7 +137,7 @@ def _select_additive_watch(samples: tuple[Sample, ...],
         for index, sample in enumerate(samples):
             if sample.metric != metric:
                 continue
-            if _watch_match(sample, frozenset({identity}), frozenset()) == "device":
+            if _watch_match(sample, _approved_watch_versions(identity, approved_watch or frozenset({identity})), frozenset()) == "device":
                 chosen.append(index)
             elif sample.hold_reason in {"source_unverified", "quantity_overlap", "core_key_collision"}:
                 result[index] = replace(sample, hold_reason="source_not_selected")
@@ -329,7 +340,7 @@ def accepted_watch_identity_by_key(
         fields = (sample.source, sample.source_bundle_id,
                   detail.get("model"), detail.get("softwareVersion"))
         if match == "device":
-            identity = (fields if all(isinstance(value, str) and value for value in fields)
+            identity = (fields[:3] if all(isinstance(value, str) and value for value in fields)
                         else None)
         else:
             pair = fields[:2]
@@ -337,7 +348,7 @@ def accepted_watch_identity_by_key(
                                 if watch[:2] == pair and watch[2] == "Watch"]
             identity = (pair if item.metric in {"resting_heart_rate", "sleep_duration"}
                         and item.confidence == "watch_source_only"
-                        and len(matching_watches) == 1 else None)
+                        and len({watch[:3] for watch in matching_watches}) == 1 else None)
         if key in identities and identities[key] != identity:
             identities[key] = None
         else:
@@ -561,7 +572,7 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
     if (new_activity and repo.activity_series_mode == "active"
             and sample.exported_type in approved_types
             and sample.start_at >= repo.activity_series_start
-            and _watch_match(sample, frozenset({repo.activity_watch_identity}), frozenset()) == "device"
+            and _watch_match(sample, _approved_watch_versions(repo.activity_watch_identity, approved_watch), frozenset()) == "device"
             and crosses_local_day):
         return "held", "activity_crosses_local_day", None
     if sample.hold_reason != "source_unverified":
@@ -586,7 +597,7 @@ def _promote(repo: HealthOSRepository, sample: Sample, approved_watch: WatchProv
     if new_activity:
         if repo.activity_series_mode == "paused":
             return "held", "activity_series_paused", None
-        if _watch_match(sample, frozenset({repo.activity_watch_identity}), frozenset()) != "device":
+        if _watch_match(sample, _approved_watch_versions(repo.activity_watch_identity, approved_watch), frozenset()) != "device":
             return "held", "activity_source_not_selected", None
         if sample.start_at < repo.activity_series_start:
             return "held", ("activity_crosses_series_cut" if sample.end_at > repo.activity_series_start
@@ -804,7 +815,7 @@ def _ingest_tuanhdo_locked(repo: HealthOSRepository, payload: Mapping[str, Any],
             phases["commit_ms"] = round((perf_counter() - commit_start) * 1000, 3)
             return {**receipt, "replayed": True}
         samples = {sample.record_index: sample for sample in
-                   _select_additive_watch(parsed.samples, additive_watch_selection)}
+                   _select_additive_watch(parsed.samples, additive_watch_selection, approved_watch)}
         unknown_start = perf_counter()
         # Match the guards before legacy_interval_unknown in _promote. Current
         # series already ignore legacy intervals, while unapproved/held rows
@@ -949,7 +960,7 @@ def _review_held_tuanhdo_locked(repo: HealthOSRepository,
                 payload = json.loads(store.decrypt(repo.data_key, batch["payload_enc"]))
                 parsed_batches[batch_key] = {
                     sample.record_index: sample for sample in _select_additive_watch(
-                        parse_health_export(payload).samples, additive_watch_selection)
+                        parse_health_export(payload).samples, additive_watch_selection, approved_watch)
                 }
             sample = parsed_batches[batch_key].get(row["record_index"])
             if sample is None:
