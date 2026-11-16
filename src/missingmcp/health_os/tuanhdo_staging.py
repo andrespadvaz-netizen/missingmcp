@@ -299,7 +299,8 @@ def accepted_watch_identity_by_key(
 ) -> dict[str, tuple[str, ...] | None]:
     """Resolve approved Watch proof for linked, accepted core keys.
 
-    Exact device proof is a four-field identity. Device-optional resting heart
+    Exact device proof validates four fields then emits stable source/bundle/model.
+    Only explicitly approved firmware may share that identity. Device-optional resting heart
     rate and sleep stages may use an approved two-field derived source pair.
     Neither proof is included in the private response.
     """

@@ -46,3 +46,35 @@ def test_unknown_firmware_stays_held():
     repo = local_repo()
     assert ingest_tuanhdo(repo, export([sample("heartRate",60,"count/min")]),
         frozenset({OLD}), approved_types=frozenset({"heartRate"}))["accepted"] == 0
+
+
+def test_staging_to_private_report_across_firmware_is_not_empty_or_ambiguous():
+    from missingmcp.health_os.private_report import build_private_report
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+    repo = HealthOSRepository(conn, "synthetic-key"*4,
+        activity_series_mode="active", activity_watch_identity=OLD)
+    repo.set_apple_transition(NOW - timedelta(days=30))
+    selection = {m: OLD for m in ["steps","distance","active_energy","exercise_time"]}
+    approved = frozenset({OLD, NEW})
+    for version, offset in [("old",0),("new",10)]:
+        records=[]
+        for kind,value,unit in [("stepCount",10,"count"),("heartRate",60,"count/min")]:
+            item=sample(kind,value,unit)
+            item["startDate"]=(NOW+timedelta(minutes=offset)).isoformat()
+            item["endDate"]=(NOW+timedelta(minutes=offset+1)).isoformat()
+            item["deviceDetail"]["softwareVersion"]=version
+            records.append(item)
+        assert ingest_tuanhdo(repo,export(records,date=version),approved,
+            approved_types=frozenset({"stepCount","heartRate"}),
+            additive_watch_selection=selection)["accepted"] == 2
+    report_at=NOW+timedelta(days=1)
+    proof=accepted_watch_identity_by_key(repo,report_at,approved)
+    report=build_private_report(repo._load_health(report_at),report_at,
+        watch_identity_by_key=proof)
+    catalog={x["metric"]:x for x in report["catalog"]}
+    for metric in ["heart_rate","steps"]:
+        assert catalog[metric]["availability"]=="available"
+        assert catalog[metric]["valid_days_28"]==1
+        assert catalog[metric]["excluded_unverified_days_28"]==0
+    assert len([x for x in report["analysis"]["observed_daily"]
+                if x["metric"] in {"heart_rate","steps"}])==2

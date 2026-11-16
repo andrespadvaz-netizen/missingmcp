@@ -64,7 +64,10 @@ def _accepted_days(health: HealthOS, now: datetime,
         # Only an accepted, fingerprint-checked staging link can supply Watch
         # proof. A core-only row must not produce a number.
         identity = watch_identity_by_key.get(health._observation_key(item))
-        exact_watch = (isinstance(identity, tuple) and len(identity) == 4
+        # Stable three-field proof is emitted only after the staging layer
+        # validates an explicitly approved four-field firmware tuple. Accept
+        # legacy four-field proofs for compatibility, then normalize both.
+        exact_watch = (isinstance(identity, tuple) and len(identity) in (3, 4)
                        and identity[2] == "Watch")
         derived_watch = (isinstance(identity, tuple) and len(identity) == 2
                          and item.metric in {"resting_heart_rate", "sleep_duration"}
@@ -73,6 +76,8 @@ def _accepted_days(health: HealthOS, now: datetime,
                 or not all(isinstance(value, str) and value for value in identity)):
             unverified_days.add(metric_day)
             continue
+        if exact_watch:
+            identity = identity[:3]
         buckets[metric_day].append(item.value)
         methods[metric_day].add(item.confidence or "unspecified")
         identities[metric_day].add(identity)
@@ -215,11 +220,11 @@ def build_private_report(health: HealthOS, now: datetime, *,
                         "observed_episode_count_28": len(episodes)}
 
     recommendations = [
-        {"kind": "general_habit", "text": "Mantén horarios de descanso que te resulten sostenibles; registra cómo te sientes antes de interpretar cambios."},
+        {"kind": "general_habit", "text": "MantÃ©n horarios de descanso que te resulten sostenibles; registra cÃ³mo te sientes antes de interpretar cambios."},
     ]
     if any(row["status"] == "abstain" and row["metric"] in COMPARABLE
            for row in analyses):
-        recommendations.append({"kind": "general_planning", "text": "Deja margen para ajustar tus actividades según cómo te sientas; estos registros aún no sostienen una conclusión personal."})
+        recommendations.append({"kind": "general_planning", "text": "Deja margen para ajustar tus actividades segÃºn cÃ³mo te sientas; estos registros aÃºn no sostienen una conclusiÃ³n personal."})
     limitations = ["observed_days_are_not_full_day_coverage",
                    "night_completeness_unverifiable",
                    "no_medical_or_automatic_schedule_decision"]
