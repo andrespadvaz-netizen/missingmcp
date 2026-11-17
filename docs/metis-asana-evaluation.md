@@ -101,8 +101,13 @@ Asana no confirma `archived: false` en el proyecto de destino.
 Para comparar el registro con los proyectos activos visibles al OAuth del
 servicio, ejecutar `python scripts/asana_active_scope_audit.py` en la consola
 del Gateway. Solo hace GET de proyectos y muestra GID, nombre, privacidad,
-Owner y equipo de los activos pendientes, más los GID registrados que ya no
-aparecen activos. Esos datos son candidatos para revisión, nunca autorización
+Owner y equipo de los activos pendientes. Para cada GID registrado ausente
+del listado del workspace, hace un GET directo: informa
+`REGISTRADO_ACTIVO_DIRECTO` si Asana confirma que sigue activo, en el mismo
+workspace, con privacidad y Owner compatibles. Un GID inaccesible o sin
+metadatos suficientes queda `REGISTRADO_NO_VERIFICADO`; jamás se etiqueta
+inactivo solo por faltar en el listado general. Esos datos son candidatos
+para revisión, nunca autorización
 automática. No lee tareas, secretos, memorias ni cuentas ajenas.
 Si un proyecto que el administrador ve en Asana no aparece en el listado del
 workspace, `--probe GID` hace un GET directo y muestra si el OAuth puede

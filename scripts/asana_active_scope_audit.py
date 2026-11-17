@@ -18,6 +18,26 @@ from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth
 from missingmcp.metis.asana_dot_policy import load_dot_policy
 
 
+def registered_project_state(project, scope, workspace):
+    """Classify observed project authority without inferring it from listings."""
+    if not isinstance(project, dict) or str(project.get("gid")) != scope["project_gid"]:
+        return "NO_VERIFICADO"
+    if str((project.get("workspace") or {}).get("gid")) != workspace:
+        return "OTRO_WORKSPACE"
+    if project.get("archived") is True:
+        return "ARCHIVADO"
+    if project.get("archived") is not False:
+        return "NO_VERIFICADO"
+    if (project.get("privacy_setting") != scope.get("privacy_setting", "private") or
+            scope.get("action_blocked_reason")):
+        return "POLITICA_CONFLICTO"
+    expected_owner = scope.get("project_owner_gid")
+    if (expected_owner is not None and
+            str((project.get("owner") or {}).get("gid")) != expected_owner):
+        return "POLITICA_CONFLICTO"
+    return "ACTIVO"
+
+
 async def main(probe_gids=(), scan_teams=False):
     workspace, _, scopes, _ = load_dot_policy(
         os.environ["ASANA_METIS_DOT_POLICY_JSON"],
@@ -35,7 +55,7 @@ async def main(probe_gids=(), scan_teams=False):
     async with httpx.AsyncClient(timeout=20) as http:
         while True:
             params = {"limit": 100, "opt_fields":
-                      "gid,name,archived,privacy_setting,owner.gid,team.gid,team.name"}
+                      "gid,name,archived,privacy_setting,workspace.gid,owner.gid,team.gid,team.name"}
             if offset:
                 params["offset"] = offset
             response = await http.get(
@@ -116,6 +136,23 @@ async def main(probe_gids=(), scan_teams=False):
                 if exc.response.status_code not in (403, 404):
                     raise
                 print("TEAM_DISCOVERY_INACCESSIBLE", exc.response.status_code)
+        registered_states = {}
+        for gid in sorted(set(scopes) & set(active)):
+            registered_states[gid] = registered_project_state(
+                active[gid], scopes[gid], workspace)
+        for gid in sorted(set(scopes) - set(active)):
+            response = await http.get(
+                f"https://app.asana.com/api/1.0/projects/{gid}",
+                headers={"Authorization": "Bearer " + token},
+                params={"opt_fields":
+                        "gid,workspace.gid,owner.gid,privacy_setting,archived"})
+            if response.status_code in (403, 404):
+                registered_states[gid] = "SIN_ACCESO"
+                continue
+            response.raise_for_status()
+            project = response.json().get("data")
+            registered_states[gid] = registered_project_state(
+                project, scopes[gid], workspace)
         for gid in probe_gids:
             if not re.fullmatch(r"[0-9]+", gid):
                 raise ValueError("probe_gid_must_be_numeric")
@@ -141,10 +178,15 @@ async def main(probe_gids=(), scan_teams=False):
                 "team_name": (project.get("team") or {}).get("name")},
                 ensure_ascii=False))
     pending = sorted(set(active) - set(scopes))
-    inactive_registered = sorted(set(scopes) - set(active))
-    print("ACTIVOS", len(active), "PENDIENTES", len(pending),
+    direct_active = sorted(gid for gid in set(scopes) - set(active)
+                           if registered_states[gid] == "ACTIVO")
+    conflicts = sorted(gid for gid, state in registered_states.items()
+                       if state != "ACTIVO")
+    print("ACTIVOS_LISTADOS", len(active), "PENDIENTES_LISTADOS", len(pending),
+          "REGISTRADOS_ACTIVOS", len(scopes) - len(conflicts),
+          "REGISTRADOS_ACTIVOS_DIRECTOS", len(direct_active),
           "ARCHIVADOS_VISIBLES", archived_count,
-          "REGISTRADOS_NO_ACTIVOS", len(inactive_registered))
+          "REGISTRADOS_NO_VERIFICADOS", len(conflicts))
     for gid in pending:
         p = active[gid]
         print(json.dumps({
@@ -154,8 +196,10 @@ async def main(probe_gids=(), scan_teams=False):
             "team_gid": (p.get("team") or {}).get("gid"),
             "team_name": (p.get("team") or {}).get("name")},
             ensure_ascii=False))
-    for gid in inactive_registered:
-        print("REGISTRADO_NO_ACTIVO", gid)
+    for gid in direct_active:
+        print("REGISTRADO_ACTIVO_DIRECTO", gid)
+    for gid in conflicts:
+        print("REGISTRADO_" + registered_states[gid], gid)
 
 
 if __name__ == "__main__":
