@@ -117,6 +117,11 @@ ampliar el acceso: el proyecto sigue sin acciones.
 salieron en la lista del workspace. También es lectura; si un equipo no es
 accesible o la API no ofrece ese inventario, indica el bloqueo sin agregarlo
 a la política.
+`python scripts/asana_route_scope_audit.py` comprueba sin OAuth ni lecturas de
+Asana si cada título declarado en la política tiene exactamente un perfil de
+agente compatible. Distingue proyectos solo humanos, rutas parciales y rutas
+imposibles. Esta comprobación local no acredita los permisos nativos del
+agente en Asana ni ejecuta encargos.
 Para preparar una actualización en lote, `scripts/asana_prepare_scope_policy.py`
 acepta contextos y GID explícitos con `--add CONTEXT:GID[,GID]` y GID
 archivados con `--retire GID ...`. Antes de producir un JSON candidato,
