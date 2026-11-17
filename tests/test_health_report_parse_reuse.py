@@ -107,3 +107,35 @@ def test_service_checks_after_final_consumer(tmp_path, monkeypatch):
     response=app.get("/health-os/private-report",headers=READ)
     assert response.status_code==500
     assert "catalog" not in response.text
+
+
+def test_timing_logs_only_fixed_phases(tmp_path,monkeypatch):
+    from test_tuanhdo_staging import client,READ
+    from missingmcp.health_os import service
+    app=client(tmp_path,monkeypatch,allow_watch=True,sleep_mode="active")
+    logs=[]
+    monkeypatch.setattr(service,"log",lambda event,**fields:logs.append((event,fields)))
+    assert app.get("/health-os/private-report").status_code==401
+    assert not logs
+    assert app.get("/health-os/private-report",headers=READ).status_code==200
+    event,fields=logs[-1]
+    assert event=="health-os-private-report-timing"
+    assert set(fields)=={"outcome","phase_ms","total_ms"}
+    assert fields["outcome"]=="ok"
+    assert set(fields["phase_ms"])=={"init","load","sleep","proof","cross_day","build","guard","serialize"}
+    assert all(isinstance(v,(int,float)) and v>=0 for v in fields["phase_ms"].values())
+
+
+def test_broken_timing_sink_does_not_change_result(tmp_path,monkeypatch):
+    from test_tuanhdo_staging import client,READ
+    from missingmcp.health_os import service
+    app=client(tmp_path,monkeypatch,allow_watch=True,sleep_mode="active")
+    def broken(*a,**k): raise OSError("synthetic sink unavailable")
+    monkeypatch.setattr(service,"log",broken)
+    assert app.get("/health-os/private-report",headers=READ).status_code==200
+    def changed(repo,now,window_days):
+        repo.conn.execute("CREATE TABLE sink_failure_write (id INTEGER)")
+        repo.conn.execute("INSERT INTO sink_failure_write VALUES (1)");repo.conn.commit()
+        return {}
+    monkeypatch.setattr(service,"activity_cross_day_exclusions",changed)
+    assert app.get("/health-os/private-report",headers=READ).status_code==500

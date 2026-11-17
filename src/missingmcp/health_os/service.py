@@ -241,17 +241,45 @@ def build_health_os_app(config: Config) -> Starlette:
         if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         now = datetime.now(timezone.utc)
-        # Request-local parse reuse only; every evidence guard still runs.
-        batch_samples = RequestBatchSamples(repo)
-        report = build_private_report(
-            repo._load_health(now), now,
-            sleep_episodes=accepted_sleep_episodes(repo, now, batch_samples=batch_samples),
-            watch_identity_by_key=accepted_watch_identity_by_key(
-                repo, now, approved_watch, derived_watch, batch_samples=batch_samples),
-            cross_day_exclusions=activity_cross_day_exclusions(repo, now, window_days=15))
-        batch_samples.check(repo)
-        return JSONResponse({"status": "OK", "report": report},
-            headers={"Cache-Control": "no-store"})
+        # Timings contain fixed phase names only, never evidence or identifiers.
+        phases = {}
+        started = perf_counter()
+        phase = "init"
+        phase_start = started
+        outcome = "error"
+        try:
+            batch_samples = RequestBatchSamples(repo)
+            def mark(next_phase):
+                nonlocal phase, phase_start
+                end = perf_counter()
+                phases[phase] = round((end - phase_start) * 1000, 2)
+                phase, phase_start = next_phase, end
+            mark("load")
+            health = repo._load_health(now)
+            mark("sleep")
+            episodes = accepted_sleep_episodes(repo, now, batch_samples=batch_samples)
+            mark("proof")
+            proof = accepted_watch_identity_by_key(
+                repo, now, approved_watch, derived_watch, batch_samples=batch_samples)
+            mark("cross_day")
+            exclusions = activity_cross_day_exclusions(repo, now, window_days=15)
+            mark("build")
+            report = build_private_report(health, now, sleep_episodes=episodes,
+                watch_identity_by_key=proof, cross_day_exclusions=exclusions)
+            mark("guard")
+            batch_samples.check(repo)
+            mark("serialize")
+            response = JSONResponse({"status": "OK", "report": report},
+                headers={"Cache-Control": "no-store"})
+            outcome = "ok"
+            return response
+        finally:
+            phases[phase] = round((perf_counter() - phase_start) * 1000, 2)
+            try:
+                log("health-os-private-report-timing", outcome=outcome, phase_ms=phases,
+                    total_ms=round((perf_counter() - started) * 1000, 2))
+            except Exception:
+                pass  # Diagnostic output must never alter evidence or responses.
 
     async def quarantine_report(request):
         if not authorized_read(request):
