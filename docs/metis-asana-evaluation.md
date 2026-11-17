@@ -122,6 +122,18 @@ Asana si cada título declarado en la política tiene exactamente un perfil de
 agente compatible. Distingue proyectos solo humanos, rutas parciales y rutas
 imposibles. Esta comprobación local no acredita los permisos nativos del
 agente en Asana ni ejecuta encargos.
+Para proponer cobertura de agentes en los proyectos ya registrados,
+`scripts/asana_prepare_agent_rollout.py` acepta cinco GID nuevos, uno para
+`ANDREA`, `METIS`, `ARQUITECTO_INTERIOR`, `METIS/VAL` y uno separado para el
+proyecto público `FINAL_FINAL_PUBLIC`. Conserva solo los disparadores que
+resuelven de forma inequívoca a un agente en Shokko, .Final_Final privado y
+Venture Quest; usa un disparador explícito de borrador en los otros ámbitos.
+Comprueba que los cinco agentes existan en el workspace y genera candidatos
+para política y perfiles en `/tmp`, sin aplicar variables ni crear tareas. Los
+agentes deben tener instrucciones, memoria desactivada y acceso nativo al
+proyecto y audiencia correspondientes antes de activar los candidatos. La
+consulta de existencia por API no prueba ese acceso nativo. Revisar ambos
+candidatos y las autorizaciones de los Owners antes de desplegar.
 Para preparar una actualización en lote, `scripts/asana_prepare_scope_policy.py`
 acepta contextos y GID explícitos con `--add CONTEXT:GID[,GID]` y GID
 archivados con `--retire GID ...`. Antes de producir un JSON candidato,
