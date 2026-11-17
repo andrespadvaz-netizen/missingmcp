@@ -214,7 +214,24 @@ def _read_batch_samples(repo: HealthOSRepository, batch_key: str) -> dict[int, S
     return {sample.record_index: sample for sample in parse_health_export(payload).samples}
 
 
-def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Sample]:
+class RequestBatchSamples:
+    """One-request parse reuse; any intervening write aborts evidence assembly."""
+    def __init__(self, repo: HealthOSRepository):
+        self.conn = repo.conn
+        self.epoch = self._epoch()
+        self.samples: dict[str, dict[int, Sample]] = {}
+
+    def _epoch(self):
+        return (self.conn.execute("PRAGMA data_version").fetchone()[0],
+                self.conn.total_changes)
+
+    def check(self, repo: HealthOSRepository) -> None:
+        if repo.conn is not self.conn or self._epoch() != self.epoch:
+            raise ValueError("report_evidence_changed_during_read")
+
+
+def _linked_sleep_segments(repo: HealthOSRepository, now: datetime, *,
+                           batch_samples: RequestBatchSamples | None = None) -> list[Sample]:
     """Only accepted post-cut stages whose staging identity still matches core."""
     if repo.sleep_series_start is None:
         return []
@@ -231,7 +248,9 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Samp
         "ON l.batch_key=r.batch_key AND l.record_index=r.record_index "
         "JOIN health_os_tuanhdo_batches b ON b.batch_key=r.batch_key "
         "WHERE r.disposition='accepted' AND r.metric='sleep_duration'").fetchall()
-    parsed: dict[str, dict[int, Sample]] = {}
+    if batch_samples is not None:
+        batch_samples.check(repo)
+    parsed: dict[str, dict[int, Sample]] = batch_samples.samples if batch_samples is not None else {}
     segments: list[Sample] = []
     for row in rows:
         if row["core_event_key"] not in health._sleep_series_keys:
@@ -246,17 +265,20 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime) -> list[Samp
                 or _normalized(sample, "device")[1] != row["core_event_key"]):
             continue
         segments.append(sample)
+    if batch_samples is not None:
+        batch_samples.check(repo)
     return segments
 
 
-def accepted_sleep_episodes(repo: HealthOSRepository, now: datetime) -> list[dict[str, Any]]:
+def accepted_sleep_episodes(repo: HealthOSRepository, now: datetime, *,
+                            batch_samples: RequestBatchSamples | None = None) -> list[dict[str, Any]]:
     """Observed phase episodes, stitched by time and source, never by date."""
     health = repo._load_health(now)
     # Two hours is only a stitching allowance for gaps in exported phases;
     # it is never evidence that an episode is a complete night's sleep.
     link_gap = timedelta(hours=2)
     grouped: dict[tuple[Any, ...], list[Sample]] = {}
-    for sample in _linked_sleep_segments(repo, now):
+    for sample in _linked_sleep_segments(repo, now, batch_samples=batch_samples):
         detail = sample.device_detail if isinstance(sample.device_detail, Mapping) else {}
         identity = (sample.source, sample.source_bundle_id,
                     detail.get("model"), detail.get("softwareVersion"))
@@ -296,6 +318,7 @@ def accepted_watch_identity_by_key(
         repo: HealthOSRepository, now: datetime,
         approved_watch: WatchProvenance = frozenset(),
         derived_watch: DerivedWatchProvenance = frozenset(),
+        *, batch_samples: RequestBatchSamples | None = None,
 ) -> dict[str, tuple[str, ...] | None]:
     """Resolve approved Watch proof for linked, accepted core keys.
 
@@ -318,7 +341,9 @@ def accepted_watch_identity_by_key(
         "AND l.record_index=r.record_index "
         "JOIN health_os_tuanhdo_batches b ON b.batch_key=r.batch_key "
         f"WHERE r.disposition='accepted' AND r.metric IN ({placeholders})", metrics)
-    parsed: dict[str, dict[int, Sample]] = {}
+    if batch_samples is not None:
+        batch_samples.check(repo)
+    parsed: dict[str, dict[int, Sample]] = batch_samples.samples if batch_samples is not None else {}
     identities: dict[str, tuple[str, ...] | None] = {}
     for row in rows:
         key = row["core_event_key"]
@@ -354,6 +379,8 @@ def accepted_watch_identity_by_key(
             identities[key] = None
         else:
             identities[key] = identity
+    if batch_samples is not None:
+        batch_samples.check(repo)
     return identities
 
 

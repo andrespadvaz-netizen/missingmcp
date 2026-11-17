@@ -25,7 +25,7 @@ from .health_auto_export import parse_health_auto_export
 from .apple_export import parse_apple_health_export
 from .core import APPLE_HEALTH, SPEEDIANCE
 from .private_report import build_private_report
-from .tuanhdo_staging import (accepted_sleep_episodes, accepted_sleep_phases,
+from .tuanhdo_staging import (RequestBatchSamples, accepted_sleep_episodes, accepted_sleep_phases,
                               accepted_watch_identity_by_key, activity_cross_day_exclusions,
                               finish_tuanhdo_attempt, ingest_tuanhdo,
                               start_tuanhdo_attempt)
@@ -241,12 +241,16 @@ def build_health_os_app(config: Config) -> Starlette:
         if not authorized_read(request):
             return JSONResponse({"status": "UNAUTHORIZED"}, status_code=401)
         now = datetime.now(timezone.utc)
-        return JSONResponse({"status": "OK", "report": build_private_report(
+        # Request-local parse reuse only; every evidence guard still runs.
+        batch_samples = RequestBatchSamples(repo)
+        report = build_private_report(
             repo._load_health(now), now,
-            sleep_episodes=accepted_sleep_episodes(repo, now),
+            sleep_episodes=accepted_sleep_episodes(repo, now, batch_samples=batch_samples),
             watch_identity_by_key=accepted_watch_identity_by_key(
-                repo, now, approved_watch, derived_watch),
-            cross_day_exclusions=activity_cross_day_exclusions(repo, now, window_days=15))},
+                repo, now, approved_watch, derived_watch, batch_samples=batch_samples),
+            cross_day_exclusions=activity_cross_day_exclusions(repo, now, window_days=15))
+        batch_samples.check(repo)
+        return JSONResponse({"status": "OK", "report": report},
             headers={"Cache-Control": "no-store"})
 
     async def quarantine_report(request):
