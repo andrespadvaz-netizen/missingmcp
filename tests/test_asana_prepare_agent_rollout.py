@@ -56,10 +56,12 @@ def test_rollout_candidate_keeps_owner_and_uses_public_agent_only_for_public_sco
     policy, profiles = policy_and_profiles()
     agents = {context: gid for context, gid in zip(
         rollout.NEW_CONTEXTS, ("301", "302", "303", "304", "305"))}
+    excluded = {"226", "227", "228"}
     candidate_raw, profiles_raw = rollout.make_candidate(
-        policy, profiles, "", agents, {"204": "launch_service"})
+        policy, profiles, "", agents, {"204": "launch_service"}, excluded)
     candidate, new_profiles = json.loads(candidate_raw), json.loads(profiles_raw)
-    assert len(candidate["projects"]) == 29
+    assert len(candidate["projects"]) == 26
+    assert not excluded & set(candidate["projects"])
     assert len(new_profiles) == len(profiles) + 5
     assert candidate["projects"]["200"]["eligible_task_names"] == ["Valid"]
     assert candidate["projects"]["204"]["agent_gids"] == ["104"]
@@ -74,6 +76,15 @@ def test_rollout_candidate_keeps_owner_and_uses_public_agent_only_for_public_sco
     assert policy["projects"]["204"] == {"context": "SHOKKO"}
 
 
+def test_rollout_cannot_exclude_a_project_with_agent_routes():
+    policy, profiles = policy_and_profiles()
+    agents = {context: gid for context, gid in zip(
+        rollout.NEW_CONTEXTS, ("301", "302", "303", "304", "305"))}
+    with pytest.raises(ValueError, match="excluded_project_must_be_human_only"):
+        rollout.make_candidate(policy, profiles, "", agents,
+                               excluded={"200", "227", "228"})
+
+
 def test_rollout_rejects_duplicate_or_missing_agents():
     with pytest.raises(ValueError, match="five_distinct_context_agents_required"):
         rollout.parse_agents(["ANDREA:301"])
@@ -81,3 +92,5 @@ def test_rollout_rejects_duplicate_or_missing_agents():
         rollout.parse_agents([
             "ANDREA:301", "METIS:301", "ARQUITECTO_INTERIOR:303",
             "METIS/VAL:304", "FINAL_FINAL_PUBLIC:305"])
+    with pytest.raises(ValueError, match="three_distinct_excluded_project_gids_required"):
+        rollout.parse_excluded(["226", "226", "228"])

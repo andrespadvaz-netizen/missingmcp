@@ -130,6 +130,12 @@ por proyecto en Shokko, .Final_Final privado y Venture Quest, con
 `--specialty PROJECT_GID:SPECIALTY` para excepciones revisadas; usa un
 disparador explícito de borrador en los otros ámbitos. La propuesta retira
 los títulos que no se seleccionan, incluidos los que antes se abstuvieron.
+Tres GID de portales de cliente solo humanos se indican con
+`--exclude-project PROJECT_GID`: salen por completo del registro de acciones,
+por lo que Metis no puede crear tareas ni despachar agentes allí. Permanecen
+fuera de acciones hasta que se revise por separado la audiencia externa.
+Si Asana los omite del listado general, pueden seguir verificándose por GID
+con `asana_active_scope_audit.py --probe`; no cuentan como proyectos registrados.
 Comprueba que los cinco agentes existan en el workspace y genera candidatos
 para política y perfiles en `/tmp`, sin aplicar variables ni crear tareas. Los
 agentes deben tener instrucciones, memoria desactivada y acceso nativo al
