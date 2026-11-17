@@ -30,6 +30,11 @@ NEW_CONTEXTS = ("ANDREA", "METIS", "ARQUITECTO_INTERIOR", "METIS/VAL",
 PRIVATE_TITLE = "Preparar borrador para revisión con agente"
 PUBLIC_TITLE = "Preparar borrador público para revisión"
 SPECIALTY = "scoped_coordination"
+DEFAULT_SPECIALTIES = {
+    "SHOKKO": "growth_analysis",
+    "FINAL_FINAL": "creative_delivery",
+    "VENTURE_QUEST": "economics_governance",
+}
 
 
 def parse_agents(values):
@@ -43,6 +48,17 @@ def parse_agents(values):
     if set(agents) != set(NEW_CONTEXTS) or len(set(agents.values())) != len(agents):
         raise ValueError("five_distinct_context_agents_required")
     return agents
+
+
+def parse_specialties(values):
+    overrides = {}
+    for value in values:
+        gid, separator, specialty = value.partition(":")
+        if (not separator or not re.fullmatch(r"[0-9]+", gid) or
+                not specialty or gid in overrides):
+            raise ValueError("invalid_project_specialty_override")
+        overrides[gid] = specialty
+    return overrides
 
 
 def route_agent(scope, profiles, name):
@@ -62,7 +78,7 @@ def route_agent(scope, profiles, name):
     return decision.agent_gid if decision.action == "handoff" else None
 
 
-def make_candidate(original, profiles, legacy_raw, agents):
+def make_candidate(original, profiles, legacy_raw, agents, overrides=None):
     raw = json.dumps(original, ensure_ascii=False, separators=(",", ":"))
     profile_raw = json.dumps(profiles, ensure_ascii=False, separators=(",", ":"))
     _, _, scopes, _ = load_dot_policy(raw, profile_raw, legacy_raw)
@@ -70,6 +86,9 @@ def make_candidate(original, profiles, legacy_raw, agents):
         raise ValueError("unexpected_project_count_or_existing_agent")
     if any(scope.get("action_blocked_reason") for scope in scopes.values()):
         raise ValueError("project_context_conflict")
+    overrides = dict(overrides or {})
+    if set(overrides) - set(scopes):
+        raise ValueError("override_project_not_registered")
     candidate, new_profiles = copy.deepcopy(original), copy.deepcopy(profiles)
     for context, gid in agents.items():
         new_profiles[gid] = {
@@ -88,9 +107,11 @@ def make_candidate(original, profiles, legacy_raw, agents):
                      for name in scope["eligible_task_names"]
                      if (agent := route_agent(scope, profiles, name))}
             if valid:
-                prior = templates.setdefault(scope["context"], valid)
-                if prior != valid:
-                    raise ValueError("ambiguous_existing_context_routes")
+                by_specialty = templates.setdefault(scope["context"], {})
+                for name, (specialty, agent) in valid.items():
+                    prior = by_specialty.setdefault(specialty, (name, agent))
+                    if prior != (name, agent):
+                        raise ValueError("ambiguous_existing_context_routes")
     if set(templates) != {"SHOKKO", "FINAL_FINAL", "VENTURE_QUEST"}:
         raise ValueError("missing_existing_context_routes")
 
@@ -100,8 +121,14 @@ def make_candidate(original, profiles, legacy_raw, agents):
         if context == "FINAL_FINAL" and privacy == "public_to_workspace":
             selected = {PUBLIC_TITLE: (SPECIALTY, agents["FINAL_FINAL_PUBLIC"])}
         elif context in templates:
-            selected = templates[context]
+            specialty = overrides.pop(gid, DEFAULT_SPECIALTIES[context])
+            route = templates[context].get(specialty)
+            if route is None:
+                raise ValueError("specialty_not_available_in_context")
+            selected = {route[0]: (specialty, route[1])}
         elif context in agents:
+            if gid in overrides:
+                raise ValueError("override_requires_existing_context_agent")
             selected = {PRIVATE_TITLE: (SPECIALTY, agents[context])}
         else:
             raise ValueError("unmapped_project_context")
@@ -112,6 +139,8 @@ def make_candidate(original, profiles, legacy_raw, agents):
             "specialties": list(dict.fromkeys(specialty for specialty, _ in selected.values())),
             "agent_gids": list(dict.fromkeys(agent for _, agent in selected.values())),
         })
+    if overrides:
+        raise ValueError("override_requires_existing_context_agent")
     candidate_raw = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))
     profiles_raw = json.dumps(new_profiles, ensure_ascii=False, separators=(",", ":"))
     _, _, proposed_scopes, proposed_profiles = load_dot_policy(
@@ -133,12 +162,12 @@ def save_private(path, content):
         file.write(content + "\n")
 
 
-async def main(agents):
+async def main(agents, overrides):
     original = json.loads(os.environ["ASANA_METIS_DOT_POLICY_JSON"])
     profiles = json.loads(os.environ["ASANA_AGENT_PROFILES_JSON"])
     legacy_raw = os.environ.get("ASANA_AGENT_PROJECTS_JSON", "")
     candidate_raw, profiles_raw = make_candidate(
-        original, profiles, legacy_raw, agents)
+        original, profiles, legacy_raw, agents, overrides)
     workspace = original["workspace_gid"]
     oauth = AsanaDispatchOAuth(load_config())
     try:
@@ -167,5 +196,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent", action="append", required=True,
                         metavar="CONTEXT:GID")
+    parser.add_argument("--specialty", action="append", default=[],
+                        metavar="PROJECT_GID:SPECIALTY")
     args = parser.parse_args()
-    asyncio.run(main(parse_agents(args.agent)))
+    asyncio.run(main(parse_agents(args.agent), parse_specialties(args.specialty)))

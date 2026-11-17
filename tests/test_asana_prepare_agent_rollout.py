@@ -21,15 +21,26 @@ def policy_and_profiles():
     profiles = {}
     for gid, context in (("101", "SHOKKO"), ("102", "FINAL_FINAL"),
                          ("103", "VENTURE_QUEST")):
-        profiles[gid] = {"specialties": ["valid"], "contexts": [context],
+        profiles[gid] = {"specialties": [rollout.DEFAULT_SPECIALTIES[context]],
+                         "contexts": [context],
                          "audiences": ["project_members"], "dot_authorized": True}
+    profiles["104"] = {"specialties": ["launch_service"],
+                       "contexts": ["SHOKKO"],
+                       "audiences": ["project_members"],
+                       "dot_authorized": True}
     for project_gid, agent_gid, context in (("200", "101", "SHOKKO"),
                                            ("201", "102", "FINAL_FINAL"),
                                            ("202", "103", "VENTURE_QUEST")):
         policy["projects"][project_gid] = {
             "context": context, "eligible_task_names": ["Valid", "Unavailable"],
-            "routing": {"Valid": "valid", "Unavailable": "unavailable"},
-            "specialties": ["valid", "unavailable"], "agent_gids": [agent_gid]}
+            "routing": {"Valid": rollout.DEFAULT_SPECIALTIES[context],
+                        "Unavailable": "unavailable"},
+            "specialties": [rollout.DEFAULT_SPECIALTIES[context], "unavailable"],
+            "agent_gids": [agent_gid]}
+    policy["projects"]["200"]["eligible_task_names"].insert(1, "Launch")
+    policy["projects"]["200"]["routing"]["Launch"] = "launch_service"
+    policy["projects"]["200"]["specialties"].append("launch_service")
+    policy["projects"]["200"]["agent_gids"].append("104")
     policy["projects"]["203"] = {"context": "FINAL_FINAL",
                                   "privacy_setting": "public_to_workspace",
                                   "audiences": ["workspace"]}
@@ -45,12 +56,14 @@ def test_rollout_candidate_keeps_owner_and_uses_public_agent_only_for_public_sco
     policy, profiles = policy_and_profiles()
     agents = {context: gid for context, gid in zip(
         rollout.NEW_CONTEXTS, ("301", "302", "303", "304", "305"))}
-    candidate_raw, profiles_raw = rollout.make_candidate(policy, profiles, "", agents)
+    candidate_raw, profiles_raw = rollout.make_candidate(
+        policy, profiles, "", agents, {"204": "launch_service"})
     candidate, new_profiles = json.loads(candidate_raw), json.loads(profiles_raw)
     assert len(candidate["projects"]) == 29
     assert len(new_profiles) == len(profiles) + 5
     assert candidate["projects"]["200"]["eligible_task_names"] == ["Valid"]
-    assert candidate["projects"]["204"]["agent_gids"] == ["101"]
+    assert candidate["projects"]["204"]["agent_gids"] == ["104"]
+    assert candidate["projects"]["204"]["eligible_task_names"] == ["Launch"]
     assert candidate["projects"]["205"]["agent_gids"] == ["102"]
     assert candidate["projects"]["203"]["agent_gids"] == ["305"]
     assert candidate["projects"]["203"]["audiences"] == ["workspace"]

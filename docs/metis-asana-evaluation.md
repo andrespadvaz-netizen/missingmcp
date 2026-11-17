@@ -125,9 +125,11 @@ agente en Asana ni ejecuta encargos.
 Para proponer cobertura de agentes en los proyectos ya registrados,
 `scripts/asana_prepare_agent_rollout.py` acepta cinco GID nuevos, uno para
 `ANDREA`, `METIS`, `ARQUITECTO_INTERIOR`, `METIS/VAL` y uno separado para el
-proyecto público `FINAL_FINAL_PUBLIC`. Conserva solo los disparadores que
-resuelven de forma inequívoca a un agente en Shokko, .Final_Final privado y
-Venture Quest; usa un disparador explícito de borrador en los otros ámbitos.
+proyecto público `FINAL_FINAL_PUBLIC`. Selecciona una especialidad compatible
+por proyecto en Shokko, .Final_Final privado y Venture Quest, con
+`--specialty PROJECT_GID:SPECIALTY` para excepciones revisadas; usa un
+disparador explícito de borrador en los otros ámbitos. La propuesta retira
+los títulos que no se seleccionan, incluidos los que antes se abstuvieron.
 Comprueba que los cinco agentes existan en el workspace y genera candidatos
 para política y perfiles en `/tmp`, sin aplicar variables ni crear tareas. Los
 agentes deben tener instrucciones, memoria desactivada y acceso nativo al
