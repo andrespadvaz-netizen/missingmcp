@@ -50,15 +50,18 @@ def make_candidate(original, additions, retired, observed, profiles_raw, legacy_
     for gid in retired:
         project = observed.get(gid)
         if (not isinstance(project, dict) or
+                str(project.get("gid")) != gid or
                 str((project.get("workspace") or {}).get("gid")) != workspace or
-                project.get("archived") is not True):
-            raise ValueError("retirement_not_verified_archived")
+                (project.get("archived") is not True and
+                 project.get("completed") is not True)):
+            raise ValueError("retirement_not_verified_closed")
         del projects[gid]
     for gid, context in additions.items():
         project = observed.get(gid)
         if (not isinstance(project, dict) or str(project.get("gid")) != gid or
                 str((project.get("workspace") or {}).get("gid")) != workspace or
-                project.get("archived") is not False):
+                project.get("archived") is not False or
+                project.get("completed") is not False):
             raise ValueError("addition_not_verified_active")
         owner = str((project.get("owner") or {}).get("gid", ""))
         privacy = project.get("privacy_setting")
@@ -98,7 +101,7 @@ async def propose(additions, retired):
                 f"https://app.asana.com/api/1.0/projects/{gid}",
                 headers={"Authorization": "Bearer " + token},
                 params={"opt_fields":
-                        "gid,workspace.gid,owner.gid,privacy_setting,archived"})
+                        "gid,workspace.gid,owner.gid,privacy_setting,archived,completed"})
             response.raise_for_status()
             observed[gid] = response.json().get("data")
     result = make_candidate(original, additions, retired, observed,

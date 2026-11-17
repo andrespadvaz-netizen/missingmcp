@@ -14,7 +14,9 @@ _spec.loader.exec_module(audit)
 
 
 @pytest.mark.asyncio
-async def test_direct_get_recovers_registered_active_project(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("listed_completed", [False, True])
+async def test_direct_get_recovers_registered_active_project(
+        tmp_path, monkeypatch, capsys, listed_completed):
     policy = {"workspace_gid": "100", "creator_gid": "55", "projects": {
         "200": {"context": "SHOKKO", "owner_gid": "44",
                 "project_owner_gid": "44", "privacy_setting": "private",
@@ -46,11 +48,13 @@ async def test_direct_get_recovers_registered_active_project(tmp_path, monkeypat
         if request.url.path.endswith("/workspaces/100/projects"):
             return httpx.Response(200, json={"data": [{
                 "gid": "200", "name": "Listed", "archived": False,
+                "completed": listed_completed,
                 "workspace": {"gid": "100"}, "owner": {"gid": "44"},
                 "privacy_setting": "private"}], "next_page": None})
         assert request.url.path.endswith("/projects/201")
         return httpx.Response(200, json={"data": {
             "gid": "201", "name": "Direct", "archived": False,
+            "completed": False,
             "workspace": {"gid": "100"}, "owner": {"gid": "46"},
             "privacy_setting": "private"}})
 
@@ -59,7 +63,12 @@ async def test_direct_get_recovers_registered_active_project(tmp_path, monkeypat
                         lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
     await audit.main()
     output = capsys.readouterr().out
-    assert "REGISTRADOS_ACTIVOS 2" in output
+    assert f"ACTIVOS_LISTADOS {0 if listed_completed else 1}" in output
+    assert f"FINALIZADOS_LISTADOS {1 if listed_completed else 0}" in output
+    assert f"REGISTRADOS_ACTIVOS {1 if listed_completed else 2}" in output
+    assert f"REGISTRADOS_FINALIZADOS {1 if listed_completed else 0}" in output
+    if listed_completed:
+        assert "REGISTRADO_FINALIZADO 200" in output
     assert "REGISTRADOS_ACTIVOS_DIRECTOS 1" in output
     assert "REGISTRADO_ACTIVO_DIRECTO 201" in output
     assert "REGISTRADO_NO_ACTIVO" not in output
@@ -70,12 +79,14 @@ async def test_direct_get_recovers_registered_active_project(tmp_path, monkeypat
 @pytest.mark.parametrize("change,expected", [
     ({"archived": True}, "ARCHIVADO"),
     ({"archived": None}, "NO_VERIFICADO"),
+    ({"completed": True}, "FINALIZADO"),
+    ({"completed": None}, "NO_VERIFICADO"),
     ({"workspace": {"gid": "999"}}, "OTRO_WORKSPACE"),
     ({"owner": {"gid": "99"}}, "POLITICA_CONFLICTO"),
     ({"privacy_setting": "public_to_workspace"}, "POLITICA_CONFLICTO"),
 ])
 def test_direct_project_requires_matching_authority(change, expected):
-    project = {"gid": "201", "archived": False,
+    project = {"gid": "201", "archived": False, "completed": False,
                "workspace": {"gid": "100"}, "owner": {"gid": "46"},
                "privacy_setting": "private"}
     project.update(change)

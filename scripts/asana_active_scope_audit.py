@@ -28,6 +28,10 @@ def registered_project_state(project, scope, workspace):
         return "ARCHIVADO"
     if project.get("archived") is not False:
         return "NO_VERIFICADO"
+    if project.get("completed") is True:
+        return "FINALIZADO"
+    if project.get("completed") is not False:
+        return "NO_VERIFICADO"
     if (project.get("privacy_setting") != scope.get("privacy_setting", "private") or
             scope.get("action_blocked_reason")):
         return "POLITICA_CONFLICTO"
@@ -55,7 +59,7 @@ async def main(probe_gids=(), scan_teams=False):
     async with httpx.AsyncClient(timeout=20) as http:
         while True:
             params = {"limit": 100, "opt_fields":
-                      "gid,name,archived,privacy_setting,workspace.gid,owner.gid,team.gid,team.name"}
+                      "gid,name,archived,completed,privacy_setting,workspace.gid,owner.gid,team.gid,team.name"}
             if offset:
                 params["offset"] = offset
             response = await http.get(
@@ -119,7 +123,7 @@ async def main(probe_gids=(), scan_teams=False):
                         raise RuntimeError("team_identity_unverified")
                     async for project in pages(
                             f"/teams/{team_gid}/projects",
-                            "gid,name,archived,privacy_setting,workspace.gid,owner.gid"):
+                            "gid,name,archived,completed,privacy_setting,workspace.gid,owner.gid"):
                         gid = str(project.get("gid", ""))
                         if not gid.isdigit() or gid in active or gid in found:
                             continue
@@ -129,6 +133,7 @@ async def main(probe_gids=(), scan_teams=False):
                             "team_gid": team_gid, "team_name": team.get("name"),
                             "workspace_match": str((project.get("workspace") or {}).get("gid")) == workspace,
                             "archived": project.get("archived"),
+                            "completed": project.get("completed"),
                             "privacy": project.get("privacy_setting"),
                             "owner_gid": (project.get("owner") or {}).get("gid")},
                             ensure_ascii=False))
@@ -145,7 +150,7 @@ async def main(probe_gids=(), scan_teams=False):
                 f"https://app.asana.com/api/1.0/projects/{gid}",
                 headers={"Authorization": "Bearer " + token},
                 params={"opt_fields":
-                        "gid,workspace.gid,owner.gid,privacy_setting,archived"})
+                        "gid,workspace.gid,owner.gid,privacy_setting,archived,completed"})
             if response.status_code in (403, 404):
                 registered_states[gid] = "SIN_ACCESO"
                 continue
@@ -160,7 +165,7 @@ async def main(probe_gids=(), scan_teams=False):
                 f"https://app.asana.com/api/1.0/projects/{gid}",
                 headers={"Authorization": "Bearer " + token},
                 params={"opt_fields":
-                        "gid,name,archived,privacy_setting,workspace.gid,owner.gid,team.gid,team.name"})
+                        "gid,name,archived,completed,privacy_setting,workspace.gid,owner.gid,team.gid,team.name"})
             if response.status_code in (403, 404):
                 print("PROBE", gid, "INACCESSIBLE", response.status_code)
                 continue
@@ -172,18 +177,30 @@ async def main(probe_gids=(), scan_teams=False):
                 "gid": gid, "name": project.get("name"),
                 "workspace_match": str((project.get("workspace") or {}).get("gid")) == workspace,
                 "archived": project.get("archived"),
+                "completed": project.get("completed"),
                 "privacy": project.get("privacy_setting"),
                 "owner_gid": (project.get("owner") or {}).get("gid"),
                 "team_gid": (project.get("team") or {}).get("gid"),
                 "team_name": (project.get("team") or {}).get("name")},
                 ensure_ascii=False))
-    pending = sorted(set(active) - set(scopes))
+    open_listed = {gid for gid, project in active.items()
+                   if project.get("completed") is False}
+    completed_listed = {gid for gid, project in active.items()
+                        if project.get("completed") is True}
+    unknown_listed = set(active) - open_listed - completed_listed
+    pending = sorted(open_listed - set(scopes))
     direct_active = sorted(gid for gid in set(scopes) - set(active)
                            if registered_states[gid] == "ACTIVO")
+    completed_registered = sorted(gid for gid, state in registered_states.items()
+                                  if state == "FINALIZADO")
     conflicts = sorted(gid for gid, state in registered_states.items()
-                       if state != "ACTIVO")
-    print("ACTIVOS_LISTADOS", len(active), "PENDIENTES_LISTADOS", len(pending),
-          "REGISTRADOS_ACTIVOS", len(scopes) - len(conflicts),
+                       if state not in {"ACTIVO", "FINALIZADO"})
+    print("ACTIVOS_LISTADOS", len(open_listed),
+          "FINALIZADOS_LISTADOS", len(completed_listed),
+          "ESTADO_INCIERTO_LISTADOS", len(unknown_listed),
+          "PENDIENTES_LISTADOS", len(pending),
+          "REGISTRADOS_ACTIVOS", len(scopes) - len(conflicts) - len(completed_registered),
+          "REGISTRADOS_FINALIZADOS", len(completed_registered),
           "REGISTRADOS_ACTIVOS_DIRECTOS", len(direct_active),
           "ARCHIVADOS_VISIBLES", archived_count,
           "REGISTRADOS_NO_VERIFICADOS", len(conflicts))
@@ -198,6 +215,8 @@ async def main(probe_gids=(), scan_teams=False):
             ensure_ascii=False))
     for gid in direct_active:
         print("REGISTRADO_ACTIVO_DIRECTO", gid)
+    for gid in completed_registered:
+        print("REGISTRADO_FINALIZADO", gid)
     for gid in conflicts:
         print("REGISTRADO_" + registered_states[gid], gid)
 

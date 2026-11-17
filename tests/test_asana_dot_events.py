@@ -24,7 +24,7 @@ async def test_source_creation_rechecks_project_owner_when_configured():
         return httpx.Response(200, json={"data": {
             "gid": "200", "workspace": {"gid": "100"},
             "privacy_setting": "private", "owner": {"gid": "99"},
-            "archived": False}})
+            "archived": False, "completed": False}})
     asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
                         transport=httpx.MockTransport(handler))
     with pytest.raises(DotEventError, match="source_project_owner_mismatch"):
@@ -33,13 +33,16 @@ async def test_source_creation_rechecks_project_owner_when_configured():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("archived", [True, None])
-async def test_source_creation_abstains_when_project_is_not_verified_active(archived):
+@pytest.mark.parametrize("archived,completed", [
+    (True, False), (None, False), (False, True), (False, None)])
+async def test_source_creation_abstains_when_project_is_not_verified_active(
+        archived, completed):
     def handler(request):
         assert request.method == "GET"
         return httpx.Response(200, json={"data": {
             "gid": "200", "workspace": {"gid": "100"},
-            "privacy_setting": "private", "archived": archived}})
+            "privacy_setting": "private", "archived": archived,
+            "completed": completed}})
     asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
                         transport=httpx.MockTransport(handler))
     with pytest.raises(DotEventError, match="source_project_not_active"):
@@ -58,10 +61,15 @@ def registered(events):
 
 
 def client(creator="55", project="200", assignee="44", stories=None,
-           completed=False):
+           completed=False, project_completed=False):
     def handler(request):
         if request.url.path.endswith("/stories"):
             return httpx.Response(200, json={"data": stories or []})
+        if request.url.path.endswith("/projects/200"):
+            return httpx.Response(200, json={"data": {
+                "gid": "200", "workspace": {"gid": "100"},
+                "owner": {"gid": "44"}, "privacy_setting": "private",
+                "archived": False, "completed": project_completed}})
         return httpx.Response(200, json={"data": {
             "gid": "300", "name": "Research task", "workspace": {"gid": "100"},
             "created_by": {"gid": creator}, "projects": [{"gid": project}],
@@ -80,7 +88,7 @@ async def test_authenticated_source_creation_is_durable_and_verified(tmp_path):
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "owner": {"gid": "44"},
-                "privacy_setting": "private", "archived": False}})
+                "privacy_setting": "private", "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(json.loads(request.content)["data"])
             return httpx.Response(201, json={"data": {"gid": "300"}})
@@ -113,7 +121,7 @@ async def test_private_project_owner_can_differ_from_human_task_owner(tmp_path):
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "owner": {"gid": "77"},
-                "privacy_setting": "private", "archived": False}})
+                "privacy_setting": "private", "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(json.loads(request.content)["data"])
             return httpx.Response(201, json={"data": {"gid": "300"}})
@@ -137,7 +145,7 @@ async def test_unrouted_human_task_is_created_but_agent_is_skipped(tmp_path):
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "privacy_setting": "private",
-                "archived": False}})
+                "archived": False, "completed": False}})
         if request.method == "POST":
             return httpx.Response(201, json={"data": {"gid": "300"}})
         return httpx.Response(200, json={"data": {
@@ -166,7 +174,7 @@ async def test_uncertain_source_creation_requires_readback_not_repost(tmp_path, 
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "owner": {"gid": "44"},
-                "privacy_setting": "private", "archived": False}})
+                "privacy_setting": "private", "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(1)
             raise httpx.ReadTimeout("lost response")
@@ -204,7 +212,7 @@ async def test_concurrent_source_creation_posts_once(tmp_path):
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "owner": {"gid": "44"},
-                "privacy_setting": "private", "archived": False}})
+                "privacy_setting": "private", "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(1)
             entered.set()
@@ -238,7 +246,7 @@ async def test_public_source_project_is_rejected_before_post(tmp_path):
             writes.append(1)
         return httpx.Response(200, json={"data": {"gid": "200",
             "workspace": {"gid": "100"}, "owner": {"gid": "44"},
-            "privacy_setting": "public_to_workspace", "archived": False}})
+            "privacy_setting": "public_to_workspace", "archived": False, "completed": False}})
 
     events = DotEvents(str(tmp_path / "events.db"))
     asana = AsanaAgents("token", "100", {"200": "SHOKKO"},
@@ -258,7 +266,7 @@ async def test_public_project_requires_explicit_workspace_audience(tmp_path):
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "privacy_setting": "public_to_workspace",
-                "archived": False}})
+                "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(1)
             return httpx.Response(201, json={"data": {"gid": "300"}})
@@ -314,6 +322,14 @@ async def test_event_abstains_on_scope_and_blocks_shared_quota(tmp_path):
     events = registered(DotEvents(str(tmp_path / "other.db")))
     assert (await events.created(client(), EVENT, POLICY, PROFILES,
                                  dispatch=True))["reason"] == "shared_quota_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_completed_project_blocks_before_paid_handoff_reservation(tmp_path):
+    events = registered(DotEvents(str(tmp_path / "events.db")))
+    result = await events.created(client(project_completed=True), EVENT,
+                                  POLICY, PROFILES, dispatch=True)
+    assert result == {"action": "blocked", "reason": "source_project_not_active"}
 
 
 @pytest.mark.asyncio
@@ -615,7 +631,7 @@ def test_http_create_is_authenticated_durable_and_quota_blocked(tmp_path, monkey
         if request.url.path.endswith("/projects/200"):
             return httpx.Response(200, json={"data": {"gid": "200",
                 "workspace": {"gid": "100"}, "owner": {"gid": "44"},
-                "privacy_setting": "private", "archived": False}})
+                "privacy_setting": "private", "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(json.loads(request.content)["data"])
             return httpx.Response(201, json={"data": {"gid": "300"}})
@@ -675,7 +691,7 @@ def test_http_multiscope_requires_registered_project_and_preserves_owner(tmp_pat
         if request.url.path.endswith("/projects/201"):
             return httpx.Response(200, json={"data": {"gid": "201",
                 "workspace": {"gid": "100"}, "privacy_setting": "public_to_workspace",
-                "archived": False}})
+                "archived": False, "completed": False}})
         if request.method == "POST":
             posts.append(json.loads(request.content)["data"])
             return httpx.Response(201, json={"data": {"gid": "301"}})

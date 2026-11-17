@@ -159,13 +159,14 @@ class DotEvents:
                  policy.get("audiences") != ["workspace"])):
             raise DotEventError("source_audience_policy_invalid")
         project_body = await client._request("GET", f"/projects/{project}",
-                                             params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting,archived"})
+                                             params={"opt_fields": "gid,workspace.gid,owner.gid,privacy_setting,archived,completed"})
         observed_project = project_body.get("data") or {}
         if (str(observed_project.get("gid")) != project or
                 str((observed_project.get("workspace") or {}).get("gid")) != client.workspace_gid or
                 observed_project.get("privacy_setting") != expected_privacy):
             raise DotEventError("source_project_privacy_mismatch")
-        if observed_project.get("archived") is not False:
+        if (observed_project.get("archived") is not False or
+                observed_project.get("completed") is not False):
             raise DotEventError("source_project_not_active")
         expected_project_owner = policy.get("project_owner_gid")
         if (expected_project_owner is not None and
@@ -308,6 +309,11 @@ class DotEvents:
             return {"action": "skip", "reason": decision.reason}
         if not dispatch:
             return {"action": "eligible", "reason": decision.reason}
+        try:
+            await self._verify_project(client, project_gid, policy)
+        except DotEventError as exc:
+            self.record(source_gid, fingerprint, "blocked", str(exc))
+            return {"action": "blocked", "reason": str(exc)}
         # An administrator attests Asana's provider-enforced shared cap for
         # this billing cycle. The Gateway separately bounds its handoffs;
         # it does not pretend to know Dash's remaining balance. Asana may

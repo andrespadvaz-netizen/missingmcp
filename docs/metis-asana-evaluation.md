@@ -95,9 +95,10 @@ workspace fijado.
 el control de destino bloquea ese despacho.
 Cuando está configurado, el Gateway vuelve a comprobar el Owner real antes
 de crear la tarea humana y antes de despachar al agente.
-Los proyectos archivados permanecen visibles en el inventario cuando Asana
-los devuelve, pero el Gateway bloquea tanto la creación como el despacho si
-Asana no confirma `archived: false` en el proyecto de destino.
+Los proyectos archivados o finalizados permanecen visibles en el inventario
+cuando Asana los devuelve, pero el Gateway bloquea tanto la creación como el
+despacho si Asana no confirma `archived: false` y `completed: false` en el
+proyecto de destino.
 Para comparar el registro con los proyectos activos visibles al OAuth del
 servicio, ejecutar `python scripts/asana_active_scope_audit.py` en la consola
 del Gateway. Solo hace GET de proyectos y muestra GID, nombre, privacidad,
@@ -109,6 +110,8 @@ metadatos suficientes queda `REGISTRADO_NO_VERIFICADO`; jamás se etiqueta
 inactivo solo por faltar en el listado general. Esos datos son candidatos
 para revisión, nunca autorización
 automática. No lee tareas, secretos, memorias ni cuentas ajenas.
+Un proyecto con `completed: true` se informa como `REGISTRADO_FINALIZADO` y
+no cuenta como activo aunque `archived` sea falso.
 Si un proyecto que el administrador ve en Asana no aparece en el listado del
 workspace, `--probe GID` hace un GET directo y muestra si el OAuth puede
 leerlo y si pertenece al workspace configurado. Un `403` o `404` no autoriza
@@ -144,8 +147,8 @@ consulta de existencia por API no prueba ese acceso nativo. Revisar ambos
 candidatos y las autorizaciones de los Owners antes de desplegar.
 Para preparar una actualización en lote, `scripts/asana_prepare_scope_policy.py`
 acepta contextos y GID explícitos con `--add CONTEXT:GID[,GID]` y GID
-archivados con `--retire GID ...`. Antes de producir un JSON candidato,
-consulta cada proyecto por GID y verifica workspace, estado activo o archivado,
+archivados o finalizados con `--retire GID ...`. Antes de producir un JSON candidato,
+consulta cada proyecto por GID y verifica workspace, estado abierto o cerrado,
 privacidad y Owner. Todo proyecto nuevo queda **solo con tareas humanas**:
 `agent_gids`, `routing`, `specialties` y `eligible_task_names` vacíos. El
 candidato se guarda con permisos de archivo restringidos en

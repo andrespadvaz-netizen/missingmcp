@@ -31,7 +31,7 @@ ORIGINAL = {
 OBSERVED = {
     "200": {"gid": "200", "workspace": {"gid": "100"}, "archived": True},
     "201": {"gid": "201", "workspace": {"gid": "100"},
-            "owner": {"gid": "46"}, "archived": False,
+            "owner": {"gid": "46"}, "archived": False, "completed": False,
             "privacy_setting": "private"}}
 
 
@@ -50,8 +50,10 @@ def test_human_only_addition_overrides_agent_defaults_and_retires_archived():
 
 
 @pytest.mark.parametrize("change,reason", [
-    ({"200": {"archived": False}}, "retirement_not_verified_archived"),
+    ({"200": {"archived": False}}, "retirement_not_verified_closed"),
+    ({"200": {"gid": "999"}}, "retirement_not_verified_closed"),
     ({"201": {"archived": True}}, "addition_not_verified_active"),
+    ({"201": {"completed": True}}, "addition_not_verified_active"),
     ({"201": {"owner": None}}, "addition_owner_or_privacy_unverified"),
     ({"201": {"workspace": {"gid": "999"}}}, "addition_not_verified_active"),
 ])
@@ -71,3 +73,12 @@ def test_contexts_and_duplicate_additions_must_be_explicit():
         parse_additions(["SHOKKO:201", "ANDREA:201"])
     with pytest.raises(ValueError, match="invalid_project_context"):
         parse_additions(["UNKNOWN:201"])
+
+
+def test_completed_project_can_be_retired_after_direct_verification():
+    observed = {gid: value.copy() for gid, value in OBSERVED.items()}
+    observed["200"] = {"gid": "200", "workspace": {"gid": "100"},
+                       "archived": False, "completed": True}
+    encoded = make_candidate(ORIGINAL, {"201": "ANDREA"}, ["200"],
+                             observed, PROFILE)
+    assert set(json.loads(encoded)["projects"]) == {"201"}
