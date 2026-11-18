@@ -151,6 +151,7 @@ Set via environment (or `.env`). See [`.env.example`](.env.example).
 | `OPERATOR_NAME` / `OPERATOR_EMAIL` | no | — | Shown on the landing page. |
 | `OPERATOR_URL` | no | — | Homepage the operator name links to (footer, trust notes). Unset → plain text. |
 | `WHOOP_CLIENT_ID` / `WHOOP_CLIENT_SECRET` | no | — | Credentials of your WHOOP developer app (see WHOOP connector setup); both unset ⇒ the whoop connector is disabled. |
+| `ASANA_MCP_CLIENT_ID` / `ASANA_MCP_CLIENT_SECRET` / `ASANA_MCP_ANDRES_KEY` | no | — | Set all three to enable the separate Asana External MCP resource. Generate unique random values; store them only in the deployment secret manager. The client ID is shown in Asana; the two secrets are not. See [Asana MCP access](docs/ASANA_MCP_ACCESS_SCOPE.md). |
 | `WHOOP_API_BASE` | no | `https://api.prod.whoop.com` | WHOOP API origin; override only for testing. |
 | `BACKUP_S3_ENDPOINT` / `BACKUP_S3_BUCKET` / `BACKUP_S3_ACCESS_KEY` / `BACKUP_S3_SECRET_KEY` | no | — | S3-compatible bucket for off-box DB backups (see Backups). Backups are disabled unless all four are set. |
 | `BACKUP_S3_REGION` | no | `auto` | SigV4 region of the bucket. |

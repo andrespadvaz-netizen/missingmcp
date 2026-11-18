@@ -25,4 +25,7 @@ def build_adapters(config) -> dict:
         from .metis import MetisAdapter, MetisChatGPTAdapter
         adapters["metis"] = MetisAdapter(config)
         adapters["metis-chatgpt"] = MetisChatGPTAdapter(config, shared=adapters["metis"])
+    if config.asana_mcp_client_id:
+        from .metis_asana import MetisAsanaAdapter
+        adapters["metis-asana"] = MetisAsanaAdapter(config)
     return adapters

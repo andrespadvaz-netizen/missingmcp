@@ -1,0 +1,13 @@
+<div class="auth">
+  <h1>Conectar Metis para Asana</h1>
+  <p class="sub">Acceso individual de Andrés a auditorías de lectura de Shokko, .Final_Final y Venture Quest.</p>
+  <div class="note">El agente solo puede enviar a Metis el texto que incluya en cada solicitud.
+    No obtiene acceso a conversaciones privadas ni puede escribir mediante este conector.
+    La respuesta y el recibo se guardan cifrados. La conexión dura 30 días.</div>
+  {ERROR}
+  <form method="post" action="{AUTHORIZE_ACTION}">
+    {OAUTH_FIELDS}
+    <label>Clave individual de conexión<input name="metis_key" type="password" required autocomplete="off"></label>
+    <button class="btn" type="submit">Conectar</button>
+  </form>
+</div>

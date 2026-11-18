@@ -337,14 +337,41 @@ def create_client(conn, client_id, client_secret_hash, redirect_uris: list[str],
     conn.commit()
 
 
+def provision_static_client(conn, client_id: str, secret_hash: str,
+                            redirect_uri: str, adapter: str) -> None:
+    """Install one pinned confidential client; never rebind another adapter."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = conn.execute("SELECT adapter,client_secret_hash,redirect_uris FROM oauth_clients "
+                           "WHERE client_id=?", (client_id,)).fetchone()
+        if row is not None and row["adapter"] != adapter:
+            raise ValueError("Static OAuth client ID collides with another adapter")
+        uris = json.dumps([redirect_uri])
+        if row is None:
+            conn.execute("INSERT INTO oauth_clients (client_id,adapter,client_secret_hash,redirect_uris,client_name) "
+                         "VALUES (?,?,?,?,?)", (client_id, adapter, secret_hash, uris, "Asana External MCP"))
+        elif row["client_secret_hash"] != secret_hash or row["redirect_uris"] != uris:
+            # A rotation or callback change invalidates prior grants for this
+            # resource only. Existing Metis/Claude clients are unaffected.
+            conn.execute("DELETE FROM access_tokens WHERE adapter=? AND client_id=?", (adapter, client_id))
+            conn.execute("DELETE FROM oauth_codes WHERE adapter=? AND client_id=?", (adapter, client_id))
+            conn.execute("UPDATE oauth_clients SET client_secret_hash=?,redirect_uris=? WHERE client_id=?",
+                         (secret_hash, uris, client_id))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def get_client(conn, client_id) -> dict | None:
     row = conn.execute(
-        "SELECT client_secret_hash, redirect_uris FROM oauth_clients WHERE client_id=?",
+        "SELECT adapter, client_secret_hash, redirect_uris FROM oauth_clients WHERE client_id=?",
         (client_id,),
     ).fetchone()
     if row is None:
         return None
     return {
+        "adapter": row["adapter"],
         "client_secret_hash": row["client_secret_hash"],
         "redirect_uris": json.loads(row["redirect_uris"]),
     }
@@ -360,6 +387,7 @@ def cleanup_orphan_clients(conn, older_than_seconds: int) -> int:
     connector. Returns rows deleted."""
     cur = conn.execute(
         "DELETE FROM oauth_clients WHERE created_at < datetime('now', ?) "
+        "AND adapter != 'metis-asana' "
         "AND NOT EXISTS (SELECT 1 FROM access_tokens t WHERE t.client_id = oauth_clients.client_id)",
         (f"-{int(older_than_seconds)} seconds",),
     )

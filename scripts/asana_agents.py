@@ -1,0 +1,94 @@
+"""Operator CLI for Asana AI Teammate coordination. Never prints credentials."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+
+from missingmcp.metis.asana_agents import AsanaAgents, AsanaError
+from missingmcp.metis.asana_evaluation import evaluate_and_dispatch
+from missingmcp.metis.asana_dispatch_oauth import AsanaDispatchOAuth, DispatchAuthError
+from missingmcp.config import load_config
+
+
+async def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["discover", "agent", "task", "stories", "assign", "create", "handoff", "evaluate", "reconcile"])
+    parser.add_argument("--agent-gid")
+    parser.add_argument("--task-gid")
+    parser.add_argument("--project-gid")
+    parser.add_argument("--source-task-gid")
+    parser.add_argument("--title")
+    parser.add_argument("--request")
+    parser.add_argument("--idempotency-key")
+    parser.add_argument("--brief-file", help="JSON brief supplied by the authorized Dot")
+    parser.add_argument("--dispatch", action="store_true", help="Create the evaluated handoff")
+    args = parser.parse_args()
+    try:
+        if args.action in {"assign", "create", "handoff"} or args.dispatch:
+            raise ValueError("shared_quota_unavailable")
+        allowed = json.loads(os.environ["ASANA_AGENT_PROJECTS_JSON"])
+        dispatch = args.action in {"assign", "create", "handoff", "evaluate", "reconcile"}
+        allowed_agents = json.loads(os.environ["ASANA_AGENT_GIDS_JSON"]) if dispatch else {}
+        owners = json.loads(os.environ["ASANA_DISPATCH_OWNER_GIDS_JSON"]) if dispatch else {}
+        cross_context = (json.loads(os.environ.get(
+            "ASANA_CROSS_CONTEXT_AGENT_GIDS_JSON", "[]")) if dispatch else [])
+        bearer = os.environ.get("ASANA_ACCESS_TOKEN")
+        if dispatch and bearer:
+            raise ValueError("writes_require_individual_oauth_grant")
+        if not bearer:
+            bearer = await AsanaDispatchOAuth(load_config()).access_token()
+        client = AsanaAgents(bearer,
+                             os.environ["ASANA_WORKSPACE_GID"], allowed,
+                             allowed_agent_gids=allowed_agents,
+                             expected_project_owner_gids=owners,
+                             cross_context_agent_gids=cross_context,
+                             ledger_path=os.environ.get("ASANA_DISPATCH_LEDGER"),
+                             handoff_ledger_path=os.environ.get("ASANA_HANDOFF_LEDGER"))
+        if args.action == "discover":
+            value = await client.discover()
+        elif args.action == "agent":
+            value = await client.agent(args.agent_gid)
+        elif args.action == "task":
+            value = await client.task(args.task_gid)
+        elif args.action == "stories":
+            value = await client.stories(args.task_gid)
+        elif args.action == "assign":
+            value = await client.assign_dedicated_task(
+                args.task_gid, args.agent_gid, args.project_gid)
+        elif args.action == "evaluate":
+            if not args.brief_file or not args.source_task_gid or not args.project_gid:
+                raise ValueError("evaluate_requires_brief_source_and_project")
+            with open(args.brief_file, encoding="utf-8") as file:
+                brief = json.load(file)
+            profiles = json.loads(os.environ.get("ASANA_AGENT_PROFILES_JSON", "{}"))
+            decision, task = await evaluate_and_dispatch(
+                client, source_task_gid=args.source_task_gid,
+                project_gid=args.project_gid, brief=brief, agents=profiles,
+                dispatch=args.dispatch)
+            value = {"decision": vars(decision), "created_task_gid": task["gid"] if task else None}
+        elif args.action == "reconcile":
+            value = await client.reconcile_handoff(
+                args.idempotency_key, args.project_gid, args.agent_gid)
+        elif args.action == "handoff":
+            value = await client.create_handoff_task(
+                source_task_gid=args.source_task_gid, project_gid=args.project_gid,
+                agent_gid=args.agent_gid, title=args.title, request=args.request,
+                idempotency_key=args.idempotency_key)
+        else:
+            value = await client.create_dedicated_task(
+                source_task_gid=args.source_task_gid, project_gid=args.project_gid,
+                agent_gid=args.agent_gid, title=args.title, request=args.request,
+                idempotency_key=args.idempotency_key)
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+    except (AsanaError, DispatchAuthError, ValueError, KeyError) as exc:
+        # Never print the bearer or raw upstream response, including on errors.
+        print(f"Asana coordination failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))
