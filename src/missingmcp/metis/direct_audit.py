@@ -99,8 +99,24 @@ class DirectAudit:
         })
         blocks = data.get("content", [])
         answer = "\n".join(x.get("text", "") for x in blocks if isinstance(x, dict) and x.get("type") == "text").strip()
-        if not answer:
-            raise DirectAuditError("EMPTY_PROVIDER_RESPONSE", False, data.get("id") or request_id)
+        reason = data.get("stop_reason")
+        # This path sends no tools or stop sequences: only end_turn proves a
+        # finished answer. Never report truncated text as a completed audit.
+        if not answer or reason != "end_turn":
+            code = (
+                "OUTPUT_TOKEN_LIMIT" if reason == "max_tokens" else
+                "PROVIDER_CONTEXT_LIMIT" if reason == "model_context_window_exceeded" else
+                "PROVIDER_REFUSAL" if reason == "refusal" else
+                "PROVIDER_NONTERMINAL" if reason != "end_turn" else
+                "EMPTY_PROVIDER_RESPONSE"
+            )
+            raise DirectAuditError(
+                code, False, data.get("id") or request_id,
+                usage=data.get("usage") if isinstance(data.get("usage"), dict) else None,
+                model=data.get("model"),
+                provider_status="completed" if reason == "end_turn" else "incomplete",
+                incomplete_reason=reason if reason != "end_turn" else None,
+            )
         return answer, data.get("usage", {}), data.get("model", body["model"]), data.get("id") or request_id
 
     async def _openai(self, request, context, *, max_output_tokens=8192):

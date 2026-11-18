@@ -51,7 +51,7 @@ async def test_direct_audit_calls_opposite_provider_and_returns_terminal(monkeyp
 
     async def fake_post(url, body, headers):
         calls.append((url, body, headers))
-        return ({'id': 'msg-1', 'model': 'claude-sonnet-5',
+        return ({'id': 'msg-1', 'model': 'claude-sonnet-5', 'stop_reason': 'end_turn',
                  'content': [{'type': 'text', 'text': 'Auditoría completa'}],
                  'usage': {'input_tokens': 10, 'output_tokens': 5}}, 'req-1')
 
