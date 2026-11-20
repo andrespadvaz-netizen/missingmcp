@@ -215,11 +215,24 @@ def _read_batch_samples(repo: HealthOSRepository, batch_key: str) -> dict[int, S
 
 
 class RequestBatchSamples:
-    """One-request parse reuse; any intervening write aborts evidence assembly."""
+    """Bounded per-request parse reuse; intervening writes still abort the report."""
+
+    _MAX_BATCHES = 8
+
     def __init__(self, repo: HealthOSRepository):
         self.conn = repo.conn
         self.epoch = self._epoch()
         self.samples: dict[str, dict[int, Sample]] = {}
+
+    def get(self, repo: HealthOSRepository, batch_key: str) -> dict[int, Sample]:
+        # Insertion order is LRU order. Empty/missing batches are cached too.
+        samples = self.samples.pop(batch_key, None)
+        if samples is None:
+            if len(self.samples) >= self._MAX_BATCHES:
+                del self.samples[next(iter(self.samples))]
+            samples = _read_batch_samples(repo, batch_key)
+        self.samples[batch_key] = samples
+        return samples
 
     def _epoch(self):
         return (self.conn.execute("PRAGMA data_version").fetchone()[0],
@@ -250,15 +263,19 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime, *,
         "WHERE r.disposition='accepted' AND r.metric='sleep_duration'").fetchall()
     if batch_samples is not None:
         batch_samples.check(repo)
-    parsed: dict[str, dict[int, Sample]] = batch_samples.samples if batch_samples is not None else {}
+    parsed: dict[str, dict[int, Sample]] = {}
     segments: list[Sample] = []
     for row in rows:
         if row["core_event_key"] not in health._sleep_series_keys:
             continue
         batch_key = row["batch_key"]
-        if batch_key not in parsed:
-            parsed[batch_key] = _read_batch_samples(repo, batch_key)
-        sample = parsed[batch_key].get(row["record_index"])
+        if batch_samples is None:
+            if batch_key not in parsed:
+                parsed[batch_key] = _read_batch_samples(repo, batch_key)
+            samples = parsed[batch_key]
+        else:
+            samples = batch_samples.get(repo, batch_key)
+        sample = samples.get(row["record_index"])
         if (sample is None or sample.sleep_stage not in {"core", "deep", "rem"}
                 or sample.start_at < repo.sleep_series_start
                 or _fingerprint_token(repo, sample) != row["fingerprint"]
@@ -343,7 +360,7 @@ def accepted_watch_identity_by_key(
         f"WHERE r.disposition='accepted' AND r.metric IN ({placeholders})", metrics)
     if batch_samples is not None:
         batch_samples.check(repo)
-    parsed: dict[str, dict[int, Sample]] = batch_samples.samples if batch_samples is not None else {}
+    parsed: dict[str, dict[int, Sample]] = {}
     identities: dict[str, tuple[str, ...] | None] = {}
     for row in rows:
         key = row["core_event_key"]
@@ -351,9 +368,13 @@ def accepted_watch_identity_by_key(
         if item is None or not health._current_evidence(item) or item.metric != row["metric"]:
             continue
         batch_key = row["batch_key"]
-        if batch_key not in parsed:
-            parsed[batch_key] = _read_batch_samples(repo, batch_key)
-        sample = parsed[batch_key].get(row["record_index"])
+        if batch_samples is None:
+            if batch_key not in parsed:
+                parsed[batch_key] = _read_batch_samples(repo, batch_key)
+            samples = parsed[batch_key]
+        else:
+            samples = batch_samples.get(repo, batch_key)
+        sample = samples.get(row["record_index"])
         match = (_watch_match(sample, approved_watch, derived_watch)
                  if sample is not None else None)
         if (sample is None or sample.metric != row["metric"] or match is None
