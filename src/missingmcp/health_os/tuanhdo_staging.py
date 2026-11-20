@@ -260,7 +260,7 @@ def _linked_sleep_segments(repo: HealthOSRepository, now: datetime, *,
         "JOIN health_os_tuanhdo_promotion_links l "
         "ON l.batch_key=r.batch_key AND l.record_index=r.record_index "
         "JOIN health_os_tuanhdo_batches b ON b.batch_key=r.batch_key "
-        "WHERE r.disposition='accepted' AND r.metric='sleep_duration'").fetchall()
+        "WHERE r.disposition='accepted' AND r.metric='sleep_duration'")
     if batch_samples is not None:
         batch_samples.check(repo)
     parsed: dict[str, dict[int, Sample]] = {}
